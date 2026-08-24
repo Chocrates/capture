@@ -1,0 +1,46 @@
+# cargo-deny — the third layer of the purity boundary (task 1.4).
+#
+# no_std makes the mistake unnameable; clippy catches crate-level reaches for a
+# clock or entropy; this stops the offending crates entering brain-core's
+# dependency tree in the first place.
+#
+# Verify with:  cargo tree -p brain-core -e normal
+# Nothing impure should appear.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+# These are legitimate dependencies of brain-store and the applications. They
+# must never become dependencies of brain-core.
+[[bans.deny]]
+name = "tokio"
+wrappers = []
+
+[[bans.deny]]
+name = "rusqlite"
+wrappers = []
+
+[[bans.deny]]
+name = "getrandom"
+wrappers = []
+
+[[bans.deny]]
+name = "jiff"
+wrappers = []
+
+[advisories]
+# serde_cbor is unmaintained and was explicitly rejected for the frozen encoding
+# (DESIGN.md §8.3). Fail loudly if anything pulls it back in transitively.
+yanked = "deny"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "BlueOak-1.0.0",
+]

@@ -1,0 +1,56 @@
+schema: spec-driven
+
+context: |
+  A personal knowledge system (notes, calendar, tasks, habits) for a single user across
+  n self-owned devices. Peer-to-peer sync over the LAN, no cloud, no server, no account.
+  Every device holds the complete dataset.
+
+  AUTHORITATIVE DESIGN: `DESIGN.md` at the repo root (~3600 lines) is the design of record.
+  It has survived three rounds of adversarial review and records *why* decisions were made,
+  including several where an earlier draft was wrong. Specs must not contradict it; where a
+  spec needs to differ, say so explicitly in the proposal.
+
+  EVIDENCE BASE: `EVIDENCE.md` records the psychology/neuroscience literature the design
+  claims to derive from, its limits, and — in §6 — the strongest arguments against building
+  this at all. Sourcing is web-search summaries, not full-text reads; treat effect sizes as
+  reported rather than verified.
+
+  Tech stack: Rust. One cargo workspace, one shared core, thin platform shells.
+    crates/  brain-core (I/O-free, async-free), brain-store (SQLite), brain-time (jiff),
+             brain-parse, brain-sync, brain-engine, brain-ffi (uniffi)
+    apps/    brain-cli (`brain`), brain-capture (egui overlay), brain-desktop (Tauri)
+    android/ Kotlin + Compose over the same core
+
+  Key architectural invariants that specs must preserve:
+  - The event log is append-only and immutable. State is a fold over it.
+  - `id = blake3(canonical header ‖ bhash)`; `bhash = blake3(canonical body)`; every body
+    begins with a 16-byte random nonce. `sig` is Ed25519 over `id`.
+  - Origin identity is `dev = H(pubkey ‖ incarnation)`, incarnation a random 128-bit nonce.
+  - `heads[dev]` is the highest CONTIGUOUS seq, never a maximum.
+  - Unauthenticated events never occupy a `(dev, seq)` position and never advance `heads`.
+  - The fold takes the event set and nothing else — never the wall clock, never the roster
+    as it stands right now.
+  - `state.db` is disposable and rebuilt by re-folding. There is no migration code, ever.
+  - Data loss is the cardinal sin. Nothing is ever silently wrong.
+
+  Design rules with a human cost behind them (see DESIGN.md §0):
+  - Capture takes one gesture and zero decisions, and never blocks on network or disk.
+  - Nothing scores the user. No streaks, no accuracy, no graded review outcomes.
+  - Recurring misses do not stack unless a series opts into `carries_forward`.
+  - Redaction is the only irreversible operation and is scope-capped and cancellable.
+
+  Style: prose in specs should be plain and direct. State what the system does. Where a
+  requirement exists because a naive alternative is harmful, say which alternative and why.
+
+rules:
+  proposal:
+    - Cite the DESIGN.md sections a capability derives from.
+    - Include a Non-goals section naming what is deliberately deferred to a later milestone.
+  specs:
+    - Requirements use SHALL. Every requirement needs at least one scenario.
+    - Where DESIGN.md records that an earlier approach was wrong, encode the correct
+      behaviour as the requirement and note the rejected alternative in the design doc,
+      not in the spec.
+  tasks:
+    - Order tasks so something runnable exists early; the durable layer before the surfaces.
+    - Mark tasks that must be property-tested rather than example-tested.

@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/brain-core",
+    "crates/brain-store",
+    "apps/brain-cli",
+]
+
+# apps/brain-capture (egui overlay) joins at task group 8.
+# apps/brain-desktop (Tauri) joins at task group 12 — needs webkit2gtk-4.1.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# --- frozen primitives (group 2). Versions pinned: the encoding is permanent. ---
+minicbor = { version = "2.3.0", default-features = false, features = ["alloc", "derive"] }
+blake3 = { version = "1", default-features = false }
+ed25519-dalek = { version = "2", default-features = false }
+
+# Slug derivation (task 2.11). Pinned exactly: their Unicode tables are part of
+# the frozen algorithm — a table change would silently alter existing slugs on
+# the next rebuild and break every hand-written link.
+unicode-normalization = { version = "=0.1.25", default-features = false }
+unicode-segmentation = { version = "=1.13.3", default-features = false }
+any_ascii = { version = "=0.3.3", default-features = false }
+
+# --- storage (group 5) ---
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Advisory locking (task 5.14). The kernel releases a flock when the holding
+# process dies, which a pid file cannot do — a crashed writer would otherwise
+# leave the store locked with nothing able to tell a stale lock from a live one.
+rustix = { version = "1", features = ["fs", "process"] }
+
+# --- host-side only ---
+getrandom = "0.3"
+jiff = "0.2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+# --- dev ---
+proptest = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

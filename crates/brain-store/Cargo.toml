@@ -1,0 +1,25 @@
+[package]
+name = "brain-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# brain-store is the boundary crate: it owns SQLite, entropy, the clock and the
+# filesystem, and it hands brain-core values rather than handles.
+
+[dependencies]
+brain-core = { path = "../brain-core", features = ["std"] }
+ed25519-dalek = { workspace = true, features = ["std", "rand_core"] }
+minicbor = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true }
+getrandom = { workspace = true }
+jiff = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+brain-core = { path = "../brain-core", features = ["std", "testing"] }

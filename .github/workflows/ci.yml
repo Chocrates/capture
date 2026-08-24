@@ -1,0 +1,76 @@
+name: ci
+
+# The cross-platform claims in this project are not verifiable from one machine.
+# "The same logical event encodes identically on two platforms" is a statement
+# about two platforms, and the golden vectors (task 2.10) are only enforcement if
+# something actually runs them somewhere else.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo test --workspace
+
+  purity:
+    # The three-layer boundary from DESIGN.md D12. no_std makes a clock
+    # unnameable; these check the layers the type system does not cover.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: brain-core builds without std
+        run: cargo build -p brain-core
+
+      - name: brain-core dependency tree is clean
+        run: |
+          tree=$(cargo tree -p brain-core -e normal)
+          fail=0
+          for crate in tokio rusqlite getrandom jiff serde_cbor; do
+            if grep -qE "[[:space:]]$crate v" <<<"$tree"; then
+              echo "::error::$crate must not be a dependency of brain-core"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: a clock cannot be reached from brain-core
+        # Guards the property directly rather than trusting that no_std stays on.
+        run: |
+          cp crates/brain-core/src/lib.rs /tmp/lib.rs.bak
+          echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' \
+            >> crates/brain-core/src/lib.rs
+          if cargo build -p brain-core 2>/dev/null; then
+            echo "::error::brain-core compiled a std::time reference; the purity boundary is off"
+            cp /tmp/lib.rs.bak crates/brain-core/src/lib.rs
+            exit 1
+          fi
+          cp /tmp/lib.rs.bak crates/brain-core/src/lib.rs
+          echo "purity boundary holds"
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

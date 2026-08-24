@@ -1,0 +1,21 @@
+[package]
+name = "brain-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[dependencies]
+brain-core = { path = "../../crates/brain-core", features = ["std"] }
+brain-store = { path = "../../crates/brain-store" }
+clap = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["std"] }
+jiff = { workspace = true }
+minicbor = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
