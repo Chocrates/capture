@@ -31,6 +31,22 @@ jobs:
       - run: cargo clippy --all-targets --all-features
       - run: cargo test --workspace
 
+  terminal:
+    # The capture chord's claim — that the raw line is read before the shell
+    # parses it — is only checkable against a real interactive shell on a real
+    # terminal. Linux only: the assertion is about bash and zsh behaviour, and
+    # macOS ships bash 3.2, which would be testing a different program.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y zsh
+      - run: cargo test -p brain-cli --test pty -- --ignored --test-threads=1
+      - run: cargo test -p brain-cli --test tamper -- --ignored --test-threads=1
+      - run: cargo test -p brain-cli --test roundtrip -- --ignored --test-threads=1
+      - run: cargo test -p brain-cli --test spool -- --ignored --test-threads=1
+
   purity:
     # The three-layer boundary from DESIGN.md D12. no_std makes a clock
     # unnameable; these check the layers the type system does not cover.
