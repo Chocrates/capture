@@ -1,0 +1,22 @@
+[package]
+name = "brain-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The overlay. Owns the capture gesture, the pre-warmed window, and the
+# platform-specific business of registering a global hotkey.
+
+[[bin]]
+name = "brain-capture"
+path = "src/main.rs"
+
+[dependencies]
+brain-core = { path = "../../crates/brain-core", features = ["std"] }
+brain-store = { path = "../../crates/brain-store" }
+eframe = { workspace = true }
+jiff = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

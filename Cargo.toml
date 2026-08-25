@@ -4,9 +4,9 @@ members = [
     "crates/brain-core",
     "crates/brain-store",
     "apps/brain-cli",
+    "apps/brain-capture",
 ]
 
-# apps/brain-capture (egui overlay) joins at task group 8.
 # apps/brain-desktop (Tauri) joins at task group 12 — needs webkit2gtk-4.1.
 
 [workspace.package]
@@ -35,6 +35,12 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # process dies, which a pid file cannot do — a crashed writer would otherwise
 # leave the store locked with nothing able to tell a stale lock from a live one.
 rustix = { version = "1", features = ["fs", "process"] }
+
+# --- the overlay (group 8) ---
+# Default features are trimmed: the overlay is a single text field that must
+# appear instantly, so it takes the glow renderer and skips persistence,
+# accesskit and the default icon loaders.
+eframe = { version = "0.36", default-features = false, features = ["glow", "wayland", "x11"] }
 
 # --- host-side only ---
 getrandom = "0.3"
