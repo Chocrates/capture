@@ -64,12 +64,21 @@ impl Kind {
     /// "did I choose this, or is it just the default?" stays answerable.
     pub const SETTING: Kind = Kind(14);
 
+    /// Clear a note's credential flag.
+    ///
+    /// The flag is derived from the capture text by a predicate that
+    /// deliberately over-flags, and it keeps the note out of exports. An
+    /// over-flagged note would otherwise be quietly missing from every backup,
+    /// so clearing the flag has to be one gesture — and, being a claim about a
+    /// note that every replica must agree on, an event rather than local state.
+    pub const UNFLAG: Kind = Kind(15);
+
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=14).contains(&self.0)
+        (1..=15).contains(&self.0)
     }
 }
 

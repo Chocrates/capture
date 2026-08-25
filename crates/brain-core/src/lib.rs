@@ -32,12 +32,24 @@
 
 extern crate alloc;
 
+/// How long a redaction waits before it destroys anything.
+///
+/// The whole point of the delay: redaction is the only irreversible operation
+/// in the system, and the most likely moment to fire one at the wrong note is
+/// the moment you are certain. A window costs nothing when the redaction was
+/// intended and is the only recovery when it was not.
+///
+/// Measured from the redaction's own timestamp, so every replica destroys at
+/// the same instant rather than each starting its own clock on arrival.
+pub const REDACT_WINDOW_MS: u64 = 30 * 60 * 1000;
+
 pub mod body;
 pub mod envelope;
 pub mod event;
 pub mod fold;
 pub mod hlc;
 pub mod id;
+pub mod link;
 pub mod roster;
 pub mod slug;
 

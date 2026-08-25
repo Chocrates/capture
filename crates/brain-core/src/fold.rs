@@ -37,11 +37,15 @@ use alloc::vec::Vec;
 use minicbor::{Decode, Encode};
 
 use crate::{
-    body::{CaptureBody, EditBody, MuteBody, MuteScope, RedactBody, TagBody, UntagBody},
+    body::{
+        AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, PinBody, RedactBody,
+        RedactCancelBody, ResolveBody, SettingBody, TagBody, UntagBody,
+    },
     envelope::Envelope,
     event::Kind,
     hlc::Hlc,
-    id::EventId,
+    id::{Dev, EventId},
+    link::{self, Link},
     slug,
 };
 
@@ -82,15 +86,76 @@ pub struct Divergence {
     pub other: EventId,
 }
 
+/// A preference someone chose, and who chose it.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct Setting {
+    /// The chosen value. `None` means the user explicitly reverted to the
+    /// default, which is a different act from never having chosen.
+    #[n(0)]
+    pub value: Option<String>,
+    /// The origin that made the choice.
+    #[n(1)]
+    pub set_by: Dev,
+    /// When, so a later choice wins.
+    #[n(2)]
+    pub at: Hlc,
+}
+
+/// A redaction as the fold collected it.
+struct Ordered {
+    event: EventId,
+    at: Hlc,
+    window_ms: u64,
+    cancelled: bool,
+}
+
+/// A redaction that has been ordered but not yet carried out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct Pending {
+    /// The redaction event.
+    #[n(0)]
+    pub redact: EventId,
+    /// When it becomes due, in milliseconds.
+    ///
+    /// Computed from the **redaction's own timestamp**, never from when it
+    /// arrived here. Taking it from local receipt would hand every replica its
+    /// own fresh window, so a redaction issued a month ago would wait another
+    /// full window on a device that has been switched off — and the longer a
+    /// replica was away, the longer the content it was supposed to destroy
+    /// would survive.
+    #[n(1)]
+    pub execute_after: u64,
+}
+
 /// A note's current state.
 #[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
 pub struct Note {
     /// The note's identity — its first event.
     #[n(0)]
     pub tgt: EventId,
-    /// Human-readable name.
+    /// Derived name. Immutable, so links written against it never move.
     #[n(1)]
     pub slug: String,
+    /// A chosen name, sharing one namespace with slugs.
+    #[n(14)]
+    pub alias: Option<String>,
+    /// Whether the capture looked like it contained a credential.
+    ///
+    /// Decided once, from the capture text, by a predicate tuned to over-flag:
+    /// a false positive costs a less readable name and a note left out of
+    /// backups until someone says otherwise, while a false negative writes
+    /// credential-shaped words into every note that links here, with no cleanup
+    /// path. Cleared by an `unflag` event.
+    #[n(17)]
+    pub credential: bool,
+
+    /// When that name was assigned.
+    ///
+    /// Needed so an incremental fold can seed the name correctly: a link
+    /// written before the alias existed must not resolve through it, and
+    /// without the moment of assignment there is nothing to compare against.
+    #[n(16)]
+    pub alias_at: Option<Hlc>,
     /// Current text. Absent once redacted.
     #[n(2)]
     pub text: Option<String>,
@@ -109,21 +174,45 @@ pub struct Note {
     /// Current tags.
     #[n(7)]
     pub tags: BTreeSet<String>,
+    /// The `tag` events still standing behind each tag.
+    ///
+    /// Kept because an `untag` retracts *specific additions*, not a word. A
+    /// device that removed a tag it could see must not also remove one added
+    /// elsewhere that it never saw, and the only way to express that is to name
+    /// the additions being retracted.
+    #[n(15)]
+    pub tag_adds: Vec<(String, EventId)>,
     /// Whether it is pinned.
     #[n(8)]
     pub pinned: bool,
     /// Suppressed from surfacing until this time. Zero means indefinitely.
     #[n(9)]
     pub muted_until: Option<u64>,
-    /// When it was redacted, if it was.
+    /// When its content was actually destroyed, if it has been.
+    ///
+    /// Set from the *absence of the body*, not from the existence of a
+    /// redaction event. The two are different facts and the gap between them is
+    /// the cancellation window: a redaction that has been issued but not yet
+    /// carried out leaves the note perfectly readable, which is what makes
+    /// cancelling it meaningful.
     #[n(10)]
     pub redacted_at: Option<Hlc>,
+    /// A redaction that has been issued and not yet carried out.
+    ///
+    /// Carries the event that ordered it and the moment it becomes due, so a
+    /// view can show a countdown and a cancellation has something to name.
+    #[n(18)]
+    pub redaction_pending: Option<Pending>,
     /// Independent versions the fold could not order by causality.
     #[n(11)]
     pub divergences: Vec<Divergence>,
     /// Every version, including excluded ones.
     #[n(12)]
     pub versions: Vec<Version>,
+    /// Links written in the version currently shown, each carrying the name as
+    /// written and what it meant when it was written.
+    #[n(13)]
+    pub links: Vec<Link>,
 }
 
 impl Note {
@@ -156,6 +245,11 @@ pub struct Projection {
     /// Events held back, and why.
     #[n(1)]
     pub held: BTreeMap<EventId, Held>,
+    /// Preferences the user has actually chosen. A key that is absent has
+    /// never been chosen and takes its compiled-in default — which is exactly
+    /// the distinction this map exists to preserve.
+    #[n(2)]
+    pub settings: BTreeMap<String, Setting>,
 }
 
 impl Projection {
@@ -173,8 +267,33 @@ struct LiveTag {
     tag: String,
 }
 
+/// A name, what it denotes, and when that note came into being.
+///
+/// The timestamp is not decoration. Links resolve against the names that
+/// existed **when the link was written**, so a name is only a candidate if its
+/// note is older than the event doing the linking.
+pub type Names = BTreeMap<String, (EventId, Hlc)>;
+
 /// Compute state from a set of events.
 pub fn fold(events: &[Envelope]) -> Projection {
+    fold_seeded(events, &Names::new())
+}
+
+/// Fold a subset of the log, given the names the rest of it already
+/// established.
+///
+/// An incremental update folds only the events belonging to the notes that
+/// changed. That is enough for text, tags and divergence, all of which depend
+/// on a single note's own history — and **not** enough for links, which resolve
+/// against every note that existed at the time. A partial fold with no seed
+/// resolves every link to nothing, silently, and the note still renders
+/// perfectly otherwise.
+///
+/// So the caller supplies what it already knows. Seeding with names created
+/// *after* the linking event would be equally wrong in the other direction —
+/// a link would resolve to a note its author could not have seen — which is why
+/// each seeded name carries the moment it started existing.
+pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
     // Sort by timestamp, not arrival. Everything downstream reads this order,
     // so the result cannot depend on how the events turned up.
     let mut ordered: Vec<&Envelope> = events.iter().collect();
@@ -184,21 +303,57 @@ pub fn fold(events: &[Envelope]) -> Projection {
     let mut tags: BTreeMap<EventId, Vec<LiveTag>> = BTreeMap::new();
     let mut texts: BTreeMap<EventId, String> = BTreeMap::new();
 
+    // Names as they stood at each point in the fold, and the links each version
+    // resolved against them. Both are built during the pass rather than after
+    // it, because a link records what a name meant *when it was written* — and
+    // once the pass is over, that information is gone.
+    let mut names: Names = known.clone();
+    let mut version_links: BTreeMap<EventId, Vec<Link>> = BTreeMap::new();
+
+    // Divergences the user has already looked at. Collected during the pass and
+    // applied after `resolve`, because a divergence does not exist until every
+    // version is known.
+    let mut dismissed: BTreeSet<EventId> = BTreeSet::new();
+    let mut mutes: Vec<(MuteScope, Option<u64>)> = Vec::new();
+
     // Redactions are collected first and applied last, because a redaction must
     // take effect whether it arrives before or after the thing it destroys. If
     // it were applied in timestamp order, an event that turned up afterwards
     // would simply be readable again — and "destroyed" would mean "destroyed
     // unless something is slow", which is not a guarantee.
-    let mut redacted: BTreeMap<EventId, Hlc> = BTreeMap::new();
+    let mut redacted: BTreeMap<EventId, Ordered> = BTreeMap::new();
+    let mut cancelled: BTreeSet<EventId> = BTreeSet::new();
+
     for e in &ordered {
-        if e.header.kind == Kind::REDACT
-            && let Some(body) = &e.body
-            && let Ok(r) = minicbor::decode::<RedactBody>(body)
-        {
-            for t in r.targets.iter().take(crate::body::REDACT_TARGET_CAP) {
-                redacted.entry(*t).or_insert(e.header.hlc);
+        match e.header.kind {
+            Kind::REDACT => {
+                let Some(body) = &e.body else { continue };
+                let Ok(r) = minicbor::decode::<RedactBody>(body) else {
+                    continue;
+                };
+                // Capped. An uncapped redaction lets one loop destroy the whole
+                // archive everywhere within a single push round.
+                for t in r.targets.iter().take(crate::body::REDACT_TARGET_CAP) {
+                    redacted.entry(*t).or_insert(Ordered {
+                        event: e.header.id(),
+                        at: e.header.hlc,
+                        window_ms: crate::REDACT_WINDOW_MS,
+                        cancelled: false,
+                    });
+                }
             }
+            Kind::REDACT_CANCEL => {
+                let Some(body) = &e.body else { continue };
+                if let Ok(c) = minicbor::decode::<RedactCancelBody>(body) {
+                    cancelled.insert(c.redact);
+                }
+            }
+            _ => {}
         }
+    }
+
+    for r in redacted.values_mut() {
+        r.cancelled = cancelled.contains(&r.event);
     }
 
     for e in &ordered {
@@ -208,17 +363,21 @@ pub fn fold(events: &[Envelope]) -> Projection {
         }
 
         match e.header.kind {
-            Kind::CAPTURE => apply_capture(&mut proj, e),
-            Kind::EDIT => apply_edit(&mut proj, &mut texts, e),
+            Kind::CAPTURE => apply_capture(&mut proj, &mut names, &mut version_links, e),
+            Kind::EDIT => apply_edit(&mut proj, &mut texts, &names, &mut version_links, e),
             Kind::TAG => apply_tag(&mut proj, &mut tags, e),
             Kind::UNTAG => apply_untag(&mut proj, &mut tags, e),
             Kind::PIN => apply_pin(&mut proj, e),
-            Kind::MUTE => apply_mute(&mut proj, e),
+            Kind::ALIAS => apply_alias(&mut proj, &mut names, e),
+            Kind::UNFLAG => apply_unflag(&mut proj, e),
+            Kind::RESOLVE => collect_resolve(&mut proj, &mut dismissed, e),
+            Kind::MUTE => collect_mute(&mut proj, &mut mutes, e),
             Kind::TOMBSTONE => apply_tombstone(&mut proj, e),
             // Membership and settings do not affect note state.
-            Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM | Kind::SETTING => {}
+            Kind::SETTING => apply_setting(&mut proj, e),
+            Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM => {}
             // Handled outside the main pass.
-            Kind::REDACT | Kind::REDACT_CANCEL | Kind::RESOLVE | Kind::ALIAS => {}
+            Kind::REDACT | Kind::REDACT_CANCEL => {}
             _ => {
                 proj.held.insert(e.header.id(), Held::UnknownKind);
             }
@@ -227,26 +386,77 @@ pub fn fold(events: &[Envelope]) -> Projection {
 
     resolve(&mut proj, &texts);
 
-    // Now apply redactions, whatever order they arrived in.
-    for (tgt, at) in &redacted {
-        if let Some(n) = proj.notes.get_mut(tgt) {
-            n.text = None;
-            n.redacted_at = Some(*at);
-            // The name is rebuilt from identity alone. Two jobs: the note stays
-            // reconstructible on every future fold although its text is gone,
-            // and its own name stops carrying the words it was built from.
+    // Mutes last: a rule by tag or by date needs every note to be final before
+    // it can say which ones it covers.
+    apply_mutes(&mut proj, &mutes);
+
+    // A dismissal only clears the versions it named. Sweeping every divergence
+    // would silently discard one that arrived after the user looked.
+    for n in proj.notes.values_mut() {
+        n.divergences.retain(|d| !dismissed.contains(&d.other));
+    }
+
+    // A note's links are the links of the version it is showing. Taking them
+    // from anywhere else would mean a note displaying one text and linking
+    // according to another.
+    for n in proj.notes.values_mut() {
+        n.links = version_links.get(&n.head).cloned().unwrap_or_default();
+    }
+
+    // Redactions, whatever order they arrived in.
+    //
+    // A redaction is retained rather than applied once: it has to destroy
+    // matching events that turn up *after* it, or "destroyed" would mean
+    // "destroyed unless something was slow".
+    for (tgt, r) in &redacted {
+        let Some(n) = proj.notes.get_mut(tgt) else {
+            continue;
+        };
+
+        // Whether the content is gone is a fact about the log, not a decision
+        // taken here: the body either exists or it does not. The fold reports
+        // that fact; the purge is what changes it.
+        if n.text.is_none() {
+            n.redacted_at = Some(r.at);
+            // Rebuilt from identity alone. The note stays reconstructible on
+            // every future fold, and its name stops carrying the words it was
+            // built from — which otherwise propagate into every note linking
+            // here, where no redaction can reach them.
             n.slug = slug::derive_redacted(tgt).text;
+        } else if !r.cancelled {
+            n.redaction_pending = Some(Pending {
+                redact: r.event,
+                execute_after: r.at.wall.saturating_add(r.window_ms),
+            });
         }
     }
 
     proj
 }
 
-fn apply_capture(proj: &mut Projection, e: &Envelope) {
+fn apply_capture(
+    proj: &mut Projection,
+    names: &mut Names,
+    version_links: &mut BTreeMap<EventId, Vec<Link>>,
+    e: &Envelope,
+) {
     let tgt = e.header.tgt.unwrap_or_else(|| e.header.id());
+
+    // Three cases, and only one of them is a fault.
+    //
+    // A capture whose body is **gone** still makes a note. Its content was
+    // destroyed — by a redaction, or stripped on the way into an export — and
+    // the note must survive that, or the archive would lose whole entries every
+    // time the projection was rebuilt rather than losing only their text. A
+    // note that renders as "no readable text" is a fact; a note that silently
+    // stops existing is data loss.
+    //
+    // A body that is present and **unreadable** is different: this build cannot
+    // interpret it, which is a real fault and is held as one.
     let (text, tz) = match e.body.as_ref().map(|b| minicbor::decode::<CaptureBody>(b)) {
         Some(Ok(c)) => (Some(c.text), c.tz),
-        _ => {
+        None => (None, None),
+        Some(Err(_)) => {
             proj.held.insert(e.header.id(), Held::Malformed);
             return;
         }
@@ -255,24 +465,38 @@ fn apply_capture(proj: &mut Projection, e: &Envelope) {
     // The name derives from the capture, which never changes — not from the
     // current text, which does. Otherwise an edit would rename the note and
     // break every link written to it.
+    //
+    // With no text there is nothing to derive from, so the name comes from
+    // identity alone — the same name a redaction leaves behind, and for the
+    // same reason: a name built from destroyed words would still be carrying
+    // them.
     let date = "1970-01-01";
-    let s = slug::derive(text.as_deref().unwrap_or(""), date, &tgt);
+    let s = match text.as_deref() {
+        Some(t) => slug::derive(t, date, &tgt),
+        None => slug::derive_redacted(&tgt),
+    };
 
     proj.notes.insert(
         tgt,
         Note {
             tgt,
             slug: s.text,
+            alias: None,
+            alias_at: None,
+            credential: crate::slug::looks_like_credential(text.as_deref().unwrap_or("")),
             text,
             head: e.header.id(),
             created: e.header.hlc,
             updated: e.header.hlc,
             tz,
             tags: BTreeSet::new(),
+            tag_adds: Vec::new(),
             pinned: false,
             muted_until: None,
             redacted_at: None,
+            redaction_pending: None,
             divergences: Vec::new(),
+            links: Vec::new(),
             versions: alloc::vec![Version {
                 id: e.header.id(),
                 prev: None,
@@ -282,9 +506,40 @@ fn apply_capture(proj: &mut Projection, e: &Envelope) {
             }],
         },
     );
+
+    // Registered before its own links are read, so a note that links itself
+    // resolves rather than dangling.
+    if let Some(n) = proj.notes.get(&tgt) {
+        names.insert(n.slug.clone(), (tgt, e.header.hlc));
+        let text = n.text.clone().unwrap_or_default();
+        version_links.insert(e.header.id(), resolve_links(&text, names, e.header.hlc));
+    }
 }
 
-fn apply_edit(proj: &mut Projection, texts: &mut BTreeMap<EventId, String>, e: &Envelope) {
+/// Read the links out of a text and bind each to what its name meant then.
+///
+/// `at` is the moment the text was written. A name whose note is younger than
+/// that is not a candidate: the author could not have meant it.
+fn resolve_links(text: &str, names: &Names, at: Hlc) -> Vec<Link> {
+    link::extract(text)
+        .into_iter()
+        .map(|name| {
+            let resolved = names
+                .get(&name)
+                .filter(|(_, born)| *born <= at)
+                .map(|(id, _)| *id);
+            Link { name, resolved }
+        })
+        .collect()
+}
+
+fn apply_edit(
+    proj: &mut Projection,
+    texts: &mut BTreeMap<EventId, String>,
+    names: &Names,
+    version_links: &mut BTreeMap<EventId, Vec<Link>>,
+    e: &Envelope,
+) {
     let Some(tgt) = e.header.tgt else {
         proj.held.insert(e.header.id(), Held::NoTarget);
         return;
@@ -315,6 +570,7 @@ fn apply_edit(proj: &mut Projection, texts: &mut BTreeMap<EventId, String>, e: &
         kind: Kind::EDIT,
         excluded: false,
     });
+    version_links.insert(e.header.id(), resolve_links(&text, names, e.header.hlc));
     texts.insert(e.header.id(), text);
 }
 
@@ -423,7 +679,8 @@ fn apply_tag(proj: &mut Projection, tags: &mut BTreeMap<EventId, Vec<LiveTag>>, 
         tag: tag.clone(),
     });
     if let Some(n) = proj.notes.get_mut(&tgt) {
-        n.tags.insert(tag);
+        n.tags.insert(tag.clone());
+        n.tag_adds.push((tag, e.header.id()));
     }
 }
 
@@ -450,30 +707,219 @@ fn apply_untag(proj: &mut Projection, tags: &mut BTreeMap<EventId, Vec<LiveTag>>
 
     if let Some(n) = proj.notes.get_mut(&tgt) {
         n.tags = live.iter().map(|t| t.tag.clone()).collect();
+        n.tag_adds = live.iter().map(|t| (t.tag.clone(), t.add)).collect();
+    }
+}
+
+/// Record a chosen preference.
+///
+/// Last writer wins, and events are already in timestamp order, so the newest
+/// choice is simply the last one applied. A revert is stored as a choice with
+/// no value rather than by deleting the row: "I decided to go back to the
+/// default" and "I never decided" are different facts, and only the second one
+/// should follow a future change to what the default is.
+fn apply_setting(proj: &mut Projection, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(v) = minicbor::decode::<SettingBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    proj.settings.insert(
+        v.key,
+        Setting {
+            value: v.value,
+            set_by: e.header.dev,
+            at: e.header.hlc,
+        },
+    );
+}
+
+/// Clear a note's credential flag.
+///
+/// One direction only. Setting the flag is the predicate's job at capture and
+/// nothing can turn it back on, because a note somebody has already declared
+/// safe should not become unbackupable again on the next rebuild.
+fn apply_unflag(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else {
+        proj.held.insert(e.header.id(), Held::NoTarget);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        n.credential = false;
+    } else {
+        proj.held.insert(e.header.id(), Held::NoTarget);
     }
 }
 
 fn apply_pin(proj: &mut Projection, e: &Envelope) {
-    if let Some(tgt) = e.header.tgt
-        && let Some(n) = proj.notes.get_mut(&tgt)
-    {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(p) = minicbor::decode::<PinBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
         // A plain value with no history to reconcile: the later one wins, and
         // events are already in timestamp order.
-        n.pinned = true;
+        n.pinned = p.pinned;
     }
 }
 
-fn apply_mute(proj: &mut Projection, e: &Envelope) {
+/// Assign or clear a note's chosen name.
+///
+/// Applied here, in the middle of the pass, rather than afterwards. Links
+/// resolve as the pass walks the events, so an alias decided at the end would
+/// be invisible to every link written against it — the note would have the
+/// name and nothing would point at it.
+///
+/// One namespace: a name that is already a slug or another note's alias is
+/// **declined**. Declining rather than overwriting is what makes a name mean
+/// one thing, and doing it in timestamp order means every replica declines the
+/// same assignment.
+fn apply_alias(proj: &mut Projection, names: &mut Names, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else {
+        proj.held.insert(e.header.id(), Held::NoTarget);
+        return;
+    };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(a) = minicbor::decode::<AliasBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if !proj.notes.contains_key(&tgt) {
+        proj.held.insert(e.header.id(), Held::NoTarget);
+        return;
+    }
+
+    // Released first, so a note can be renamed to something and back without
+    // colliding with itself.
+    if let Some(n) = proj.notes.get_mut(&tgt)
+        && let Some(old) = n.alias.take()
+    {
+        n.alias_at = None;
+        names.remove(&old);
+    }
+
+    let Some(name) = a.alias else { return };
+
+    // Taken only if *another* note holds it. Checking mere presence looks
+    // equivalent and is not: an incremental fold is seeded with the names the
+    // projection already has, which includes this note's own alias, so a
+    // presence check makes the note collide with itself and quietly drop the
+    // name every time anything else about it changes.
+    if names.get(&name).is_some_and(|(holder, _)| *holder != tgt) {
+        return;
+    }
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        n.alias = Some(name.clone());
+        n.alias_at = Some(e.header.hlc);
+        names.insert(name, (tgt, e.header.hlc));
+    }
+}
+
+fn collect_resolve(proj: &mut Projection, dismissed: &mut BTreeSet<EventId>, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(r) = minicbor::decode::<ResolveBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    dismissed.extend(r.dismiss);
+}
+
+/// Collect a mute. It is applied once every note is final.
+///
+/// Deferred rather than applied here because a mute by tag or by date has to
+/// know things the pass does not know yet: which notes carry the tag after
+/// every tag and untag, and what day each note belongs to. Applying it as it
+/// arrives would mute whatever happened to exist at that moment and silently
+/// miss anything that qualified later.
+fn collect_mute(proj: &mut Projection, mutes: &mut Vec<(MuteScope, Option<u64>)>, e: &Envelope) {
     let Some(body) = e.body.as_ref() else { return };
     let Ok(m) = minicbor::decode::<MuteBody>(body) else {
         proj.held.insert(e.header.id(), Held::Malformed);
         return;
     };
-    if let MuteScope::Note(tgt) = m.scope
-        && let Some(n) = proj.notes.get_mut(&tgt)
-    {
-        n.muted_until = Some(m.until.unwrap_or(0));
+    mutes.push((m.scope, m.until));
+}
+
+/// Work out which notes are suppressed.
+///
+/// Applied after everything else, in timestamp order, so the newest mute
+/// touching a note wins. A mute is not a property of the note it was written
+/// against — it is a rule, and the notes it covers are whichever ones match
+/// when the question is asked.
+fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>)]) {
+    for (scope, until) in mutes {
+        // Zero means indefinite, which is distinct from absent: a note muted
+        // forever and a note that was never muted look the same otherwise.
+        let value = Some(until.unwrap_or(0));
+
+        match scope {
+            MuteScope::Note(tgt) => {
+                if let Some(n) = proj.notes.get_mut(tgt) {
+                    n.muted_until = value;
+                }
+            }
+            MuteScope::Tag(tag) => {
+                for n in proj.notes.values_mut() {
+                    if n.tags.contains(tag) {
+                        n.muted_until = value;
+                    }
+                }
+            }
+            MuteScope::DateRange(from, to) => {
+                // Floating dates, compared against the day the note was
+                // captured in *its own* timezone. Comparing against the
+                // reader's would move notes in and out of a mute depending on
+                // where they were read.
+                for n in proj.notes.values_mut() {
+                    let day = capture_day(n);
+                    if day.as_str() >= from.as_str() && day.as_str() <= to.as_str() {
+                        n.muted_until = value;
+                    }
+                }
+            }
+        }
     }
+}
+
+/// The UTC calendar day a note was captured on.
+///
+/// **In UTC, not in the note's own timezone**, and that is a real limitation
+/// rather than an oversight. `brain-core` holds no timezone database and must
+/// not — it would be a table that changes under political decisions, hashed
+/// into nothing but reachable from the fold, which has to give the same answer
+/// on every replica forever.
+///
+/// The consequence is bounded and worth stating: a note captured late at night
+/// west of UTC, or early in the morning east of it, can fall on the
+/// neighbouring day at the *edges* of a muted range. A date-range mute is a
+/// coarse instrument — "quiet everything from the conference" — so being off by
+/// a day at a boundary suppresses one note too many or too few, and nothing is
+/// lost either way.
+///
+/// The timeline groups by the note's own zone, because that is a display
+/// decision made where a timezone database exists. This is a fold decision,
+/// which is a different constraint.
+fn capture_day(n: &Note) -> String {
+    let days = (n.created.wall as i64).div_euclid(86_400_000);
+    civil_from_days(days)
+}
+
+/// Convert days since the epoch to `YYYY-MM-DD`.
+fn civil_from_days(z: i64) -> alloc::string::String {
+    // Howard Hinnant's civil-from-days, which needs no tables.
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    alloc::format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn apply_tombstone(proj: &mut Projection, e: &Envelope) {
@@ -498,6 +944,742 @@ fn apply_tombstone(proj: &mut Projection, e: &Envelope) {
 mod tests {
     use super::*;
     use crate::testing;
+
+    /// Two notes, where the second links the first by name.
+    fn linked_pair(second_text: &str) -> (Projection, EventId, EventId) {
+        let mut d = testing::Origin::new(0);
+        let first = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let first_id = first.header.id();
+        let slug = fold(core::slice::from_ref(&first)).notes[&first_id]
+            .slug
+            .clone();
+
+        let second = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, &second_text.replace("{}", &slug)),
+            1_700_000_001_000,
+        );
+        let second_id = second.header.id();
+        (fold(&[first, second]), first_id, second_id)
+    }
+
+    #[test]
+    fn a_link_resolves_to_the_note_its_name_meant() {
+        let (p, first, second) = linked_pair("see [[{}]] for the figures");
+        let links = &p.notes[&second].links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].resolved, Some(first));
+    }
+
+    #[test]
+    fn a_link_keeps_the_name_as_written() {
+        // Without it a broken link cannot say what it was reaching for.
+        let (p, first, second) = linked_pair("see [[{}]] for the figures");
+        assert_eq!(p.notes[&second].links[0].name, p.notes[&first].slug);
+    }
+
+    #[test]
+    fn a_link_to_a_name_that_did_not_exist_resolves_to_nothing() {
+        // A forward reference is an ordinary way to write, not an error. It
+        // simply has no authoring-time target to be compared against later.
+        let (p, _first, second) = linked_pair("see [[not-a-note-abc123]] later");
+        assert_eq!(p.notes[&second].links[0].resolved, None);
+    }
+
+    #[test]
+    fn links_belong_to_the_version_being_shown() {
+        // A note displaying one text while linking according to another would
+        // be the projection disagreeing with itself.
+        let mut d = testing::Origin::new(0);
+        let target = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let target_id = target.header.id();
+        let slug = fold(core::slice::from_ref(&target)).notes[&target_id]
+            .slug
+            .clone();
+
+        let note = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, &alloc::format!("first draft, see [[{slug}]]")),
+            1_700_000_001_000,
+        );
+        let note_id = note.header.id();
+        let edit = d.author(
+            Kind::EDIT,
+            Some(note_id),
+            Some(note_id),
+            testing::edit_body(3, "rewritten, no links at all"),
+            1_700_000_002_000,
+        );
+
+        let p = fold(&[target, note, edit]);
+        assert!(
+            p.notes[&note_id].links.is_empty(),
+            "the superseded version's links must not survive the edit"
+        );
+    }
+
+    #[test]
+    fn an_edit_can_add_a_link() {
+        let mut d = testing::Origin::new(0);
+        let target = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let target_id = target.header.id();
+        let slug = fold(core::slice::from_ref(&target)).notes[&target_id]
+            .slug
+            .clone();
+
+        let note = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "nothing here yet"),
+            1_700_000_001_000,
+        );
+        let note_id = note.header.id();
+        let edit = d.author(
+            Kind::EDIT,
+            Some(note_id),
+            Some(note_id),
+            testing::edit_body(3, &alloc::format!("now see [[{slug}]]")),
+            1_700_000_002_000,
+        );
+
+        let p = fold(&[target, note, edit]);
+        assert_eq!(p.notes[&note_id].links[0].resolved, Some(target_id));
+    }
+
+    #[test]
+    fn link_resolution_does_not_depend_on_arrival_order() {
+        // Resolution reads the names that existed at authoring time, and
+        // authoring time comes from the timestamp — not from when the event
+        // turned up. Otherwise two replicas would disagree about what a link
+        // meant.
+        let mut d = testing::Origin::new(0);
+        let first = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let first_id = first.header.id();
+        let slug = fold(core::slice::from_ref(&first)).notes[&first_id]
+            .slug
+            .clone();
+        let second = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, &alloc::format!("see [[{slug}]]")),
+            1_700_000_001_000,
+        );
+        let second_id = second.header.id();
+
+        let forward = fold(&[first.clone(), second.clone()]);
+        let backward = fold(&[second, first]);
+        assert_eq!(
+            forward.notes[&second_id].links,
+            backward.notes[&second_id].links
+        );
+        assert_eq!(forward.notes[&second_id].links[0].resolved, Some(first_id));
+    }
+
+    #[test]
+    fn a_link_written_before_its_target_existed_stays_unresolved() {
+        // The rule that makes links trustworthy. The name matches a note that
+        // exists *now*, and the link still resolves to nothing, because it
+        // meant nothing when it was written.
+        let mut d = testing::Origin::new(0);
+        let early = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "see [[budget-planning-quarter-later]] soon"),
+            1_700_000_000_000,
+        );
+        let early_id = early.header.id();
+        let p = fold(&[early]);
+        assert_eq!(p.notes[&early_id].links[0].resolved, None);
+    }
+
+    /// One note, with follow-up events authored against it.
+    fn note_with(extra: impl Fn(&mut testing::Origin, EventId) -> Vec<Envelope>) -> Projection {
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let mut events = alloc::vec![cap];
+        events.extend(extra(&mut d, tgt));
+        fold(&events)
+    }
+
+    #[test]
+    fn a_note_can_be_pinned_and_unpinned() {
+        // The reason pin carries its value: an event that only ever sets a flag
+        // needs a second kind to clear it, and two kinds for one boolean is a
+        // conflict rule waiting to be got wrong.
+        let p = note_with(|d, tgt| {
+            alloc::vec![d.author(
+                Kind::PIN,
+                Some(tgt),
+                None,
+                testing::pin_body(2, true),
+                1_700_000_001_000
+            )]
+        });
+        assert!(p.notes.values().next().unwrap().pinned);
+
+        let p = note_with(|d, tgt| {
+            alloc::vec![
+                d.author(
+                    Kind::PIN,
+                    Some(tgt),
+                    None,
+                    testing::pin_body(2, true),
+                    1_700_000_001_000
+                ),
+                d.author(
+                    Kind::PIN,
+                    Some(tgt),
+                    None,
+                    testing::pin_body(3, false),
+                    1_700_000_002_000
+                ),
+            ]
+        });
+        assert!(!p.notes.values().next().unwrap().pinned);
+    }
+
+    #[test]
+    fn an_alias_names_a_note() {
+        let p = note_with(|d, tgt| {
+            alloc::vec![d.author(
+                Kind::ALIAS,
+                Some(tgt),
+                None,
+                testing::alias_body(2, Some("q4-budget")),
+                1_700_000_001_000
+            )]
+        });
+        assert_eq!(
+            p.notes.values().next().unwrap().alias.as_deref(),
+            Some("q4-budget")
+        );
+    }
+
+    #[test]
+    fn an_alias_can_be_cleared() {
+        let p = note_with(|d, tgt| {
+            alloc::vec![
+                d.author(
+                    Kind::ALIAS,
+                    Some(tgt),
+                    None,
+                    testing::alias_body(2, Some("q4-budget")),
+                    1_700_000_001_000
+                ),
+                d.author(
+                    Kind::ALIAS,
+                    Some(tgt),
+                    None,
+                    testing::alias_body(3, None),
+                    1_700_000_002_000
+                ),
+            ]
+        });
+        assert_eq!(p.notes.values().next().unwrap().alias, None);
+    }
+
+    #[test]
+    fn an_alias_cannot_shadow_another_notes_slug() {
+        // One namespace. If an alias could take a slug, a written link would
+        // mean different things depending on which namespace a reader consulted
+        // first — and the link would be silently repointed, not broken.
+        let mut d = testing::Origin::new(0);
+        let first = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let first_id = first.header.id();
+        let victim_slug = fold(core::slice::from_ref(&first)).notes[&first_id]
+            .slug
+            .clone();
+
+        let second = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "something else entirely"),
+            1_700_000_001_000,
+        );
+        let second_id = second.header.id();
+        let grab = d.author(
+            Kind::ALIAS,
+            Some(second_id),
+            None,
+            testing::alias_body(3, Some(&victim_slug)),
+            1_700_000_002_000,
+        );
+
+        let p = fold(&[first, second, grab]);
+        assert_eq!(
+            p.notes[&second_id].alias, None,
+            "an alias that collides with a slug is declined"
+        );
+        assert_eq!(
+            p.notes[&first_id].slug, victim_slug,
+            "and the note that owns the name keeps it"
+        );
+    }
+
+    #[test]
+    fn two_notes_cannot_hold_the_same_alias() {
+        let mut d = testing::Origin::new(0);
+        let a = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the first note here"),
+            1_700_000_000_000,
+        );
+        let b = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "the second note here"),
+            1_700_000_001_000,
+        );
+        let (a_id, b_id) = (a.header.id(), b.header.id());
+        let first = d.author(
+            Kind::ALIAS,
+            Some(a_id),
+            None,
+            testing::alias_body(3, Some("shared")),
+            1_700_000_002_000,
+        );
+        let second = d.author(
+            Kind::ALIAS,
+            Some(b_id),
+            None,
+            testing::alias_body(4, Some("shared")),
+            1_700_000_003_000,
+        );
+
+        let p = fold(&[a, b, first, second]);
+        let holders = p
+            .notes
+            .values()
+            .filter(|n| n.alias.as_deref() == Some("shared"))
+            .count();
+        assert_eq!(holders, 1, "a name denotes exactly one note");
+    }
+
+    #[test]
+    fn a_dismissal_clears_only_the_versions_it_named() {
+        // A divergence that turned up after the user looked must not be swept
+        // away by a dismissal authored before it existed.
+        let s = testing::branch_vs_single(1);
+        let tgt = s.notes[0];
+        let before = fold(&s.events);
+        let divergences = before.notes[&tgt].divergences.clone();
+        assert!(!divergences.is_empty(), "the fixture diverges");
+
+        let mut d = testing::Origin::new(9);
+        let dismissal = d.author(
+            Kind::RESOLVE,
+            Some(tgt),
+            None,
+            testing::resolve_body(1, alloc::vec![divergences[0].other]),
+            1_700_000_100_000,
+        );
+        let mut events = s.events.clone();
+        events.push(dismissal);
+
+        let after = fold(&events);
+        assert_eq!(
+            after.notes[&tgt].divergences.len(),
+            divergences.len() - 1,
+            "exactly the named version is cleared"
+        );
+    }
+
+    #[test]
+    fn a_dismissal_naming_nothing_relevant_changes_nothing() {
+        let s = testing::branch_vs_single(1);
+        let tgt = s.notes[0];
+        let before = fold(&s.events).notes[&tgt].divergences.len();
+
+        let mut d = testing::Origin::new(9);
+        let dismissal = d.author(
+            Kind::RESOLVE,
+            Some(tgt),
+            None,
+            testing::resolve_body(1, alloc::vec![EventId([0xAB; 32])]),
+            1_700_000_100_000,
+        );
+        let mut events = s.events.clone();
+        events.push(dismissal);
+        assert_eq!(fold(&events).notes[&tgt].divergences.len(), before);
+    }
+
+    #[test]
+    fn a_link_can_be_written_against_an_alias() {
+        let mut d = testing::Origin::new(0);
+        let target = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let target_id = target.header.id();
+        let named = d.author(
+            Kind::ALIAS,
+            Some(target_id),
+            None,
+            testing::alias_body(2, Some("q4-budget")),
+            1_700_000_001_000,
+        );
+        let linker = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(3, "see [[q4-budget]] for figures"),
+            1_700_000_002_000,
+        );
+        let linker_id = linker.header.id();
+
+        let p = fold(&[target, named, linker]);
+        assert_eq!(
+            p.notes[&linker_id].links[0].resolved,
+            Some(target_id),
+            "an alias is a name like any other"
+        );
+    }
+
+    #[test]
+    fn a_capture_whose_body_is_gone_is_still_a_note() {
+        // The content was destroyed — redacted, or stripped on the way into an
+        // export. Losing the text is the intended cost; losing the note is data
+        // loss, and it would happen silently on the next rebuild.
+        let mut d = testing::Origin::new(0);
+        let mut cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "something that was destroyed"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        cap.body = None;
+
+        let p = fold(&[cap]);
+        let n = p.notes.get(&tgt).expect("the note survives its content");
+        assert_eq!(n.text, None);
+        assert!(
+            p.held.is_empty(),
+            "an absent body is a known state, not a fault"
+        );
+    }
+
+    #[test]
+    fn a_bodyless_capture_is_not_named_after_what_it_said() {
+        // The name is built from identity alone. Deriving it from the text
+        // would leave the destroyed words in the one place that propagates into
+        // every note linking here.
+        let mut d = testing::Origin::new(0);
+        let mut cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "quarterly swordfish migration meeting"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let with_text = fold(core::slice::from_ref(&cap)).notes[&tgt].slug.clone();
+        cap.body = None;
+        let without = fold(&[cap]).notes[&tgt].slug.clone();
+
+        assert!(with_text.contains("swordfish"), "got {with_text}");
+        assert!(!without.contains("swordfish"), "got {without}");
+        assert!(!without.contains("migration"), "got {without}");
+    }
+
+    #[test]
+    fn a_body_that_is_present_but_unreadable_is_still_a_fault() {
+        // The distinction the previous two tests rest on. A destroyed body is a
+        // known state; a body this build cannot interpret is damage, and
+        // treating them alike would hide real corruption.
+        let mut d = testing::Origin::new(0);
+        let mut cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "ordinary text"),
+            1_700_000_000_000,
+        );
+        cap.body = Some(alloc::vec![0xFF, 0xFF, 0xFF]);
+        let id = cap.header.id();
+
+        let p = fold(&[cap]);
+        assert_eq!(p.held.get(&id), Some(&Held::Malformed));
+        assert!(p.notes.is_empty());
+    }
+
+    /// A whole-note redaction naming one target.
+    fn redact_body(tgt: EventId) -> alloc::vec::Vec<u8> {
+        testing::encode(&crate::body::RedactBody {
+            nonce: [0u8; 16],
+            scope: crate::body::RedactScope::WholeNote,
+            targets: alloc::vec![tgt],
+        })
+    }
+
+    fn mute_body(
+        nonce: u8,
+        scope: crate::body::MuteScope,
+        until: Option<u64>,
+    ) -> alloc::vec::Vec<u8> {
+        testing::encode(&crate::body::MuteBody {
+            nonce: [nonce; 16],
+            scope,
+            until,
+        })
+    }
+
+    #[test]
+    fn a_note_can_be_muted_by_name() {
+        let p = note_with(|d, tgt| {
+            alloc::vec![d.author(
+                Kind::MUTE,
+                Some(tgt),
+                None,
+                mute_body(2, crate::body::MuteScope::Note(tgt), None),
+                1_700_000_001_000
+            )]
+        });
+        assert_eq!(p.notes.values().next().unwrap().muted_until, Some(0));
+    }
+
+    #[test]
+    fn muting_a_tag_covers_every_note_carrying_it() {
+        // A mute is a rule, not a property of one note. Applying it to whatever
+        // happened to exist when it was written would miss everything that
+        // qualified afterwards.
+        let mut d = testing::Origin::new(0);
+        let a = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the first note here"),
+            1_700_000_000_000,
+        );
+        let b = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "the second note here"),
+            1_700_000_001_000,
+        );
+        let (a_id, b_id) = (a.header.id(), b.header.id());
+
+        let tag_a = d.author(
+            Kind::TAG,
+            Some(a_id),
+            None,
+            testing::tag_body(3, "noise"),
+            1_700_000_002_000,
+        );
+        // The mute is written before the second note is tagged.
+        let mute = d.author(
+            Kind::MUTE,
+            None,
+            None,
+            mute_body(4, crate::body::MuteScope::Tag("noise".into()), None),
+            1_700_000_003_000,
+        );
+        let tag_b = d.author(
+            Kind::TAG,
+            Some(b_id),
+            None,
+            testing::tag_body(5, "noise"),
+            1_700_000_004_000,
+        );
+
+        let p = fold(&[a, b, tag_a, mute, tag_b]);
+        assert_eq!(p.notes[&a_id].muted_until, Some(0));
+        assert_eq!(
+            p.notes[&b_id].muted_until,
+            Some(0),
+            "a note tagged after the mute was written is covered too"
+        );
+    }
+
+    #[test]
+    fn untagging_lifts_a_tag_mute() {
+        // The rule follows the tag. A note that no longer carries it is no
+        // longer covered, without anybody having to remember to unmute it.
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the only note here"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let tag = d.author(
+            Kind::TAG,
+            Some(tgt),
+            None,
+            testing::tag_body(2, "noise"),
+            1_700_000_001_000,
+        );
+        let tag_id = tag.header.id();
+        let mute = d.author(
+            Kind::MUTE,
+            None,
+            None,
+            mute_body(3, crate::body::MuteScope::Tag("noise".into()), None),
+            1_700_000_002_000,
+        );
+        let untag = d.author(
+            Kind::UNTAG,
+            Some(tgt),
+            None,
+            testing::untag_body(4, alloc::vec![tag_id]),
+            1_700_000_003_000,
+        );
+
+        let p = fold(&[cap, tag, mute, untag]);
+        assert_eq!(p.notes[&tgt].muted_until, None);
+    }
+
+    #[test]
+    fn a_date_range_covers_the_days_inside_it() {
+        // 1_700_000_000_000 is 2023-11-14 in UTC.
+        let p = note_with(|d, _tgt| {
+            alloc::vec![d.author(
+                Kind::MUTE,
+                None,
+                None,
+                mute_body(
+                    2,
+                    crate::body::MuteScope::DateRange("2023-11-01".into(), "2023-11-30".into()),
+                    None
+                ),
+                1_700_000_001_000
+            )]
+        });
+        assert_eq!(p.notes.values().next().unwrap().muted_until, Some(0));
+    }
+
+    #[test]
+    fn a_date_range_leaves_days_outside_it_alone() {
+        let p = note_with(|d, _tgt| {
+            alloc::vec![d.author(
+                Kind::MUTE,
+                None,
+                None,
+                mute_body(
+                    2,
+                    crate::body::MuteScope::DateRange("2024-01-01".into(), "2024-01-31".into()),
+                    None
+                ),
+                1_700_000_001_000
+            )]
+        });
+        assert_eq!(p.notes.values().next().unwrap().muted_until, None);
+    }
+
+    #[test]
+    fn a_mute_can_expire() {
+        // An expiry is stored, not enforced here: whether the moment has passed
+        // is a question about now, and the fold cannot ask it.
+        let until = 1_800_000_000_000;
+        let p = note_with(|d, tgt| {
+            alloc::vec![d.author(
+                Kind::MUTE,
+                Some(tgt),
+                None,
+                mute_body(2, crate::body::MuteScope::Note(tgt), Some(until)),
+                1_700_000_001_000
+            )]
+        });
+        assert_eq!(p.notes.values().next().unwrap().muted_until, Some(until));
+    }
+
+    #[test]
+    fn the_newest_mute_touching_a_note_wins() {
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the only note here"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let forever = d.author(
+            Kind::MUTE,
+            Some(tgt),
+            None,
+            mute_body(2, crate::body::MuteScope::Note(tgt), None),
+            1_700_000_001_000,
+        );
+        let until = d.author(
+            Kind::MUTE,
+            Some(tgt),
+            None,
+            mute_body(
+                3,
+                crate::body::MuteScope::Note(tgt),
+                Some(1_800_000_000_000),
+            ),
+            1_700_000_002_000,
+        );
+
+        let p = fold(&[cap, forever, until]);
+        assert_eq!(p.notes[&tgt].muted_until, Some(1_800_000_000_000));
+    }
+
+    #[test]
+    fn days_convert_correctly() {
+        // The arithmetic that replaces a date library. Wrong by one and every
+        // range mute is off by a day.
+        assert_eq!(civil_from_days(0), "1970-01-01");
+        assert_eq!(civil_from_days(19_675), "2023-11-14");
+        assert_eq!(civil_from_days(-1), "1969-12-31");
+    }
 
     #[test]
     fn shuffling_the_input_cannot_change_the_output() {
@@ -654,24 +1836,40 @@ mod tests {
     }
 
     #[test]
-    fn a_redaction_destroys_text_whatever_order_it_arrives_in() {
-        use crate::body::{RedactBody, RedactScope};
+    fn a_redaction_reports_destruction_whatever_order_it_arrives_in() {
+        // The two-step model: the redaction event *orders* destruction, and the
+        // purge carries it out by removing the body. The fold reports what the
+        // log holds, so a redaction whose purge has run reads as destroyed from
+        // either arrival order.
         let s = testing::mixed(8, 1, 1, 2);
         let tgt = s.notes[0];
 
         let mut d = testing::Origin::new(5);
-        let body = testing::encode(&RedactBody {
-            nonce: [0u8; 16],
-            scope: RedactScope::WholeNote,
-            targets: alloc::vec![tgt],
-        });
-        let r = d.author(Kind::REDACT, Some(tgt), None, body, 1_700_000_000_000);
+        let r = d.author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_000_000,
+        );
 
-        // Redaction last, and redaction first. Both must destroy.
-        let mut after = s.events.clone();
+        // What the purge leaves behind: the ordering event, and bodies gone.
+        let purged: Vec<Envelope> = s
+            .events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if e.header.tgt == Some(tgt) || e.header.id() == tgt {
+                    e.body = None;
+                }
+                e
+            })
+            .collect();
+
+        let mut after = purged.clone();
         after.push(r.clone());
         let mut before = alloc::vec![r];
-        before.extend(s.events.clone());
+        before.extend(purged);
 
         for set in [after, before] {
             let p = fold(&set);
@@ -685,6 +1883,135 @@ mod tests {
     }
 
     #[test]
+    fn a_redaction_alone_destroys_nothing_yet() {
+        // The cancellation window, and the reason it can exist at all. The
+        // ordering event does not remove anything; if it did, cancelling would
+        // have nothing left to save.
+        let s = testing::mixed(21, 1, 1, 1);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(5);
+
+        let mut set = s.events.clone();
+        set.push(d.author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_500_000,
+        ));
+
+        let p = fold(&set);
+        let n = p.notes.get(&tgt).unwrap();
+        assert!(n.text.is_some(), "the content is still readable");
+        assert!(!n.is_redacted(), "and not reported as destroyed");
+        assert!(n.redaction_pending.is_some(), "but a redaction is queued");
+    }
+
+    #[test]
+    fn a_pending_redaction_is_due_from_its_own_timestamp() {
+        // Never from local receipt. A per-replica window would mean a device
+        // that was switched off for a month granting the content another full
+        // window when it came back — the longer a replica is away, the longer
+        // the material it was told to destroy survives.
+        let s = testing::mixed(22, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(5);
+        let issued_at = 1_700_000_500_000;
+
+        let mut set = s.events.clone();
+        let r = d.author(Kind::REDACT, Some(tgt), None, redact_body(tgt), issued_at);
+        let stamp = r.header.hlc.wall;
+        set.push(r);
+
+        let p = fold(&set);
+        let pending = p.notes[&tgt].redaction_pending.unwrap();
+        assert_eq!(pending.execute_after, stamp + crate::REDACT_WINDOW_MS);
+    }
+
+    #[test]
+    fn a_cancellation_takes_the_redaction_out_of_the_queue() {
+        let s = testing::mixed(23, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(5);
+
+        let r = d.author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_500_000,
+        );
+        let redact_id = r.header.id();
+        let cancel = d.author(
+            Kind::REDACT_CANCEL,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::RedactCancelBody {
+                nonce: [1u8; 16],
+                redact: redact_id,
+            }),
+            1_700_000_600_000,
+        );
+
+        let mut set = s.events.clone();
+        set.push(r);
+        set.push(cancel);
+
+        let p = fold(&set);
+        let n = p.notes.get(&tgt).unwrap();
+        assert!(n.redaction_pending.is_none(), "no longer queued");
+        assert!(n.text.is_some(), "and the content was never touched");
+    }
+
+    #[test]
+    fn a_cancellation_that_arrives_after_destruction_changes_nothing() {
+        // Destruction is the one irreversible act in the system. A cancellation
+        // that lost the race is reported, not honoured — there is nothing left
+        // to honour it with.
+        let s = testing::mixed(24, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(5);
+
+        let r = d.author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_500_000,
+        );
+        let redact_id = r.header.id();
+        let cancel = d.author(
+            Kind::REDACT_CANCEL,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::RedactCancelBody {
+                nonce: [1u8; 16],
+                redact: redact_id,
+            }),
+            1_700_000_600_000,
+        );
+
+        // The purge already ran.
+        let mut set: Vec<Envelope> = s
+            .events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if e.header.tgt == Some(tgt) || e.header.id() == tgt {
+                    e.body = None;
+                }
+                e
+            })
+            .collect();
+        set.push(r);
+        set.push(cancel);
+
+        let n = fold(&set).notes.get(&tgt).cloned().unwrap();
+        assert!(n.is_redacted(), "the content is gone and stays gone");
+        assert_eq!(n.text, None);
+    }
+
+    #[test]
     fn a_redacted_note_keeps_a_reconstructible_name() {
         use crate::body::{RedactBody, RedactScope};
         let s = testing::mixed(9, 1, 1, 0);
@@ -695,7 +2022,17 @@ mod tests {
             scope: RedactScope::WholeNote,
             targets: alloc::vec![tgt],
         });
-        let mut set = s.events.clone();
+        let mut set: Vec<Envelope> = s
+            .events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if e.header.tgt == Some(tgt) || e.header.id() == tgt {
+                    e.body = None;
+                }
+                e
+            })
+            .collect();
         set.push(d.author(Kind::REDACT, Some(tgt), None, body, 1_700_000_000_000));
 
         let n = fold(&set).notes.get(&tgt).cloned().unwrap();

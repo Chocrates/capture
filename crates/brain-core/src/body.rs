@@ -186,6 +186,85 @@ pub struct RedactCancelBody {
     pub redact: EventId,
 }
 
+/// Pin a note to the top, or unpin it.
+///
+/// Carries the value rather than meaning "pinned" by its existence, so
+/// unpinning is possible. An event that only ever sets a flag needs a second
+/// event kind to clear it, and two kinds for one boolean is a conflict rule
+/// waiting to be got wrong.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct PinBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// Whether the note is pinned after this event.
+    #[n(1)]
+    pub pinned: bool,
+}
+
+/// Give a note a chosen name, or take it away.
+///
+/// Aliases share one namespace with slugs, so a name denotes exactly one note
+/// whichever kind of name it is. Two namespaces would let an alias shadow
+/// another note's canonical name, after which a written link means different
+/// things depending on which namespace the reader consults first.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct AliasBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// The chosen name. `None` removes whatever alias the note had.
+    #[n(1)]
+    pub alias: Option<String>,
+}
+
+/// Dismiss a divergence that has been looked at.
+///
+/// Naming the specific versions rather than saying "clear them all" — a
+/// divergence that turned up after the user looked must not be swept away by a
+/// dismissal authored before it existed.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct ResolveBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// The competing versions being dismissed.
+    #[n(1)]
+    pub dismiss: Vec<EventId>,
+}
+
+/// Clear a note's credential flag.
+///
+/// Carries nothing but its salt: the note is named in the header, and there is
+/// no value to set, because the flag only ever moves one way.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct UnflagBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+}
+
+/// Record a preference the user actually chose.
+///
+/// Only ever written when someone makes a choice. Defaults stay compiled in and
+/// unrecorded, because materialising them as events would freeze today's
+/// judgement forever — every default could then never be improved without
+/// contradicting a stored decision — and would destroy the one distinction that
+/// matters here: whether a value is something you picked or something the
+/// system picked for you.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct SettingBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// The preference being set.
+    #[n(1)]
+    pub key: String,
+    /// Its value. `None` restores the compiled-in default.
+    #[n(2)]
+    pub value: Option<String>,
+}
+
 /// Declare a new origin under an existing roster key, after a restore.
 #[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
 pub struct OriginClaimBody {

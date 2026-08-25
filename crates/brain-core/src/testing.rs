@@ -28,7 +28,10 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use crate::{
     Incarnation,
-    body::{Ambient, CaptureBody, EditBody, OriginClaimBody, TagBody, UntagBody},
+    body::{
+        AliasBody, Ambient, CaptureBody, EditBody, OriginClaimBody, PinBody, ResolveBody, TagBody,
+        UntagBody,
+    },
     envelope::Envelope,
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::HlcState,
@@ -234,6 +237,30 @@ pub fn untag_body(nonce: u8, kills: Vec<EventId>) -> Vec<u8> {
     encode(&UntagBody {
         nonce: [nonce; 16],
         kills,
+    })
+}
+
+/// A pin payload carrying the value, so unpinning is expressible.
+pub fn pin_body(nonce: u8, pinned: bool) -> Vec<u8> {
+    encode(&PinBody {
+        nonce: [nonce; 16],
+        pinned,
+    })
+}
+
+/// An alias payload. `None` clears whatever name the note had.
+pub fn alias_body(nonce: u8, alias: Option<&str>) -> Vec<u8> {
+    encode(&AliasBody {
+        nonce: [nonce; 16],
+        alias: alias.map(|a| a.to_string()),
+    })
+}
+
+/// A dismissal naming the specific versions it clears.
+pub fn resolve_body(nonce: u8, dismiss: Vec<EventId>) -> Vec<u8> {
+    encode(&ResolveBody {
+        nonce: [nonce; 16],
+        dismiss,
     })
 }
 
