@@ -5,9 +5,9 @@ members = [
     "crates/brain-store",
     "apps/brain-cli",
     "apps/brain-capture",
+    "apps/brain-desktop",
 ]
 
-# apps/brain-desktop (Tauri) joins at task group 12 — needs webkit2gtk-4.1.
 
 [workspace.package]
 version = "0.1.0"

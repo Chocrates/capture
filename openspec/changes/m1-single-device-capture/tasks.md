@@ -129,18 +129,18 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 
 ## 12. Browse
 
-- [ ] 12.1 Choose the `brain-desktop` frontend stack and scaffold the Tauri app with its IPC surface. Note the Linux build needs webkit2gtk and a Node toolchain.
-- [ ] 12.2 Implement the timeline: day grouping by capture timezone, capture-time order within a day, human edits bump within their own day, machine activity never moves a note. **The human-versus-machine distinction is a fold rule about event kind, not a rendering rule** — it belongs in the core.
-- [ ] 12.3 Implement the four render states — incomplete, redacted with date, diverged with expansion, muted.
-- [ ] 12.4 Implement the ambient context strip with click-to-filter.
-- [ ] 12.5 Implement the note page: full text, context, tags, outgoing links, backlinks, version history when diverged. Entities are enrichment and stay empty in M1 — do not build a section that cannot populate.
-- [ ] 12.6 Implement link extraction and resolution **in the fold**, recording both the written name and the note bound at authoring time, rendering broken rather than retargeting on mismatch. Not in the shell.
-- [ ] 12.7 Implement search over the FTS index, ranked by relevance.
-- [ ] 12.8 Implement the M1 health surface: tiers, cause-specific wording, acknowledgeable tier-one items, affirmative healthy state, no claim about anything unverified. Peer-related conditions are deferred with sync.
-- [ ] 12.9 Implement the GUI mutation surface: edit, tag, alias, pin, mute, resolve. The GUI is the first-party surface (§8.4) — management should not require a terminal.
-- [ ] 12.10 Implement GUI redaction with a confirmation that **enumerates what will be destroyed** and has **no default-focused accept**. A dialog is more reflex-dismissible than a terminal prompt, and this is the only destructive confirmation in the system.
-- [ ] 12.11 Implement the pending-redaction countdown with a **working cancel**. The only live element in the interface; a safety net requiring a terminal during the window is not one.
-- [ ] 12.12 Verify no on-screen control creates a note.
+- [x] 12.1 Tauri scaffolded with a static frontend — **no Node toolchain**. The frontend is plain HTML, CSS and JavaScript served from `ui/`, so there is no bundler, no npm tree and no build step between editing a file and seeing it. Linux needs webkit2gtk-4.1, now installed.
+- [x] 12.2 Implement the timeline: day grouping by capture timezone, capture-time order within a day, human edits bump within their own day, machine activity never moves a note. **The human-versus-machine distinction is a fold rule about event kind, not a rendering rule** — it belongs in the core.
+- [x] 12.3 Implement the four render states — incomplete, redacted with date, diverged with expansion, muted.
+- [x] 12.4 Implement the ambient context strip with click-to-filter.
+- [x] 12.5 Implement the note page: full text, context, tags, outgoing links, backlinks, version history when diverged. Entities are enrichment and stay empty in M1 — do not build a section that cannot populate.
+- [x] 12.6 Implement link extraction and resolution **in the fold**, recording both the written name and the note bound at authoring time, rendering broken rather than retargeting on mismatch. Not in the shell.
+- [x] 12.7 Implement search over the FTS index, ranked by relevance.
+- [x] 12.8 Implement the M1 health surface: tiers, cause-specific wording, acknowledgeable tier-one items, affirmative healthy state, no claim about anything unverified. Peer-related conditions are deferred with sync.
+- [x] 12.9 Implement the GUI mutation surface: edit, tag, alias, pin, mute, resolve. The GUI is the first-party surface (§8.4) — management should not require a terminal.
+- [x] 12.10 Implement GUI redaction with a confirmation that **enumerates what will be destroyed** and has **no default-focused accept**. A dialog is more reflex-dismissible than a terminal prompt, and this is the only destructive confirmation in the system.
+- [x] 12.11 Implement the pending-redaction countdown with a **working cancel**. The only live element in the interface; a safety net requiring a terminal during the window is not one.
+- [x] 12.12 Verify no on-screen control creates a note.
 
 ## 13. Verification and acceptance
 

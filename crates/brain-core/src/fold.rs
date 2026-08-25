@@ -171,6 +171,13 @@ pub struct Note {
     /// Capture timezone, needed to group by the day it was captured on.
     #[n(6)]
     pub tz: Option<String>,
+    /// What was going on when it was captured.
+    ///
+    /// Frequently the recognition cue when the text is not, which is the only
+    /// reason it is collected — so it is carried through to the projection
+    /// rather than left in the event body where a view cannot reach it.
+    #[n(19)]
+    pub ambient: crate::body::Ambient,
     /// Current tags.
     #[n(7)]
     pub tags: BTreeSet<String>,
@@ -453,9 +460,9 @@ fn apply_capture(
     //
     // A body that is present and **unreadable** is different: this build cannot
     // interpret it, which is a real fault and is held as one.
-    let (text, tz) = match e.body.as_ref().map(|b| minicbor::decode::<CaptureBody>(b)) {
-        Some(Ok(c)) => (Some(c.text), c.tz),
-        None => (None, None),
+    let (text, tz, ambient) = match e.body.as_ref().map(|b| minicbor::decode::<CaptureBody>(b)) {
+        Some(Ok(c)) => (Some(c.text), c.tz, c.ambient),
+        None => (None, None, crate::body::Ambient::default()),
         Some(Err(_)) => {
             proj.held.insert(e.header.id(), Held::Malformed);
             return;
@@ -485,6 +492,7 @@ fn apply_capture(
             alias_at: None,
             credential: crate::slug::looks_like_credential(text.as_deref().unwrap_or("")),
             text,
+            ambient,
             head: e.header.id(),
             created: e.header.hlc,
             updated: e.header.hlc,

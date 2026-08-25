@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS links (
 -- asks what points at it.
 CREATE INDEX IF NOT EXISTS links_resolved ON links(resolved);
 
+-- What was going on when each note was captured. Displayed on the row and
+-- usable as a filter: context is often the recognition cue when the text is
+-- not, which is the only reason it is collected.
+CREATE TABLE IF NOT EXISTS ambient (
+  tgt    BLOB PRIMARY KEY,
+  app    TEXT,
+  title  TEXT,
+  cwd    TEXT,
+  repo   TEXT,
+  branch TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS ambient_repo   ON ambient(repo);
+CREATE INDEX IF NOT EXISTS ambient_branch ON ambient(branch);
+
 CREATE TABLE IF NOT EXISTS tags (
   tgt BLOB NOT NULL,
   tag TEXT NOT NULL,
@@ -371,7 +386,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
-             DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
+             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map;",
         )?;
         write_into(&tx, p)?;
@@ -392,6 +407,7 @@ impl Store {
             tx.execute("DELETE FROM notes WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM note_versions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM divergences WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
@@ -702,6 +718,83 @@ impl Store {
         tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// What was going on when a note was captured.
+    pub fn ambient_of(&self, tgt: &EventId) -> Result<Vec<(String, String)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT app, cwd, repo, branch FROM ambient WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((app, cwd, repo, branch)) = row else {
+            return Ok(Vec::new());
+        };
+        // Absent fields are left out rather than shown empty: "not observed" and
+        // "observed to be nothing" are different, and a strip full of blanks
+        // teaches the reader to ignore it.
+        let mut out = Vec::new();
+        for (k, v) in [
+            ("app", app),
+            ("cwd", cwd),
+            ("repo", repo),
+            ("branch", branch),
+        ] {
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                out.push((k.to_string(), v));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Notes sharing an ambient value.
+    ///
+    /// Context is frequently the recognition cue when the text is not, which is
+    /// the reason it is collected at all — so it has to be usable as a filter
+    /// rather than only displayed.
+    pub fn by_context(&self, field: &str, value: &str) -> Result<Vec<NoteRow>> {
+        // The column is chosen from a fixed set rather than interpolated. A
+        // field name arriving from the interface is untrusted input, and the
+        // one place it could do damage is here.
+        let column = match field {
+            "cwd" => "cwd",
+            "repo" => "repo",
+            "branch" => "branch",
+            other => {
+                return Err(crate::Error::Usage(format!(
+                    "'{other}' is not a context field"
+                )));
+            }
+        };
+
+        let sql = format!(
+            "SELECT n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
+                    n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
+                    n.redacted_at, n.credential
+             FROM notes n JOIN ambient a ON a.tgt = n.tgt
+             WHERE a.{column} = ?1
+             ORDER BY n.created_wall DESC"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![value], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let mut n = r?;
+            n.tags = self.tags_of(&n.tgt)?;
+            n.divergences = self.divergence_count(&n.tgt)?;
+            out.push(n);
+        }
+        Ok(out)
     }
 
     /// Notes the credential predicate flagged, which exports leave out.
@@ -1033,6 +1126,15 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (tgt, tag) VALUES (?1, ?2)",
                 params![t, tag],
+            )?;
+        }
+
+        let a = &n.ambient;
+        if a.app.is_some() || a.cwd.is_some() || a.repo.is_some() || a.branch.is_some() {
+            tx.execute(
+                "INSERT OR REPLACE INTO ambient (tgt, app, title, cwd, repo, branch)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![t, a.app, a.window_title, a.cwd, a.repo, a.branch],
             )?;
         }
 

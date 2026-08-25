@@ -23,6 +23,7 @@ pub mod incremental;
 pub mod latency;
 pub mod lock;
 pub mod log;
+pub mod mutate;
 pub mod ops;
 pub mod paths;
 pub mod projection;

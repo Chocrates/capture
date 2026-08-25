@@ -1,0 +1,28 @@
+[package]
+name = "brain-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The browse surface. A webview for the views, with the core linked directly
+# rather than spoken to over HTTP — there is no server here, and inventing one
+# would put a network boundary inside a single-user desktop application.
+
+[[bin]]
+name = "brain-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+brain-core = { path = "../../crates/brain-core", features = ["std"] }
+brain-store = { path = "../../crates/brain-store" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

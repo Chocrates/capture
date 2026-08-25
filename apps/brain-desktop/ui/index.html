@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>brain</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!--
+  There is deliberately no control here that creates a note.
+
+  An on-screen button would become the path of least resistance, and the moment
+  it exists the capture gesture is no longer the same everywhere — which was the
+  entire point of having one gesture. The only ways in are the chord and the
+  terminal, and the empty state says so.
+-->
+
+<nav>
+  <button data-view="timeline" class="on">Timeline</button>
+  <button data-view="health">Health</button>
+  <input id="q" type="search" placeholder="search" autocomplete="off">
+</nav>
+
+<main id="view"></main>
+
+<!--
+  The redaction confirmation. Hidden until needed, and deliberately unlike a
+  normal dialog: it lists what will be destroyed by name, and its accept button
+  is not focusable until the note's name has been typed. Dismissing dialogs is a
+  reflex, and this is the only destructive confirmation in the system — it has
+  to work harder than a terminal prompt to convey the same weight.
+-->
+<div id="confirm" hidden>
+  <div class="panel">
+    <h2>Destroy this content?</h2>
+    <p>This cannot be undone once the window elapses.</p>
+    <ul id="confirm-items"></ul>
+    <p class="hint">Type the note's name to confirm:</p>
+    <input id="confirm-name" type="text" autocomplete="off">
+    <div class="row">
+      <button id="confirm-cancel">Keep it</button>
+      <button id="confirm-go" disabled>Destroy</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
