@@ -176,9 +176,14 @@ build:
 release:
 	$(CARGO) build --workspace --release
 
-## install: put `brain` on PATH via ~/.cargo/bin
+## install: build everything and install it for the current user
+#
+# Delegates to install.sh, which also creates the store and prints the two
+# gestures. It does not edit your shell rc or register a global chord — both
+# are changes to your environment, and a program that makes them silently is
+# one you cannot tell to stop.
 install:
-	$(CARGO) install --path apps/brain-cli --force
+	@./install.sh
 
 # ------------------------------------------------------------------ demo ----
 

@@ -125,7 +125,7 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 - [x] 11.2 Implement the unresolved-state behaviour: block appends, accept captures into the spool, resolve automatically where the direction is determinable and ask only where it is not.
 - [x] 11.3 Implement compiled-in defaults with no `setting` events written on first run, and provenance display in `brain status`.
 - [x] 11.4 Implement the empty state: name the capture gesture; swap to the CLI instruction when the gesture is unavailable; no sample content.
-- [ ] 11.5 Write the installer: shell keybinding installation, spool preallocation, store creation.
+- [x] 11.5 `install.sh` — builds, installs to `~/.local/bin`, creates the store (spool preallocated by `brain init`), and **prints** the shell snippet and chord registration rather than performing them. Editing a shell rc or a desktop's keybindings silently is a change to the user's environment that they cannot then tell the program to stop making.
 
 ## 12. Browse
 

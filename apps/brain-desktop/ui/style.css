@@ -26,6 +26,20 @@
 }
 
 * { box-sizing: border-box; }
+
+/* `hidden` has to win.
+ *
+ * The attribute only takes effect through the user-agent stylesheet's
+ * `[hidden] { display: none }`, which *any* author-level `display` beats. So
+ * `#confirm { display: grid }` below made the redaction dialog visible from the
+ * moment the page loaded — the destructive confirmation, unprompted, on
+ * startup.
+ *
+ * That is the worst possible way for this particular element to fail. The whole
+ * argument for the dialog is that it must not be trained away by appearing
+ * routinely, and appearing before the user has done anything at all trains it
+ * faster than anything else could. */
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 
 nav {
