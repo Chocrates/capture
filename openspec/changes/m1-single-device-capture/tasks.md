@@ -148,5 +148,5 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 - [x] 13.2 Write CLI integration tests asserting against `--json`, covering each spec scenario.
 - [x] 13.3 Run the crash harness across append, purge, spool drain and rebuild; assert no gaps, no partial rows, and no state in which the index matches destroyed content.
 - [x] 13.4 Run `brain verify` over a synthetic log containing redacted, quarantined and rejected events; confirm exit codes.
-- [ ] 13.5 Confirm the hotkey works end to end on the actual target compositor before declaring M1 done.
+- [x] 13.5 Confirmed on the target: GNOME 46 on Wayland, no `GlobalShortcuts` portal, registered via a gsettings custom keybinding. Chord pressed, client spawned, socket reached, overlay shown — and the dead-gesture condition cleared itself, which is the check confirming its own signal works.
 - [ ] 13.6 Use it for a day. Fix what makes capture feel slow or uncertain before starting M2.

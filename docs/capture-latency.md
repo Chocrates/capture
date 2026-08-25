@@ -62,6 +62,25 @@ contact to visible cursor. A phone's slow-motion mode is enough.
 compositor routing, and a test that gated on the in-process portion would pass
 while the gesture felt slow.
 
+## Confirmed on the target
+
+2026-08-25, GNOME 46 on Wayland. `brain-capture --register` bound
+`<Control><Super>space` through a gsettings custom keybinding, the chord was
+pressed, and the overlay recorded the request arriving — the whole path, on real
+hardware, not a simulation of it:
+
+```
+Ctrl-Super-Space
+  → GNOME matches the binding
+  → spawns `brain-capture --show`
+  → connects to /run/user/1000/brain-<hash>.sock
+  → overlay records the gesture and shows the window
+```
+
+The first histogram sample from that press: drawn within 2 ms of the request
+arriving. The dead-gesture condition in `brain status` cleared itself, which is
+the detection confirming its own signal rather than being asserted to work.
+
 ## Status
 
 - In-process portions: measured, and instrumented permanently.
