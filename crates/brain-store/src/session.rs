@@ -1,5 +1,11 @@
 //! Holding a store open for writing, and authoring into it.
 //!
+//! Lives here rather than in a binary because there are two of them — the
+//! command line and the overlay — and they must write identically. A capture
+//! made by the chord and a capture made by `brain +` differ in how the text
+//! arrives and in nothing else; two implementations of that would drift, and
+//! the drift would be in the one path this system exists to make reliable.
+//!
 //! # One place where impurity enters
 //!
 //! Below this, nothing reads a clock or draws entropy: `brain-core` cannot name
@@ -20,20 +26,20 @@
 //! to detect a *restore* — a store that has moved backwards relative to what
 //! this device remembers writing — and that job needs it to be allowed to lag.
 
-use brain_core::{
-    body::{Ambient, CaptureBody},
-    envelope::Envelope,
-    event::{ENVELOPE_VERSION, Header, Kind},
-    hlc::HlcState,
-    id::BodyHash,
-};
-use brain_store::{
-    Error, Identity, Result, StorePaths, entropy, incremental,
+use crate::{
+    Error, Identity, Result, StorePaths, ambient, drain, entropy, incremental,
     lock::{self, Writer},
     log::Log,
     ops::Ops,
     projection::{self, Store},
-    store,
+    spool, store,
+};
+use brain_core::{
+    body::CaptureBody,
+    envelope::Envelope,
+    event::{ENVELOPE_VERSION, Header, Kind},
+    hlc::HlcState,
+    id::BodyHash,
 };
 use ed25519_dalek::Signer;
 
@@ -44,6 +50,8 @@ pub struct Session {
     pub log: Log,
     pub state: Store,
     clock: HlcState,
+    /// What the store looked like when it was opened.
+    pub startup: crate::startup::State,
     /// Held for as long as the session is. Dropping it releases the store.
     _writer: Writer,
 }
@@ -66,7 +74,7 @@ impl Session {
 
         let log = Log::open(&paths.events)?;
         let generation = Ops::open(&paths.ops)?.generation()?;
-        let state = Store::open(&projection::generation_path(&paths.state, generation))?;
+        let projection_store = Store::open(&projection::generation_path(&paths.state, generation))?;
 
         // Resume the clock. Not doing so is how a device issues a timestamp it
         // has already used: a fresh clock starts at zero, and the first event
@@ -74,38 +82,283 @@ impl Session {
         let w = identity.watermark();
         let clock = HlcState::restore(w.hlc_wall, w.hlc_counter);
 
-        Ok(Session {
+        // What the two records say about each other. Directional: the event
+        // commits before the watermark is written, so the watermark lagging is
+        // an ordinary crash and the watermark leading means the store has lost
+        // events this device already handed positions to.
+        let log_head = log
+            .heads()?
+            .get(&dev_hex(&identity.dev()))
+            .copied()
+            .unwrap_or(0);
+        let state = crate::startup::detect(true, log.count()? > 0, w.highest_seq, log_head);
+        if let Some(m) = state.message() {
+            tracing::warn!("{m}");
+        }
+
+        let mut s = Session {
             paths,
             identity,
             log,
-            state,
+            state: projection_store,
             clock,
+            startup: state,
             _writer: writer,
-        })
+        };
+
+        // A store that went backwards gets a fresh origin before anything is
+        // written. The alternative is handing out sequence numbers that other
+        // replicas already hold, which loses both events and reports nothing.
+        if s.startup.needs_new_origin() {
+            let dev = s.reincarnate()?;
+            tracing::warn!(origin = ?dev.short(), "started a new origin");
+            s.startup = crate::startup::State::Normal;
+        }
+
+        // Anything a previous run left halfway through destroying, finished
+        // before anything else looks at the store. An interrupted purge is
+        // invisible in the log — the redaction event reads the same before and
+        // after — so this is the only thing that notices.
+        match crate::purge::resume(
+            &mut s.log,
+            &mut s.state,
+            &Ops::open(&s.paths.ops)?,
+            now_ms(),
+        ) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(n, "finished purges interrupted by an earlier run"),
+            Err(e) => tracing::error!(%e, "could not finish an interrupted purge"),
+        }
+
+        // Deadlines that have arrived. Every process startup is the floor: no
+        // daemon, no timer unit, and therefore nothing that can be silently not
+        // running while redactions sit undestroyed.
+        match s.drain_due() {
+            Ok(d) if d.any() => {
+                tracing::info!(destroyed = d.destroyed, "overdue work completed at startup")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(%e, "due work could not be processed"),
+        }
+
+        // Startup is one of the two moments the store is known to be writable.
+        // Anything the spool is holding goes in now, before whatever this
+        // process was actually opened to do.
+        match s.drain_spool() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(n, "spooled captures committed"),
+            // The store is writable enough to have opened and not enough to
+            // drain. Whatever this process was for may still work, and the
+            // spool keeps everything until it does.
+            Err(e) => tracing::warn!(%e, "spool could not be drained"),
+        }
+        Ok(s)
     }
 
     /// Store a capture, and return the note it became.
-    pub fn capture(&mut self, text: &str) -> Result<Captured> {
-        let nonce = entropy::nonce()?;
-        let body = CaptureBody {
-            nonce: nonce.0,
-            text: text.to_string(),
-            // Recorded now because it cannot be recovered later, and day
-            // grouping depends on it: a note captured at 23:40 in one zone must
-            // not move to a different day when read in another.
-            tz: Some(local_zone()),
-            ambient: Ambient::default(),
-        };
-        let e = self.author(Kind::CAPTURE, None, None, encode(&body))?;
-        let id = e.header.id();
+    /// Commit a prepared capture body.
+    ///
+    /// Takes the encoded body rather than the text because the body must be
+    /// built *before* the store is opened. Opening can fail — that is much of
+    /// what the spool is for — and a body that only exists after a successful
+    /// open cannot be spooled when the open is what failed.
+    pub fn capture(&mut self, body: &[u8]) -> Result<Captured> {
+        let id = self.append_capture(body)?;
 
-        self.commit(&[e])?;
+        // One of the two moments the store is known to be writable. A disk
+        // recovering is invisible to a clock and obvious here.
+        if let Err(e) = self.drain_spool() {
+            tracing::warn!(%e, "spool could not be drained after a capture");
+        }
 
         let slug = self
             .state
             .slug_of(&id)?
             .ok_or_else(|| Error::Integrity("a stored capture produced no note".into()))?;
         Ok(Captured { slug })
+    }
+
+    fn append_capture(&mut self, body: &[u8]) -> Result<brain_core::EventId> {
+        let e = self.author(Kind::CAPTURE, None, None, body.to_vec())?;
+        let id = e.header.id();
+        self.commit(&[e])?;
+        Ok(id)
+    }
+
+    /// Move anything waiting in the spool into the log.
+    ///
+    /// Event-driven, never scheduled. A timer retrying against a still-full
+    /// disk is pure waste, and the moment a disk recovers is invisible to a
+    /// clock — but it is exactly visible to the next append that succeeds. So
+    /// this runs at startup and after each successful write, which are the two
+    /// moments the store is known to be working.
+    pub fn drain_spool(&mut self) -> Result<usize> {
+        if !spool::in_use(&self.paths.spool)? {
+            return Ok(0);
+        }
+        let mut authored: Vec<brain_core::envelope::Envelope> = Vec::new();
+        let paths = self.paths.clone();
+
+        // The position to write at is worked out once and then carried forward.
+        // Re-reading the log inside the loop is not possible — the drain holds
+        // it — and would be wrong anyway: appending in order means the next
+        // position is simply the last one plus one.
+        let dev = self.identity.dev();
+        let mut seq = next_seq(&self.log, &dev)?;
+        let mut tip = chain_tip(&self.log, &dev)?;
+
+        let done = {
+            let identity = &mut self.identity;
+            let clock = &mut self.clock;
+            let log = &mut self.log;
+            drain::drain(&paths.spool, log, |payload| {
+                let hlc = clock.issue(now_ms(), dev);
+                let header = Header {
+                    v: ENVELOPE_VERSION,
+                    dev,
+                    seq,
+                    hlc,
+                    kind: Kind::CAPTURE,
+                    tgt: None,
+                    prev: None,
+                    occ: None,
+                    chain: tip,
+                    bhash: BodyHash::of(payload),
+                };
+                let sig = identity.signing().sign(&header.id().0).to_bytes();
+                let e = Envelope {
+                    header,
+                    body: Some(payload.to_vec()),
+                    sig,
+                };
+                // A record the log already holds is skipped by the drain
+                // without being authored, so advancing here — inside the
+                // closure — keeps the numbering aligned with what is actually
+                // appended.
+                seq += 1;
+                tip = Some(e.header.id());
+                authored.push(e.clone());
+                Ok(e)
+            })?
+        };
+
+        if !authored.is_empty() {
+            let all = self.log.all()?;
+            incremental::apply(&mut self.state, &all, &authored)?;
+            if let Some(last) = authored.last() {
+                let (wall, counter) = self.clock.persist();
+                self.identity
+                    .advance(&self.paths, last.header.seq, wall, counter)?;
+            }
+        }
+        Ok(done.committed)
+    }
+
+    /// Mint a new origin and claim it, returning the new origin's identity.
+    ///
+    /// Called after a restore, before anything local is written. Reusing the
+    /// old origin would mean reusing sequence numbers that peers already hold,
+    /// which loses events in both directions and reports nothing.
+    ///
+    /// The claim is authored first and appended first, so there is no window in
+    /// which events exist under an origin no key is bound to.
+    pub fn reincarnate(&mut self) -> Result<brain_core::Dev> {
+        self.identity.reincarnate(&self.paths)?;
+
+        let nonce = entropy::nonce()?;
+        let claim = crate::genesis::origin_claim(
+            self.identity.signing(),
+            &self.identity.incarnation(),
+            &mut self.clock,
+            now_ms(),
+            nonce,
+        )?;
+        self.log.append(&claim)?;
+
+        let (wall, counter) = self.clock.persist();
+        self.identity
+            .advance(&self.paths, claim.header.seq, wall, counter)?;
+        Ok(self.identity.dev())
+    }
+
+    /// Carry out whatever has become due.
+    ///
+    /// Returns what it did, so `brain status` can report when this last ran —
+    /// without that, a long-dead overlay means redactions sitting undestroyed
+    /// while every surface reports them complete.
+    pub fn drain_due(&mut self) -> Result<crate::due::Drained> {
+        let ops = Ops::open(&self.paths.ops)?;
+        let now = now_ms();
+        let mut done = crate::due::Drained::default();
+
+        // What each origin has already destroyed, for the ceiling below.
+        let history = self.state.redaction_history()?;
+
+        for work in crate::due::due(&self.state.redact_queue()?, now) {
+            match work {
+                crate::due::Work::Destroy { redact, target } => {
+                    // The ceiling is checked here, at the moment of
+                    // destruction, rather than when the redaction was written.
+                    // A redaction can arrive from another device long after it
+                    // was issued, and what matters is how much is being
+                    // destroyed *now* — a hundred redactions arriving together
+                    // after a month offline is exactly the shape of the runaway
+                    // this bounds, whatever their timestamps say.
+                    if let crate::ratelimit::Verdict::Hold { already } =
+                        crate::ratelimit::check(&history, 1, now)
+                    {
+                        tracing::warn!(
+                            already,
+                            "redaction held: this origin has destroyed a great deal in the last hour"
+                        );
+                        done.held += 1;
+                        continue;
+                    }
+
+                    crate::purge::execute(
+                        &mut self.log,
+                        &mut self.state,
+                        &ops,
+                        &redact,
+                        &target,
+                        now,
+                    )?;
+                    done.destroyed += 1;
+                }
+                crate::due::Work::ExpireSnapshot { .. } => done.expired += 1,
+            }
+        }
+
+        // Copies whose retention has elapsed. Held any longer they stop being a
+        // safety net and become a second archive of exactly the material
+        // somebody asked to have destroyed.
+        done.expired += ops.expire_snapshots(now)?;
+
+        ops.due_processed(now)?;
+        Ok(done)
+    }
+
+    /// Append one event of any kind, committing it and updating the projection.
+    ///
+    /// The body is built by a closure because every body opens with a fresh
+    /// nonce, and the nonce has to come from here — it is what makes the body's
+    /// hash a hiding commitment, so a redacted event cannot be confirmed by
+    /// guessing what it said.
+    pub fn append<F>(
+        &mut self,
+        kind: Kind,
+        tgt: Option<brain_core::EventId>,
+        prev: Option<brain_core::EventId>,
+        body: F,
+    ) -> Result<brain_core::EventId>
+    where
+        F: FnOnce([u8; 16]) -> Vec<u8>,
+    {
+        let nonce = entropy::nonce()?;
+        let e = self.author(kind, tgt, prev, body(nonce.0))?;
+        let id = e.header.id();
+        self.commit(&[e])?;
+        Ok(id)
     }
 
     /// Author an event under this device's origin.
@@ -158,35 +411,68 @@ impl Session {
             self.identity
                 .advance(&self.paths, last.header.seq, wall, counter)?;
         }
+
+        // The device was used. Recorded on every write rather than only on
+        // captures, because the question this answers is "was anybody here" —
+        // and a week of tagging and editing is as much evidence of use as a
+        // week of capturing.
+        if let Ok(ops) = Ops::open(&self.paths.ops) {
+            let _ = ops.was_active(now_ms());
+        }
         Ok(())
     }
 
     fn next_seq(&self) -> Result<u64> {
-        Ok(self
-            .log
-            .heads()?
-            .get(&dev_hex(&self.identity.dev()))
-            .copied()
-            .unwrap_or(0)
-            + 1)
+        next_seq(&self.log, &self.identity.dev())
     }
 
     fn chain_tip(&self) -> Result<Option<brain_core::EventId>> {
-        let dev = self.identity.dev();
-        Ok(self
-            .log
-            .all()?
-            .into_iter()
-            .filter(|e| e.header.dev == dev)
-            .max_by_key(|e| e.header.seq)
-            .map(|e| e.header.id()))
+        chain_tip(&self.log, &self.identity.dev())
     }
+}
+
+/// The next free position in an origin's sequence.
+///
+/// From the log's heads, never from the watermark: the watermark is written
+/// after the event commits and is allowed to lag, so reading it would hand back
+/// a number that is already taken.
+fn next_seq(log: &Log, dev: &brain_core::Dev) -> Result<u64> {
+    Ok(log.heads()?.get(&dev_hex(dev)).copied().unwrap_or(0) + 1)
+}
+
+fn chain_tip(log: &Log, dev: &brain_core::Dev) -> Result<Option<brain_core::EventId>> {
+    Ok(log
+        .all()?
+        .into_iter()
+        .filter(|e| e.header.dev == *dev)
+        .max_by_key(|e| e.header.seq)
+        .map(|e| e.header.id()))
 }
 
 /// What a capture turned into.
 pub struct Captured {
     /// The note's permanent name.
     pub slug: String,
+}
+
+/// Build a capture body, without needing a store.
+///
+/// Deliberately free of any store handle. Everything a capture body holds — the
+/// nonce, the zone, the ambient facts — comes from this machine, so a capture
+/// can be fully formed and written to the spool even when the store cannot be
+/// opened at all. That case is not exotic: a disk that has filled up is exactly
+/// a disk whose databases will not open.
+pub fn capture_body(text: &str) -> Result<Vec<u8>> {
+    let nonce = entropy::nonce()?;
+    Ok(encode(&CaptureBody {
+        nonce: nonce.0,
+        text: text.to_string(),
+        // Recorded now because it cannot be recovered later, and day grouping
+        // depends on it: a note captured at 23:40 in one zone must not move to
+        // a different day when read in another.
+        tz: Some(local_zone()),
+        ambient: ambient::collect(&ambient::Host),
+    }))
 }
 
 /// Milliseconds since the epoch.
@@ -218,4 +504,49 @@ fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
 
 fn dev_hex(d: &brain_core::Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What became of a capture.
+pub enum Committed {
+    /// In the log, under this name.
+    Stored(String),
+    /// In the spool, because the store would not take it. Safe, not yet
+    /// findable, and committed on the next successful write.
+    Spooled,
+}
+
+/// Store a capture, falling back to the spool if anything at all goes wrong.
+///
+/// # Why the body is built before the store is opened
+///
+/// Opening is one of the things that can fail — a full disk is exactly a disk
+/// whose databases will not open — and a capture that only exists after a
+/// successful open has nothing left to rescue when the open is what failed. So
+/// everything the body needs comes from this machine: the nonce, the zone, the
+/// ambient facts.
+///
+/// # Why a spooled capture is not an error
+///
+/// The interface accepted it and it is durable. Reporting failure would send
+/// someone off to retype something that is already safe, which is a worse
+/// outcome than the delay in it becoming searchable.
+pub fn capture(paths: &StorePaths, text: &str) -> Result<Committed> {
+    let body = capture_body(text)?;
+
+    match Session::open(paths.clone()).and_then(|mut s| s.capture(&body)) {
+        Ok(c) => Ok(Committed::Stored(c.slug)),
+        Err(store_failed) => {
+            spool::push(&paths.spool, &body).map_err(|spool_failed| {
+                // Both places gone. The only case where a capture is genuinely
+                // lost, so it says so rather than reporting the second failure
+                // and quietly hiding the first.
+                Error::Usage(format!(
+                    "could not store this capture and could not spool it either.\n\
+                     \n  store:  {store_failed}\n  spool:  {spool_failed}"
+                ))
+            })?;
+            tracing::warn!(%store_failed, "capture spooled");
+            Ok(Committed::Spooled)
+        }
+    }
 }
