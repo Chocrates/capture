@@ -3358,6 +3358,20 @@ literally). It is not the human path, and the docs must not present it as one �
 wires the interactive gesture to this form makes the metacharacter test pass while the human path
 stays broken.
 
+#### Platform scope for M1
+
+**M1 targets Linux only**, with GNOME on Wayland as the primary session. Recorded here because it
+is a decision rather than an accident of what got built first.
+
+macOS is excluded deliberately. Registering a global hotkey there needs the Accessibility
+permission, and that grant is tied to the binary's signature — an unsigned build loses it on every
+rebuild and after a reboot. The result is a capture chord that works when it is set up and silently
+stops later, which is exactly the dead-gesture failure §8.6 builds detection for, shipped as the
+default experience. Supporting macOS properly means signing and notarising, which is a distribution
+problem rather than a design one, so it waits until there is something to distribute.
+
+The hotkey mechanism is chosen at runtime behind a trait (§8.6), so adding a platform is additive.
+
 #### stdin, editor, and empty input
 
 Three cases that must not be conflated, since `brain +` with piped input and `brain +` with no
@@ -3518,8 +3532,25 @@ mirror image. §1 says the incarnation is minted on "restore, reinstall, or data
 and database replacement is precisely what the old check could not observe.
 
 Detection is therefore two-sided: the identity file records the current origin and its highest
-written seq, and **either half being inconsistent with the other means a new incarnation**, not a
-guess about which one is right.
+written seq, and the two are compared on every startup.
+
+**The comparison is directional, and an earlier version of this paragraph had it wrong.** It said
+*either* half being inconsistent means a new incarnation. That is symmetric, and symmetric is
+wrong, because the two records are written in a fixed order: the event commits first, the
+watermark after. A crash between them therefore leaves the watermark **behind** the log — which is
+the ordinary post-crash state, not a restore. Minting an incarnation for it would start a fresh
+origin after *every* crash, abandoning the previous origin's sequence each time and filling the
+roster with dead origins.
+
+So:
+
+| disagreement | what happened | what to do |
+|---|---|---|
+| watermark **behind** the log | crash between committing and recording | update it, carry on |
+| watermark **ahead** of the log | the store lost events it had already numbered | mint a new origin |
+
+Only the second is a restore, and it is the one that is otherwise invisible: deleting `events.db`
+to "start clean" produces it, and the identity file agrees with itself throughout.
 
 **The stop blocks appends, never capture.** An earlier draft made this a hard stop on startup,
 which contradicts the system's defining property — §7 modes 1 and 2 make "local append always

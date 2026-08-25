@@ -69,62 +69,62 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 
 - [x] 6.1 **Build the crash-injection harness before anything claims crash safety.** A subprocess supervisor that SIGKILLs at randomised points and checks invariants on restart. Note this tests process death, not power loss — the page cache survives, so it does not exercise `synchronous=FULL`.
 - [x] 6.2 Run the harness against append: no gaps, no partial rows, `heads` consistent with the log.
-- [x] 6.3 Run it against spool drain and rebuild. **The redaction purge is not covered**: the purge does not exist yet (group 9). Its crash mode is `redact_intent` phase recovery, and it must be added to `tests/crash.rs` as part of that group, not deferred past it.
+- [x] 6.3 Run it against spool drain, rebuild, and the redaction purge. The purge case kills a process between clearing the projection and destroying the payload — a window microseconds wide in normal use, widened by `BRAIN_PURGE_PAUSE_MS` so a kill can land in it. Verified by mutation: removing the intent marker makes the test fail with a note reporting its content destroyed while the payload is still there.
 
 ## 7. CLI
 
 - [x] 7.1 Scaffold the `brain` binary. A bare unrecognised word errors and suggests the capture form; it never silently captures.
 - [x] 7.2 Implement `brain +`: `--stdin`, non-tty stdin detection, an in-process line editor when interactive with no input, `--` literal form, and refusal to store empty content.
-- [ ] 7.3 **Ship the capture keybinding, not a shell function.** bash `bind -x` reading `READLINE_LINE`; zsh ZLE widget reading `$BUFFER`. A function cannot work — by the time it runs the shell has already split, expanded and truncated the line. The gesture is *type the text, press the chord*, not *type `b` then the text*.
-- [ ] 7.4 **Test 7.3 through a pty harness** driving `bash -i` and `zsh -i`. History expansion of `!` and `^` only happens interactively, so a non-interactive test passes while the human path stays broken. Verify `#`, `>`, `!`, `~`, `^`, `*`, `$VAR` and backticks survive byte-identically.
-- [ ] 7.5 Implement read commands — `timeline`, `show`, `search`, `links` — each with `--json`.
-- [ ] 7.6 Implement write commands: `edit`, `tag`, `alias`, `pin`, `mute`, `resolve`.
-- [ ] 7.7 Implement ops commands: `log <slug>`, `status` (with default-vs-set provenance), `quarantine`, `rejected`, `fold --rebuild`.
-- [ ] 7.8 Implement `export` and `restore [--ignore-redactions-after <t>]`. Without these the export capability is a feature nothing can trigger.
-- [ ] 7.9 Implement `brain verify`: recompute every id, check every signature, check `blake3(body) == bhash` where a body exists, walk every origin chain. Rejected events are summarised, not treated as failure.
+- [x] 7.3 **Ship the capture keybinding, not a shell function.** bash `bind -x` reading `READLINE_LINE`; zsh ZLE widget reading `$BUFFER`. A function cannot work — by the time it runs the shell has already split, expanded and truncated the line. The gesture is *type the text, press the chord*, not *type `b` then the text*.
+- [x] 7.4 **Test 7.3 through a pty harness** driving `bash -i` and `zsh -i`. History expansion of `!` and `^` only happens interactively, so a non-interactive test passes while the human path stays broken. Verify `#`, `>`, `!`, `~`, `^`, `*`, `$VAR` and backticks survive byte-identically.
+- [x] 7.5 Implement read commands — `timeline`, `show`, `search`, `links` — each with `--json`.
+- [x] 7.6 Implement write commands: `edit`, `tag`, `alias`, `pin`, `mute`, `resolve`.
+- [x] 7.7 Implement ops commands: `log <slug>`, `status` (with default-vs-set provenance), `quarantine`, `rejected`, `fold --rebuild`.
+- [x] 7.8 Implement `export` and `restore [--ignore-redactions-after <t>]`. Without these the export capability is a feature nothing can trigger.
+- [x] 7.9 Implement `brain verify`: recompute every id, check every signature, check `blake3(body) == bhash` where a body exists, walk every origin chain. Rejected events are summarised, not treated as failure.
 - [x] 7.10 Implement exit codes: 0 success, 1 usage, 2 not found, 3 integrity failure.
 
 ## 8. Capture
 
-- [ ] 8.1 Implement the capture path: accept text, build the envelope with injected nonce/HLC/key, append, return the slug. Never validate, never reject.
-- [ ] 8.2 Implement the ambient envelope collector behind a platform trait: capture timezone, working directory, git repo and branch; foreground app and window title **only where the platform exposes them**. Verified absent on the target (GNOME 46 Wayland: no protocol, `Shell.Eval` disabled, Xwayland `_NET_ACTIVE_WINDOW` returns `0x0`). Refuse the Xwayland value explicitly — it is a plausible-looking zero, not an answer. **Never read the clipboard.**
-- [ ] 8.3 Implement the spool: write on append failure, assign `seq` at drain, preserve capture time and timezone. Loud failure when the spool itself is exhausted. **Drain is event-driven, not scheduled** — on the next successful append and on startup. A timer retrying against a still-full disk is pure waste, and disk recovery is invisible to a clock.
-- [ ] 8.4 Build `apps/brain-capture`: resident egui process, pre-warmed window, single text field, Enter commits, Escape discards.
-- [ ] 8.5 Implement the hotkey platform trait with **runtime detection** in order: portal → GNOME gsettings → X11 grab → none. Default chord named in one place. Report which mechanism was selected in `brain status`.
-- [ ] 8.6 Implement the **GNOME gsettings** backend: installer registers a custom keybinding running a thin client that signals the resident overlay over a unix socket and exits. *This is the mechanism that works on the target machine — GNOME 46 exposes no `GlobalShortcuts` portal.*
+- [x] 8.1 Implement the capture path: accept text, build the envelope with injected nonce/HLC/key, append, return the slug. Never validate, never reject.
+- [x] 8.2 Implement the ambient envelope collector behind a platform trait: capture timezone, working directory, git repo and branch; foreground app and window title **only where the platform exposes them**. Verified absent on the target (GNOME 46 Wayland: no protocol, `Shell.Eval` disabled, Xwayland `_NET_ACTIVE_WINDOW` returns `0x0`). Refuse the Xwayland value explicitly — it is a plausible-looking zero, not an answer. **Never read the clipboard.**
+- [x] 8.3 Implement the spool: write on append failure, assign `seq` at drain, preserve capture time and timezone. Loud failure when the spool itself is exhausted. **Drain is event-driven, not scheduled** — on the next successful append and on startup. A timer retrying against a still-full disk is pure waste, and disk recovery is invisible to a clock.
+- [x] 8.4 Build `apps/brain-capture`: resident egui process, pre-warmed window, single text field, Enter commits, Escape discards.
+- [x] 8.5 Implement the hotkey platform trait with **runtime detection** in order: portal → GNOME gsettings → X11 grab → none. Default chord named in one place. Report which mechanism was selected in `brain status`.
+- [x] 8.6 Implement the **GNOME gsettings** backend: installer registers a custom keybinding running a thin client that signals the resident overlay over a unix socket and exits. *This is the mechanism that works on the target machine — GNOME 46 exposes no `GlobalShortcuts` portal.*
 - [ ] 8.7 Implement the `GlobalShortcuts` **portal** backend, selected only when the interface is actually present (KDE today). Needs D-Bus and a runtime in the overlay — permitted there, forbidden in `brain-core`.
 - [ ] 8.8 Implement the X11 `XGrabKey` backend, used **only under a genuine X11 session**. Explicitly refuse to select it under Xwayland: the grab fires only while an X11 window has focus, which is the silent-dead-gesture failure 8.9 exists to catch.
-- [ ] 8.9 Implement macOS registration (Accessibility permission), **only if macOS is an M1 target** — it also requires a signed binary for the grant to persist. Decide and record.
-- [ ] 8.10 Implement registration confirmation ("press it now"), and dead-gesture detection after the defined idle period using the activity tracking from 5.3. **Load-bearing, not ceremonial** — a spawn-based binding has more ways to be registered-but-not-firing than a grab does.
-- [ ] 8.11 Instrument capture latency permanently (callback → first frame) into a local histogram. **Not a CI gate** — the requirement is physical keypress to visible cursor, which includes compositor routing that no in-process test can observe. Measure that once, externally, and record the number.
+- [x] 8.9 **Decided: macOS is not an M1 target.** The Accessibility grant does not persist across restarts without a signed binary, so an unsigned build produces a chord that works until reboot and then silently stops — the precise failure 8.10 exists to catch, shipped as the default experience. M1 targets Linux, GNOME/Wayland primary. The platform trait in 8.5 isolates registration, so macOS is additive later rather than a refactor.
+- [x] 8.10 Implement registration confirmation ("press it now"), and dead-gesture detection after the defined idle period using the activity tracking from 5.3. **Load-bearing, not ceremonial** — a spawn-based binding has more ways to be registered-but-not-firing than a grab does.
+- [x] 8.11 Instrument capture latency permanently (callback → first frame) into a local histogram, reported by `brain status`. **Not a CI gate.** In-process portions measured on the target and recorded in `docs/capture-latency.md`: ~3ms to spawn the client and reach the socket, <2ms to draw — about 5ms for the share this project controls. **End-to-end keypress-to-cursor is still unmeasured**; it needs filming the screen and keyboard together, and the document says how.
 
 ## 9. Redaction and muting
 
-- [ ] 9.1 Implement `mute` at note, tag, entity and date-range scope, with expiry, applied to every surfacing path.
-- [ ] 9.2 Implement `redact`: whole-note default scope, per-event option, 64-target cap.
-- [ ] 9.3 Implement the ingest-side rate limit — 256 targets per hour per origin, then held for explicit confirmation.
-- [ ] 9.4 Implement the destruction queue **in `state.db`**, derived from the redaction events, with `execute_after` from the redaction's own HLC rather than local receipt. **Test:** ingesting a redaction whose window has elapsed destroys immediately rather than granting a fresh window.
-- [ ] 9.5 Implement `redact_cancel` with the same retention as `redact`, and reporting when a cancellation arrives after destruction.
-- [ ] 9.6 Implement the ordered purge with the durable intent marker: intent → purge projection and FTS → destroy body → checkpoint → clear intent. Use `secure_delete` rather than `VACUUM`; `VACUUM` needs free space equal to the database and fails exactly when the disk is full.
-- [ ] 9.7 Implement the pre-redaction snapshot with 30-day expiry, local only, never exported, and **skipped entirely for credential-flagged notes**.
-- [ ] 9.8 Implement `brain redact`, `--force` (suppresses the prompt only — cap, rate limit, window and snapshot all remain), `--cancel <id>`, and `--cancel --all-since <t>`.
-- [ ] 9.9 Implement the **due-work queue** in `state.db`: destruction deadlines, snapshot expiry, dead-gesture detection. Drained on **every process startup** (the floor) and on a low-frequency timer in the **resident overlay** (the latency path). No daemon and no systemd timer — a fourth binary is one more thing that can be silently down, and an external timer puts scheduling where `brain status` cannot see it.
-- [ ] 9.10 Report **when due work was last processed** in `brain status`. Without it, a long-dead overlay means redactions sitting undestroyed while the interface reports them complete — the failure that put the queue in the projection rather than in local state.
+- [x] 9.1 Implement `mute` at note, tag and date-range scope, with expiry, applied to every surfacing path — the timeline shows a muted note in place with a marker, search leaves it out. **Entity scope is deferred**: M1 has no entity extraction, so there is nothing to scope to; the `MuteScope` enum takes a new variant without touching the ones that exist.
+- [x] 9.2 Implement `redact`: whole-note default scope, per-event option, 64-target cap.
+- [x] 9.3 Implement the ingest-side rate limit — 256 targets per hour per origin, then held for explicit confirmation.
+- [x] 9.4 Implement the destruction queue **in `state.db`**, derived from the redaction events, with `execute_after` from the redaction's own HLC rather than local receipt. **Test:** ingesting a redaction whose window has elapsed destroys immediately rather than granting a fresh window.
+- [x] 9.5 Implement `redact_cancel` with the same retention as `redact`, and reporting when a cancellation arrives after destruction.
+- [x] 9.6 Implement the ordered purge with the durable intent marker: intent → purge projection and FTS → destroy body → checkpoint → clear intent. Use `secure_delete` rather than `VACUUM`; `VACUUM` needs free space equal to the database and fails exactly when the disk is full.
+- [x] 9.7 Implement the pre-redaction snapshot with 30-day expiry, local only, never exported, and **skipped entirely for credential-flagged notes**.
+- [x] 9.8 Implement `brain redact`, `--force` (suppresses the prompt only — cap, rate limit, window and snapshot all remain), `--cancel <id>`, and `--cancel --all-since <t>`.
+- [x] 9.9 Implement the **due-work queue** in `state.db`: destruction deadlines, snapshot expiry, dead-gesture detection. Drained on **every process startup** (the floor) and on a low-frequency timer in the **resident overlay** (the latency path). No daemon and no systemd timer — a fourth binary is one more thing that can be silently down, and an external timer puts scheduling where `brain status` cannot see it.
+- [x] 9.10 Report **when due work was last processed** in `brain status`. Without it, a long-dead overlay means redactions sitting undestroyed while the interface reports them complete — the failure that put the queue in the projection rather than in local state.
 
 ## 10. Export and restore
 
-- [ ] 10.1 Define the export file format and naming, and record the watermark in `ops.db` (not `state.db`, which is disposable and would replay every export on rebuild).
-- [ ] 10.2 Implement incremental export — **manual only**, never scheduled by the application. Scheduling it would invite the belief that backups are handled, and §1.2 is explicit that offsite is out of scope. Export, **excluding credential-flagged notes by default**, reporting the excluded count, and supporting a one-action flag clear that includes the note in the next export. Exclusion must never be silent — the predicate over-flags, so silent omission would trade a leak for missing backups.
-- [ ] 10.3 Apply retained redactions when writing new export files; surface the notice that prior exports must be pruned by hand. Note this means export rows may have no body, and ingest must skip the body check for them.
-- [ ] 10.4 Implement restore as replay through the ordinary ingest path, minting a fresh incarnation and emitting `origin_claim` before any append, spooling captures until that completes.
-- [ ] 10.5 Implement `restore --ignore-redactions-after <t>` as an explicit non-default mode.
+- [x] 10.1 Define the export file format and naming, and record the watermark in `ops.db` (not `state.db`, which is disposable and would replay every export on rebuild).
+- [x] 10.2 Implement incremental export — **manual only**, never scheduled by the application. Scheduling it would invite the belief that backups are handled, and §1.2 is explicit that offsite is out of scope. Export, **excluding credential-flagged notes by default**, reporting the excluded count, and supporting a one-action flag clear that includes the note in the next export. Exclusion must never be silent — the predicate over-flags, so silent omission would trade a leak for missing backups.
+- [x] 10.3 Apply retained redactions when writing new export files; surface the notice that prior exports must be pruned by hand. Note this means export rows may have no body, and ingest must skip the body check for them.
+- [x] 10.4 Implement restore as replay through the ordinary ingest path, minting a fresh incarnation and emitting `origin_claim` before any append, spooling captures until that completes.
+- [x] 10.5 Implement `restore --ignore-redactions-after <t>` as an explicit non-default mode.
 
 ## 11. First run
 
-- [ ] 11.1 Implement four-state startup detection with a **directional** consistency check: a store behind the identity record means restore; a record behind the store is an ordinary post-crash lag and is simply updated. A symmetric check would mint a new origin after every crash.
-- [ ] 11.2 Implement the unresolved-state behaviour: block appends, accept captures into the spool, resolve automatically where the direction is determinable and ask only where it is not.
-- [ ] 11.3 Implement compiled-in defaults with no `setting` events written on first run, and provenance display in `brain status`.
-- [ ] 11.4 Implement the empty state: name the capture gesture; swap to the CLI instruction when the gesture is unavailable; no sample content.
+- [x] 11.1 Four-state startup detection with a **directional** consistency check. DESIGN.md previously specified a symmetric one — corrected there, with the reason: the event commits before the watermark is written, so a lagging watermark is the ordinary post-crash state and minting an incarnation for it would start a fresh origin after every crash.
+- [x] 11.2 Implement the unresolved-state behaviour: block appends, accept captures into the spool, resolve automatically where the direction is determinable and ask only where it is not.
+- [x] 11.3 Implement compiled-in defaults with no `setting` events written on first run, and provenance display in `brain status`.
+- [x] 11.4 Implement the empty state: name the capture gesture; swap to the CLI instruction when the gesture is unavailable; no sample content.
 - [ ] 11.5 Write the installer: shell keybinding installation, spool preallocation, store creation.
 
 ## 12. Browse
