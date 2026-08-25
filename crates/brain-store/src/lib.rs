@@ -8,20 +8,29 @@
 //! the same mistake wearing an interface — once it exists, nothing stops the
 //! fold taking it, and the fold must be a function of the event set alone.
 
+pub mod ambient;
 pub mod db;
 pub mod drain;
+pub mod due;
 pub mod entropy;
 pub mod error;
 pub mod gate;
 pub mod genesis;
+pub mod gesture;
+pub mod hotkey;
 pub mod identity;
 pub mod incremental;
+pub mod latency;
 pub mod lock;
 pub mod log;
 pub mod ops;
 pub mod paths;
 pub mod projection;
+pub mod purge;
+pub mod ratelimit;
+pub mod session;
 pub mod spool;
+pub mod startup;
 pub mod store;
 pub mod watch;
 

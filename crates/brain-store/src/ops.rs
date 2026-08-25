@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use brain_core::EventId;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Result, db};
@@ -61,7 +62,9 @@ CREATE TABLE IF NOT EXISTS peers (
 -- survives in the search index.
 CREATE TABLE IF NOT EXISTS redact_intent (
   redact_evt BLOB PRIMARY KEY,
-  phase      TEXT NOT NULL
+  tgt        BLOB NOT NULL,
+  phase      TEXT NOT NULL,
+  started_at INTEGER NOT NULL
 ) STRICT;
 
 -- Copies taken just before a redaction executes, so the window in which it can
@@ -72,6 +75,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   redact_evt BLOB NOT NULL,
   tgt        BLOB NOT NULL,
   taken_at   INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
   body       BLOB,
   PRIMARY KEY (redact_evt, tgt)
 ) STRICT;
@@ -79,18 +83,48 @@ CREATE TABLE IF NOT EXISTS snapshots (
 -- Devices this one has deliberately paired with. Without it, \"a device was
 -- added that you did not expect\" is not a computable statement — every
 -- admission looks the same once it is in the log.
+-- How far each origin has been exported.
+--
+-- Per origin, not one number. Events do not arrive in a single global order, so
+-- a scalar watermark either skips whatever landed late or re-exports the whole
+-- archive every time something does — the same mistake a single fold watermark
+-- would be.
+CREATE TABLE IF NOT EXISTS export_head (
+  dev TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS pairings (
   peer_key  BLOB PRIMARY KEY,
   paired_at INTEGER NOT NULL
 ) STRICT;
 ";
 
-/// Key under which the last export's position is recorded.
+fn id_from(b: Vec<u8>) -> Option<EventId> {
+    <[u8; 32]>::try_from(b.as_slice()).ok().map(EventId)
+}
+
+/// When the capture gesture last reached the application.
+const GESTURE_FIRED: &str = "gesture_last_fired";
+
+/// When this device last did anything at all.
+const LAST_ACTIVE: &str = "device_last_active";
+
+/// How long a pre-redaction copy is kept.
 ///
-/// A single row in `local` rather than a table: it is one number, and it must
-/// survive a re-fold, because an export that forgot where it stopped would
-/// either re-emit everything or skip whatever landed while it ran.
-pub const EXPORT_WATERMARK: &str = "export_watermark";
+/// Long enough to notice a redaction fired at the wrong note and act on it;
+/// short enough that it is a safety net rather than a second archive of exactly
+/// the material somebody asked to be destroyed.
+pub const SNAPSHOT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Redactions whose content may still sit in already-written export files.
+const STALE_EXPORTS: &str = "stale_exports";
+
+/// When the due-work queue was last drained.
+const DUE_PROCESSED: &str = "due_last_processed";
+
+/// Bucket counts for how long the overlay takes to appear.
+const LATENCY: &str = "overlay_latency";
 
 /// Handle to this device's local state.
 pub struct Ops {
@@ -185,6 +219,253 @@ impl Ops {
         Ok(())
     }
 
+    /// Keep a copy of what is about to be destroyed.
+    ///
+    /// Local, never exported, and never replicated: it is a safety net for a
+    /// mistake made on this device, and copying it anywhere else would
+    /// reintroduce exactly the plaintext the redaction was issued to remove —
+    /// in a place the redaction cannot reach.
+    pub fn take_snapshot(
+        &self,
+        redact: &EventId,
+        tgt: &EventId,
+        text: &str,
+        at: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO snapshots (redact_evt, tgt, taken_at, expires_at, body)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                redact.0.to_vec(),
+                tgt.0.to_vec(),
+                at as i64,
+                (at + SNAPSHOT_RETENTION_MS) as i64,
+                text.as_bytes()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A copy taken before a redaction, if one was kept and still lives.
+    pub fn snapshot(&self, redact: &EventId, now: u64) -> Result<Option<String>> {
+        let row: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT body FROM snapshots WHERE redact_evt = ?1 AND expires_at > ?2",
+                params![redact.0.to_vec(), now as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.map(|b| String::from_utf8_lossy(&b).to_string()))
+    }
+
+    /// Discard every snapshot whose retention has elapsed.
+    ///
+    /// The retention is the whole point: a copy kept forever is not a safety
+    /// net, it is a second archive of the material somebody asked to be
+    /// destroyed.
+    pub fn expire_snapshots(&self, now: u64) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM snapshots WHERE expires_at <= ?1",
+            params![now as i64],
+        )?;
+        Ok(n)
+    }
+
+    /// How many copies are being held, for reporting.
+    pub fn snapshot_count(&self, now: u64) -> Result<u64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE expires_at > ?1",
+            params![now as i64],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    /// Record that a purge is under way, or how far it has got.
+    ///
+    /// Written before anything is destroyed and updated after each step. It is
+    /// the only thing that can distinguish an interrupted purge from one that
+    /// never started: the redaction event in the log looks identical either
+    /// way, so without this a half-finished purge is never noticed again.
+    pub fn begin_purge(
+        &self,
+        redact: &EventId,
+        tgt: &EventId,
+        phase: crate::purge::Phase,
+        at: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO redact_intent (redact_evt, tgt, phase, started_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(redact_evt) DO UPDATE SET phase = ?3",
+            params![redact.0.to_vec(), tgt.0.to_vec(), phase.as_str(), at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a purge finished, which is the only thing that clears its marker.
+    pub fn finish_purge(&self, redact: &EventId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM redact_intent WHERE redact_evt = ?1",
+            params![redact.0.to_vec()],
+        )?;
+        Ok(())
+    }
+
+    /// Purges that were started and never finished.
+    pub fn unfinished_purges(&self) -> Result<Vec<(EventId, EventId, crate::purge::Phase)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT redact_evt, tgt, phase FROM redact_intent ORDER BY started_at")?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (redact, tgt, phase) = row?;
+            // A phase this build does not recognise is left in place rather
+            // than guessed at: guessing would be guessing how much of an
+            // irreversible operation has already happened.
+            let Some(phase) = crate::purge::Phase::parse(&phase) else {
+                continue;
+            };
+            if let (Some(a), Some(b)) = (id_from(redact), id_from(tgt)) {
+                out.push((a, b, phase));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Note that content was destroyed which older export files still hold.
+    ///
+    /// An export directory is copied offsite by external tools, and nothing
+    /// here can reach it. A redaction destroys the content in this store and in
+    /// every replica; it cannot touch a file already sitting on somebody's
+    /// backup drive. That gap is not closeable from inside the program, so the
+    /// only honest response is to say so and keep saying it until acknowledged.
+    pub fn note_stale_exports(&self, at: u64) -> Result<()> {
+        let count = self.stale_export_count()? + 1;
+        self.set(STALE_EXPORTS, &format!("{count},{at}"))
+    }
+
+    /// How many redactions have happened since the exports were last pruned.
+    pub fn stale_export_count(&self) -> Result<u64> {
+        Ok(self
+            .get(STALE_EXPORTS)?
+            .and_then(|v| v.split(',').next().and_then(|n| n.parse().ok()))
+            .unwrap_or(0))
+    }
+
+    /// Acknowledge that the export directory has been dealt with.
+    ///
+    /// Acknowledgeable rather than self-clearing, because the system cannot
+    /// verify it: the files are somewhere it has no access to. A condition it
+    /// cleared on its own would be claiming to know something it does not.
+    pub fn exports_pruned(&self) -> Result<()> {
+        self.set(STALE_EXPORTS, "0,0")
+    }
+
+    /// Note that the due-work queue was looked at.
+    ///
+    /// Reported by `brain status`. Without it, a queue that has not been
+    /// drained for weeks is indistinguishable from one with nothing in it —
+    /// and the failure that hides is redactions sitting undestroyed while
+    /// every interface reports them complete.
+    pub fn due_processed(&self, at: u64) -> Result<()> {
+        self.set(DUE_PROCESSED, &at.to_string())
+    }
+
+    /// When due work was last processed.
+    pub fn due_last_processed(&self) -> Result<Option<u64>> {
+        Ok(self.get(DUE_PROCESSED)?.and_then(|v| v.parse().ok()))
+    }
+
+    /// Note that the capture gesture actually reached the application.
+    ///
+    /// Local because it is about this device's desktop, not about the archive:
+    /// a chord that works here says nothing about whether one works on another
+    /// machine, and a re-fold must not clear it.
+    pub fn gesture_fired(&self, at: u64) -> Result<()> {
+        self.set(GESTURE_FIRED, &at.to_string())
+    }
+
+    /// When the gesture last reached the application, if it ever has.
+    ///
+    /// `None` means it has never been seen to work — which is a different
+    /// condition from having worked and stopped, and is reported differently.
+    pub fn gesture_last_fired(&self) -> Result<Option<u64>> {
+        Ok(self.get(GESTURE_FIRED)?.and_then(|v| v.parse().ok()))
+    }
+
+    /// Note that the user did something. Anything.
+    ///
+    /// The comparison the dead-gesture check needs. A chord that has not fired
+    /// in a fortnight means nothing on a machine that has been switched off for
+    /// a fortnight; it means a great deal on one that has been capturing all
+    /// week by other means.
+    pub fn was_active(&self, at: u64) -> Result<()> {
+        self.set(LAST_ACTIVE, &at.to_string())
+    }
+
+    /// When this device was last used.
+    pub fn last_active(&self) -> Result<Option<u64>> {
+        Ok(self.get(LAST_ACTIVE)?.and_then(|v| v.parse().ok()))
+    }
+
+    /// Add one overlay-appearance measurement.
+    ///
+    /// Read-modify-write rather than an accumulating table: a histogram is a
+    /// dozen integers, and keeping it as one row means the whole thing is
+    /// written or none of it is.
+    pub fn record_latency(&self, ms: u64) -> Result<()> {
+        let mut h = self.latency()?;
+        h.record(ms);
+        let encoded: Vec<String> = h.counts().iter().map(|c| c.to_string()).collect();
+        self.set(LATENCY, &encoded.join(","))
+    }
+
+    /// What has been measured so far.
+    pub fn latency(&self) -> Result<crate::latency::Histogram> {
+        let Some(raw) = self.get(LATENCY)? else {
+            return Ok(crate::latency::Histogram::default());
+        };
+        let counts: Vec<u64> = raw.split(',').filter_map(|v| v.parse().ok()).collect();
+        Ok(crate::latency::Histogram::from_counts(&counts))
+    }
+
+    /// How far each origin has been exported.
+    pub fn export_heads(&self) -> Result<BTreeMap<String, u64>> {
+        let mut st = self.conn.prepare("SELECT dev, seq FROM export_head")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        let mut out = BTreeMap::new();
+        for r in rows {
+            let (d, s) = r?;
+            out.insert(d, s);
+        }
+        Ok(out)
+    }
+
+    /// Record how far each origin has been exported.
+    ///
+    /// Called only after the export file is on disk. The other order would mean
+    /// a crash between the two silently skipping those events in every future
+    /// export, with nothing to notice it.
+    pub fn set_export_heads(&self, heads: &BTreeMap<String, u64>) -> Result<()> {
+        for (dev, seq) in heads {
+            self.conn.execute(
+                "INSERT INTO export_head (dev, seq) VALUES (?1, ?2)
+                 ON CONFLICT(dev) DO UPDATE SET seq = ?2",
+                params![dev, *seq as i64],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Refusals worth reconsidering, with the bytes needed to do it.
     ///
     /// Only the ones whose reason can stop being true. A bad signature stays a
@@ -270,25 +551,6 @@ mod tests {
         }
         let again = Ops::open(&p).unwrap();
         assert_eq!(again.generation().unwrap(), 3);
-        clean(&p);
-    }
-
-    #[test]
-    fn a_watermark_survives_a_reopen() {
-        // The point of local state: a re-fold must not reset it. An export that
-        // forgot where it stopped would re-emit the archive or skip whatever
-        // landed while it ran.
-        let p = tmp("watermark");
-        {
-            let o = Ops::open(&p).unwrap();
-            assert_eq!(o.get(EXPORT_WATERMARK).unwrap(), None);
-            o.set(EXPORT_WATERMARK, "41822").unwrap();
-        }
-        let again = Ops::open(&p).unwrap();
-        assert_eq!(
-            again.get(EXPORT_WATERMARK).unwrap().as_deref(),
-            Some("41822")
-        );
         clean(&p);
     }
 

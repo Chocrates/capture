@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use brain_core::{EventId, envelope::Envelope, fold};
+use brain_core::{EventId, envelope::Envelope, event::Kind, fold};
 
 use crate::{Result, projection::Store};
 
@@ -32,26 +32,62 @@ use crate::{Result, projection::Store};
 /// The full set is needed because re-folding a note requires its whole history,
 /// not only the part that just turned up.
 pub fn apply(store: &mut Store, all: &[Envelope], arriving: &[Envelope]) -> Result<usize> {
+    // Some events do not name the notes they change. A mute by tag or by date
+    // is a *rule*, and which notes it covers is decided by matching, not by a
+    // target field — so there is nothing in the event to re-fold from.
+    //
+    // Those go the long way round. It is the expensive path and it is the only
+    // correct one: the alternative is an event that appears to have been
+    // applied while the notes it governs are untouched, which is invisible
+    // until somebody notices a muted tag still turning up in searches.
+    if arriving.iter().any(is_global) {
+        let whole = fold::fold(all);
+        store.write(&whole)?;
+        return Ok(whole.notes.len());
+    }
+
     let touched = affected(arriving);
     if touched.is_empty() {
         return Ok(0);
     }
 
-    // Every event belonging to a touched note, however old.
+    // Every event belonging to a touched note, however old — plus every rule
+    // that governs notes without naming them.
+    //
+    // The rules have to come along. A note that has just been given a tag may
+    // now fall under a mute written weeks ago, and a partial fold that left the
+    // rule out would produce a note the mute plainly covers and that is not
+    // muted. There are few of them and they are cheap to carry.
     let relevant: Vec<Envelope> = all
         .iter()
         .filter(|e| {
-            e.header
-                .tgt
-                .map(|t| touched.contains(&t))
-                .unwrap_or_else(|| touched.contains(&e.header.id()))
+            is_global(e)
+                || e.header
+                    .tgt
+                    .map(|t| touched.contains(&t))
+                    .unwrap_or_else(|| touched.contains(&e.header.id()))
         })
         .cloned()
         .collect();
 
-    let partial = fold::fold(&relevant);
+    // Links resolve against every note that existed when they were written, and
+    // `relevant` holds only the touched notes' events. Without the names the
+    // projection already has, every link in a re-folded note would resolve to
+    // nothing — and the note would render perfectly in every other respect, so
+    // nothing would look wrong.
+    let known = store.known_names()?;
+    let partial = fold::fold_seeded(&relevant, &known);
     store.merge(&partial)?;
     Ok(touched.len())
+}
+
+/// Whether an event changes notes it does not name.
+///
+/// A mute carrying a note's identity in `tgt` is ordinary. One that does not is
+/// a rule over a set — every note with a tag, every note from a fortnight — and
+/// the set is not knowable from the event.
+fn is_global(e: &Envelope) -> bool {
+    matches!(e.header.kind, Kind::MUTE if e.header.tgt.is_none())
 }
 
 /// Which notes a batch of events touches.
@@ -85,14 +121,30 @@ mod tests {
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
+    /// Links as a comparable string, so the equivalence check covers them.
+    fn links_of(s: &Store, t: &EventId) -> String {
+        s.links_from(t)
+            .unwrap()
+            .iter()
+            .map(|l| format!("{}->{}", l.name, l.resolved.is_some()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// Everything observable about a projection, for comparison.
+    ///
+    /// Links are included because they are the part an incremental fold is most
+    /// likely to get wrong: they depend on notes *other* than the one being
+    /// re-folded, so a partial fold that looks complete can silently resolve
+    /// them all to nothing. That is exactly what happened, and this snapshot
+    /// missing them is why running the command found it rather than the test.
     ///
     /// Divergence is included deliberately. It is the part most likely to
     /// differ between the two paths, because whether a branch is still a tip
     /// depends on events that may arrive long after the branch did — exactly
     /// the case a partial fold could get wrong while the text still looks
     /// right.
-    type Snap = (Option<String>, Option<String>, u64);
+    type Snap = (Option<String>, Option<String>, u64, String);
 
     fn snapshot(s: &Store, notes: &[EventId]) -> Vec<Snap> {
         notes
@@ -102,6 +154,7 @@ mod tests {
                     s.slug_of(t).unwrap(),
                     s.text_of(t).unwrap(),
                     s.divergence_count(t).unwrap(),
+                    links_of(s, t),
                 )
             })
             .collect()
@@ -141,6 +194,294 @@ mod tests {
             );
             clean(&b);
         }
+    }
+
+    #[test]
+    fn a_link_survives_an_incremental_fold() {
+        // The case the generated scenarios do not reach, because none of them
+        // write links. An incremental fold sees only the touched note's events,
+        // so without the names the projection already holds this resolves to
+        // nothing — and the note renders correctly in every other respect,
+        // which is what makes the failure invisible.
+        let b = base("linked");
+        let path = generation_path(&b, 1);
+        let mut store = Store::open(&path).unwrap();
+
+        let mut d = testing::Origin::new(0);
+        let first = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let first_id = first.header.id();
+        apply(
+            &mut store,
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&first),
+        )
+        .unwrap();
+        let slug = store.slug_of(&first_id).unwrap().unwrap();
+
+        // A second capture, folded in its own batch — the ordinary case, and
+        // the one where the first note is not in the batch at all.
+        let second = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, &format!("see [[{slug}]] for figures")),
+            1_700_000_001_000,
+        );
+        let second_id = second.header.id();
+        let all = vec![first, second.clone()];
+        apply(&mut store, &all, std::slice::from_ref(&second)).unwrap();
+
+        let links = store.links_from(&second_id).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].resolved,
+            Some(first_id),
+            "an incrementally folded link must resolve to the same note a full \
+             fold gives it"
+        );
+
+        // And it agrees with a full rebuild, which is the property that matters.
+        let full_path = generation_path(&b, 2);
+        let mut full = Store::open(&full_path).unwrap();
+        full.write(&fold::fold(&all)).unwrap();
+        assert_eq!(links_of(&store, &second_id), links_of(&full, &second_id));
+        clean(&b);
+    }
+
+    #[test]
+    fn a_link_written_before_its_target_stays_unresolved_incrementally() {
+        // The other direction, and the one a naive seed gets wrong: seeding an
+        // incremental fold with *every* name the projection knows lets a link
+        // resolve to a note created after it was written. The name has to be
+        // the real slug for this to test anything — an invented one matches
+        // nothing and the test passes for the wrong reason.
+        let b = base("forward");
+        let path = generation_path(&b, 1);
+        let mut store = Store::open(&path).unwrap();
+
+        // Authored later in time, so its name exists only from then on.
+        let mut late_author = testing::Origin::new(0);
+        let later = late_author.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "budget planning for next quarter"),
+            1_700_000_900_000,
+        );
+        let later_id = later.header.id();
+        let slug = fold::fold(std::slice::from_ref(&later)).notes[&later_id]
+            .slug
+            .clone();
+
+        // A different device, writing earlier, naming that slug before the note
+        // it names came into being.
+        let mut early_author = testing::Origin::new(1);
+        let early = early_author.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, &format!("see [[{slug}]] soon")),
+            1_700_000_100_000,
+        );
+        let early_id = early.header.id();
+
+        let all = vec![early.clone(), later.clone()];
+        apply(&mut store, &all, std::slice::from_ref(&later)).unwrap();
+        // Now re-fold the earlier note with the later name already known.
+        apply(&mut store, &all, std::slice::from_ref(&early)).unwrap();
+
+        let links = store.links_from(&early_id).unwrap();
+        assert_eq!(links.len(), 1, "the link is recorded either way");
+        assert_eq!(
+            links[0].resolved, None,
+            "a link must never acquire a target its author could not have seen"
+        );
+
+        // And a full rebuild says the same thing.
+        let full_path = generation_path(&b, 2);
+        let mut full = Store::open(&full_path).unwrap();
+        full.write(&fold::fold(&all)).unwrap();
+        assert_eq!(links_of(&store, &early_id), links_of(&full, &early_id));
+        clean(&b);
+    }
+
+    #[test]
+    fn an_alias_survives_a_later_change_to_the_same_note() {
+        // An incremental fold is seeded with the names the projection already
+        // holds, including this note's own alias. Treating mere presence as
+        // "taken" makes the note collide with itself, so the alias is silently
+        // dropped the next time anything else about the note changes — and the
+        // note still renders perfectly, minus its name.
+        let b = base("self-collision");
+        let path = generation_path(&b, 1);
+        let mut store = Store::open(&path).unwrap();
+
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "budget planning for next quarter"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let named = d.author(
+            brain_core::Kind::ALIAS,
+            Some(tgt),
+            None,
+            testing::alias_body(2, Some("q4-budget")),
+            1_700_000_001_000,
+        );
+        let tagged = d.author(
+            brain_core::Kind::TAG,
+            Some(tgt),
+            None,
+            testing::tag_body(3, "finance"),
+            1_700_000_002_000,
+        );
+
+        let mut all = vec![cap.clone()];
+        apply(&mut store, &all, std::slice::from_ref(&cap)).unwrap();
+
+        all.push(named.clone());
+        apply(&mut store, &all, std::slice::from_ref(&named)).unwrap();
+        assert_eq!(
+            store.resolve("q4-budget").unwrap(),
+            Some(tgt),
+            "the alias is assigned"
+        );
+
+        // Anything at all touching the note re-folds it.
+        all.push(tagged.clone());
+        apply(&mut store, &all, std::slice::from_ref(&tagged)).unwrap();
+        assert_eq!(
+            store.resolve("q4-budget").unwrap(),
+            Some(tgt),
+            "and it is still assigned after an unrelated change"
+        );
+
+        // And it matches a full rebuild.
+        let full_path = generation_path(&b, 2);
+        let mut full = Store::open(&full_path).unwrap();
+        full.write(&fold::fold(&all)).unwrap();
+        assert_eq!(full.resolve("q4-budget").unwrap(), Some(tgt));
+        clean(&b);
+    }
+
+    /// A mute over every note carrying a tag.
+    fn tag_mute(d: &mut testing::Origin, tag: &str, at: u64) -> Envelope {
+        d.author(
+            brain_core::Kind::MUTE,
+            None,
+            None,
+            testing::encode(&brain_core::body::MuteBody {
+                nonce: [9u8; 16],
+                scope: brain_core::body::MuteScope::Tag(tag.to_string()),
+                until: None,
+            }),
+            at,
+        )
+    }
+
+    #[test]
+    fn a_rule_reaches_notes_it_does_not_name() {
+        // A mute by tag names no note at all, so there is nothing in it to
+        // re-fold from. Applying it as an ordinary targeted event would leave
+        // every note it governs untouched — and nothing would look wrong until
+        // somebody noticed a muted tag still turning up in searches.
+        let b = base("rule-reaches");
+        let path = generation_path(&b, 1);
+        let mut store = Store::open(&path).unwrap();
+
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "a note that will be quietened"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let tag = d.author(
+            brain_core::Kind::TAG,
+            Some(tgt),
+            None,
+            testing::tag_body(2, "noise"),
+            1_700_000_001_000,
+        );
+
+        let mut all = vec![cap.clone(), tag.clone()];
+        apply(&mut store, &all, &all.clone()).unwrap();
+        assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
+
+        let mute = tag_mute(&mut d, "noise", 1_700_000_002_000);
+        all.push(mute.clone());
+        apply(&mut store, &all, std::slice::from_ref(&mute)).unwrap();
+
+        assert_eq!(
+            store.note(&tgt).unwrap().unwrap().muted_until,
+            Some(0),
+            "the rule must reach a note it never named"
+        );
+    }
+
+    #[test]
+    fn a_note_that_becomes_eligible_later_is_covered() {
+        // The same problem from the other side. The note is re-folded because
+        // it was tagged, and the rule that now covers it is not among its own
+        // events — so a partial fold that carried only those would produce a
+        // note the mute plainly covers and that is not muted.
+        let b = base("becomes-eligible");
+        let path = generation_path(&b, 1);
+        let mut store = Store::open(&path).unwrap();
+
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "a note tagged after the rule"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let mute = tag_mute(&mut d, "noise", 1_700_000_001_000);
+
+        let mut all = vec![cap.clone(), mute.clone()];
+        apply(&mut store, &all, &all.clone()).unwrap();
+        assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
+
+        // Now it qualifies.
+        let tag = d.author(
+            brain_core::Kind::TAG,
+            Some(tgt),
+            None,
+            testing::tag_body(3, "noise"),
+            1_700_000_002_000,
+        );
+        all.push(tag.clone());
+        apply(&mut store, &all, std::slice::from_ref(&tag)).unwrap();
+
+        assert_eq!(
+            store.note(&tgt).unwrap().unwrap().muted_until,
+            Some(0),
+            "an existing rule must cover a note that has just become eligible"
+        );
+
+        // And a full rebuild agrees, which is the property that matters.
+        let full_path = generation_path(&b, 2);
+        let mut full = Store::open(&full_path).unwrap();
+        full.write(&fold::fold(&all)).unwrap();
+        assert_eq!(
+            full.note(&tgt).unwrap().unwrap().muted_until,
+            store.note(&tgt).unwrap().unwrap().muted_until
+        );
+        clean(&b);
     }
 
     #[test]
@@ -290,7 +631,10 @@ mod tests {
             std::slice::from_ref(&cap),
         )
         .unwrap();
-        assert_eq!(store.search("aardvark").unwrap().len(), 1);
+        assert_eq!(
+            store.search("aardvark", 1_800_000_000_000).unwrap().len(),
+            1
+        );
 
         let edit = d.author(
             brain_core::Kind::EDIT,
@@ -302,9 +646,15 @@ mod tests {
         let all = vec![cap, edit.clone()];
         apply(&mut store, &all, &[edit]).unwrap();
 
-        assert_eq!(store.search("pangolin").unwrap().len(), 1);
+        assert_eq!(
+            store.search("pangolin", 1_800_000_000_000).unwrap().len(),
+            1
+        );
         assert!(
-            store.search("aardvark").unwrap().is_empty(),
+            store
+                .search("aardvark", 1_800_000_000_000)
+                .unwrap()
+                .is_empty(),
             "the superseded text must not remain findable"
         );
         clean(&b);

@@ -250,6 +250,78 @@ impl Log {
             as u64)
     }
 
+    /// Every event, paired with the identity the row was stored under.
+    ///
+    /// The stored id is carried separately because the whole point of checking
+    /// it is that it might disagree with the one the header produces. `all()`
+    /// recomputes the id from the header and can therefore never notice a row
+    /// whose key was corrupted — it would simply hand back a different event
+    /// than the one that was written, with nothing to compare against.
+    pub fn rows(&self) -> Result<Vec<(EventId, Envelope)>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events ORDER BY dev, seq",
+        )?;
+        let rows = st.query_map([], |r| {
+            let mut stored = [0u8; 32];
+            let raw: Vec<u8> = r.get(0)?;
+            if raw.len() == 32 {
+                stored.copy_from_slice(&raw);
+            }
+            Ok((EventId(stored), row_to_envelope(r)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Remove the payload of every event belonging to a note.
+    ///
+    /// The header stays, and so does the signature: an event with no body still
+    /// recomputes its own id and still verifies, because the body appears in
+    /// the header only as a hash. That is what lets a redacted archive pass
+    /// `brain verify` rather than reading as damaged.
+    ///
+    /// The connection sets `secure_delete`, so the freed pages are overwritten
+    /// as they are released rather than left holding the old bytes.
+    /// The redaction and its cancellation keep their own payloads. A redaction
+    /// has to be **retained** — it must destroy matching events that arrive
+    /// after it, or "destroyed" would mean "destroyed unless something was
+    /// slow" — and its payload is the only record of what it names. Destroying
+    /// it along with everything else leaves a note whose content is gone and
+    /// nothing anywhere saying why, or that anything further should be
+    /// destroyed when it turns up.
+    pub fn destroy_bodies(&mut self, tgt: &EventId) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE events SET body = NULL
+             WHERE (tgt = ?1 OR id = ?1)
+               AND body IS NOT NULL
+               AND kind NOT IN (?2, ?3)",
+            params![
+                tgt.0.to_vec(),
+                brain_core::event::Kind::REDACT.0 as i64,
+                brain_core::event::Kind::REDACT_CANCEL.0 as i64
+            ],
+        )?;
+        Ok(n)
+    }
+
+    /// Force the write-ahead log into the database file.
+    ///
+    /// Without this, destroyed bytes can sit in the `-wal` sidecar
+    /// indefinitely. `secure_delete` overwrites pages inside the database; it
+    /// has nothing to say about a write-ahead log that still holds the old
+    /// version of them, and anything reading that file directly finds the
+    /// content the purge was supposed to remove.
+    pub fn checkpoint(&mut self) -> Result<()> {
+        self.conn
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        Ok(())
+    }
+
     /// Whether some event already commits to this payload.
     ///
     /// Used to make draining the spool exactly-once. A spooled capture has no

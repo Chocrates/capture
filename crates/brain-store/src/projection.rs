@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use brain_core::{
     Dev, EventId,
     envelope::Envelope,
-    fold::{Held, Projection},
+    fold::{Held, Names, Projection},
+    hlc::Hlc,
     roster::Roster,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -44,6 +45,9 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS notes (
   tgt             BLOB PRIMARY KEY,
   slug            TEXT NOT NULL UNIQUE,
+  alias           TEXT UNIQUE,
+  alias_wall      INTEGER,
+  alias_counter   INTEGER,
   text            TEXT,
   head            BLOB NOT NULL,
   created_wall    INTEGER NOT NULL,
@@ -53,7 +57,11 @@ CREATE TABLE IF NOT EXISTS notes (
   tz              TEXT,
   pinned          INTEGER NOT NULL DEFAULT 0,
   muted_until     INTEGER,
-  redacted_at     INTEGER
+  redacted_at     INTEGER,
+  -- Set at capture by a predicate that deliberately over-flags. Keeps the note
+  -- out of exports until someone clears it, because an export directory is
+  -- copied offsite where redaction can never reach.
+  credential      INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS notes_updated ON notes(updated_wall DESC, updated_counter DESC);
@@ -82,10 +90,38 @@ CREATE TABLE IF NOT EXISTS divergences (
   PRIMARY KEY (tgt, current, other)
 ) STRICT;
 
+-- Links written in each note's current text.
+--
+-- Both halves are stored: the name as it was typed, and what that name meant
+-- when it was typed. A reader compares them, and shows the link as broken when
+-- they disagree rather than following the name to wherever it points now.
+CREATE TABLE IF NOT EXISTS links (
+  src      BLOB NOT NULL,
+  ord      INTEGER NOT NULL,
+  name     TEXT NOT NULL,
+  resolved BLOB,
+  PRIMARY KEY (src, ord)
+) STRICT;
+
+-- Backlinks are read far more often than they are written: every note view
+-- asks what points at it.
+CREATE INDEX IF NOT EXISTS links_resolved ON links(resolved);
+
 CREATE TABLE IF NOT EXISTS tags (
   tgt BLOB NOT NULL,
   tag TEXT NOT NULL,
   PRIMARY KEY (tgt, tag)
+) STRICT;
+
+-- Which tag events still stand behind each tag. An untag retracts specific
+-- additions rather than a word, so removing a tag needs to know exactly which
+-- events put it there — and must not touch an addition made on a device this
+-- one has never heard from.
+CREATE TABLE IF NOT EXISTS tag_adds (
+  tgt      BLOB NOT NULL,
+  tag      TEXT NOT NULL,
+  event_id BLOB NOT NULL,
+  PRIMARY KEY (tgt, event_id)
 ) STRICT;
 
 -- Events stored and verified, but not folded: an unrecognised kind, an
@@ -150,10 +186,14 @@ CREATE TABLE IF NOT EXISTS device_caps (
 -- Absent means the compiled-in default. Rows are never seeded, because status
 -- has to distinguish \"default\" from \"you set this\", and a seeded row cannot.
 CREATE TABLE IF NOT EXISTS settings (
-  k      TEXT PRIMARY KEY,
-  v      TEXT NOT NULL,
-  set_by TEXT,
-  hlc    BLOB
+  k           TEXT PRIMARY KEY,
+  -- Nullable on purpose: a user who explicitly restores the default has made a
+  -- choice, and that is a different fact from never having chosen. Only the
+  -- second should follow a future change to what the default is.
+  v           TEXT,
+  set_by      TEXT NOT NULL,
+  hlc_wall    INTEGER NOT NULL,
+  hlc_counter INTEGER NOT NULL
 ) STRICT;
 
 -- Queued destructions. Derived from the redaction events and their
@@ -186,6 +226,85 @@ CREATE TABLE IF NOT EXISTS quarantine (
   first_seen INTEGER NOT NULL
 ) STRICT;
 ";
+
+/// One note, as a view needs it.
+///
+/// Every state a note can be in is representable here rather than being an
+/// absence: a note with no readable text is not the same thing as a note that
+/// was redacted, and rendering either as a blank row loses the distinction the
+/// reader most needs.
+#[derive(Clone, Debug)]
+pub struct NoteRow {
+    pub tgt: EventId,
+    pub slug: String,
+    /// A chosen name, if one is assigned. Shares one namespace with slugs.
+    pub alias: Option<String>,
+    /// Absent when the note has been redacted, or has no readable text yet.
+    pub text: Option<String>,
+    pub created: (u64, u32),
+    pub updated: (u64, u32),
+    /// The zone the capture happened in — the timeline groups by this and not
+    /// by the reader's zone, so travel does not misfile a note.
+    pub tz: Option<String>,
+    pub pinned: bool,
+    pub muted_until: Option<u64>,
+    pub redacted_at: Option<u64>,
+    /// Kept out of exports until cleared. See the fold's `credential` field.
+    pub credential: bool,
+    pub tags: Vec<String>,
+    /// How many unreconciled branches the note has.
+    pub divergences: u64,
+}
+
+impl NoteRow {
+    /// Whether the note's content was destroyed.
+    pub fn is_redacted(&self) -> bool {
+        self.redacted_at.is_some()
+    }
+}
+
+/// A link as written, alongside what its name means now.
+#[derive(Clone, Debug)]
+pub struct LinkRow {
+    /// The name the author typed.
+    pub name: String,
+    /// What that name meant when it was written.
+    pub resolved: Option<EventId>,
+    /// What the same name denotes now. Often the same note; sometimes another
+    /// one, if an alias moved; sometimes nothing.
+    pub now: Option<EventId>,
+    /// The canonical name of the note it was written against, if that note is
+    /// still here.
+    pub target_slug: Option<String>,
+}
+
+impl LinkRow {
+    /// Whether the name no longer denotes what it did when it was written.
+    ///
+    /// Compared by **target**, not by string. A note reached through an alias
+    /// has a name that never equalled its slug, and comparing text would call
+    /// every such link broken; a name that has been reassigned to a different
+    /// note compares equal to nothing and would be missed the other way.
+    ///
+    /// A link that never resolved is not broken. A forward reference that was
+    /// never fulfilled is a different thing from one that was and then moved,
+    /// and conflating them would make the marker meaningless.
+    pub fn is_broken(&self) -> bool {
+        match self.resolved {
+            Some(then) => self.now != Some(then),
+            None => false,
+        }
+    }
+}
+
+/// A note that links to another.
+#[derive(Clone, Debug)]
+pub struct Backlink {
+    pub tgt: EventId,
+    pub slug: String,
+    /// The name that note used to refer here.
+    pub name: String,
+}
 
 /// A handle to the projection.
 pub struct Store {
@@ -250,8 +369,9 @@ impl Store {
     pub fn write(&mut self, p: &Projection) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
-            "DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
-             DELETE FROM tags; DELETE FROM held;
+            "DELETE FROM settings;
+             DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
+             DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map;",
         )?;
         write_into(&tx, p)?;
@@ -273,6 +393,9 @@ impl Store {
             tx.execute("DELETE FROM note_versions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM divergences WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
+            tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
             if let Some(row) = fts_row(&tx, tgt)? {
                 tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
             }
@@ -338,14 +461,26 @@ impl Store {
     }
 
     /// Notes matching a search, most relevant first.
-    pub fn search(&self, query: &str) -> Result<Vec<EventId>> {
+    ///
+    /// Muted notes are left out. That is what muting is for: the note stays in
+    /// the timeline, where it can be seen in its place, and stops appearing in
+    /// the surfaces that put things in front of you. A mute that only greyed
+    /// something out would not be worth reaching for, and the whole point is
+    /// that suppressing something has to be *cheaper* than destroying it.
+    ///
+    /// A lapsed mute suppresses nothing, so the expiry is compared here rather
+    /// than baked into the row.
+    pub fn search(&self, query: &str, now: u64) -> Result<Vec<EventId>> {
         let mut st = self.conn.prepare(
             "SELECT m.tgt FROM note_fts f
              JOIN fts_map m ON m.rowid = f.rowid
+             JOIN notes n ON n.tgt = m.tgt
              WHERE note_fts MATCH ?1
+               AND (n.muted_until IS NULL
+                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
              ORDER BY rank",
         )?;
-        let rows = st.query_map(params![query], |r| r.get::<_, Vec<u8>>(0))?;
+        let rows = st.query_map(params![query, now as i64], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = Vec::new();
         for row in rows {
             let b = row?;
@@ -367,6 +502,321 @@ impl Store {
             params![tgt.0.to_vec()],
             |r| r.get::<_, i64>(0),
         )? as u64)
+    }
+
+    /// Every name the projection knows, with the moment it started existing.
+    ///
+    /// Feeds an incremental fold, which sees only the events of the notes that
+    /// changed and would otherwise resolve every link to nothing.
+    pub fn known_names(&self) -> Result<Names> {
+        // Slugs and aliases both, because they share one namespace and a link
+        // may be written against either. Each carries the moment it started
+        // denoting its note — a slug from the capture, an alias from its
+        // assignment — so a link written earlier does not resolve through it.
+        let mut st = self.conn.prepare(
+            "SELECT slug, tgt, created_wall, created_counter FROM notes
+             UNION ALL
+             SELECT alias, tgt, alias_wall, alias_counter FROM notes
+             WHERE alias IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                id_from(r.get::<_, Vec<u8>>(1)?).unwrap_or(EventId([0; 32])),
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u32,
+            ))
+        })?;
+        let mut out = Names::new();
+        for row in rows {
+            let (name, tgt, wall, counter) = row?;
+            out.insert(
+                name,
+                (
+                    tgt,
+                    Hlc {
+                        wall,
+                        counter,
+                        origin: Dev([0; 32]),
+                    },
+                ),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Everything a view needs about one note, in one read.
+    pub fn note(&self, tgt: &EventId) -> Result<Option<NoteRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT tgt, slug, alias, text, created_wall, created_counter,
+                        updated_wall, updated_counter, tz, pinned, muted_until,
+                        redacted_at, credential
+                 FROM notes WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                note_row,
+            )
+            .optional()?;
+        let Some(mut n) = row else { return Ok(None) };
+        n.tags = self.tags_of(tgt)?;
+        n.divergences = self.divergence_count(tgt)?;
+        Ok(Some(n))
+    }
+
+    /// Resolve a name to a note.
+    ///
+    /// One namespace. A name is a slug or it is nothing — aliases join the same
+    /// namespace when they arrive, which is what stops an alias shadowing
+    /// another note's canonical name.
+    pub fn resolve(&self, name: &str) -> Result<Option<EventId>> {
+        let row: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT tgt FROM notes WHERE slug = ?1 OR alias = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.and_then(id_from))
+    }
+
+    /// Notes newest first.
+    ///
+    /// Ordered by **capture** time, not by last change. A view that reshuffled
+    /// whenever something was edited would destroy the spatial memory that makes
+    /// a timeline findable — and the design leans on that memory rather than on
+    /// the user remembering where they filed things.
+    pub fn timeline(&self, limit: usize) -> Result<Vec<NoteRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT tgt, slug, alias, text, created_wall, created_counter,
+                    updated_wall, updated_counter, tz, pinned, muted_until,
+                    redacted_at, credential
+             FROM notes
+             ORDER BY created_wall DESC, created_counter DESC
+             LIMIT ?1",
+        )?;
+        let rows = st.query_map(params![limit as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let mut n = r?;
+            n.tags = self.tags_of(&n.tgt)?;
+            n.divergences = self.divergence_count(&n.tgt)?;
+            out.push(n);
+        }
+        Ok(out)
+    }
+
+    /// A note's tags.
+    pub fn tags_of(&self, tgt: &EventId) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT tag FROM tags WHERE tgt = ?1 ORDER BY tag")?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// When redactions were issued, and how many targets each named.
+    ///
+    /// Feeds the hourly ceiling. Derived from the log like everything else
+    /// here, so a restored device rebuilds the history rather than starting
+    /// with a clean allowance — which is what a device that had just been
+    /// compromised would otherwise get by being restored.
+    pub fn redaction_history(&self) -> Result<Vec<(u64, usize)>> {
+        let mut st = self.conn.prepare(
+            "SELECT v.hlc_wall, COUNT(*) FROM note_versions v
+             WHERE v.kind = ?1 GROUP BY v.event_id, v.hlc_wall",
+        )?;
+        let rows = st.query_map(params![brain_core::event::Kind::REDACT.0 as i64], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as usize))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Redactions waiting for their window to elapse.
+    ///
+    /// Kept here rather than in local state, and that placement is the whole
+    /// point: it is a function of the redaction events, so a restored device
+    /// rebuilds it by replaying the log. Local state would be wiped by a
+    /// re-fold, after which the device would report every redaction complete
+    /// while holding every plaintext it was told to destroy.
+    pub fn redact_queue(&self) -> Result<Vec<(EventId, EventId, u64, bool)>> {
+        let mut st = self.conn.prepare(
+            "SELECT redact_evt, tgt, execute_after, cancelled FROM redact_queue
+             ORDER BY execute_after",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? != 0,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (a, b, at, cancelled) = row?;
+            if let (Some(a), Some(b)) = (id_from(a), id_from(b)) {
+                out.push((a, b, at, cancelled));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Remove every derived copy of a note's content.
+    ///
+    /// The row itself stays: a note that stops existing on redaction would take
+    /// its links, its place in the timeline and any reference to it with it,
+    /// and the archive would silently lose an entry rather than its content.
+    /// What goes is the text, the search index entry, and the version rows that
+    /// could reconstruct either.
+    pub fn purge_note(&mut self, tgt: &EventId, at: u64) -> Result<()> {
+        let t = tgt.0.to_vec();
+        let tx = self.conn.transaction()?;
+
+        // The search index first. It is the one place that answers queries with
+        // content, so leaving it for last would keep the text findable through
+        // every other step.
+        if let Some(row) = fts_row(&tx, tgt)? {
+            tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
+            tx.execute("DELETE FROM fts_map WHERE tgt = ?1", params![t])?;
+        }
+
+        // `redacted_at` is set here as well as the text being cleared. A row
+        // with no text and no destruction time is a different thing — a note
+        // whose content has not arrived yet — and a reader shown "no readable
+        // text" where "content destroyed" was true has been told the wrong
+        // story about their own archive.
+        tx.execute(
+            "UPDATE notes SET text = NULL, slug = ?2, redacted_at = ?3 WHERE tgt = ?1",
+            params![t, brain_core::slug::derive_redacted(tgt).text, at as i64],
+        )?;
+        tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Notes the credential predicate flagged, which exports leave out.
+    pub fn credential_flagged(&self) -> Result<Vec<(EventId, String)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT tgt, slug FROM notes WHERE credential = 1 ORDER BY slug")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, slug) = r?;
+            if let Some(id) = id_from(id) {
+                out.push((id, slug));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Preferences that were actually chosen, with who chose them and when.
+    ///
+    /// A key that is absent has never been chosen. That absence is the whole
+    /// point: it is what lets status say "default" rather than reporting a
+    /// value with no indication of where it came from.
+    pub fn settings(&self) -> Result<Vec<(String, Option<String>, String)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT k, v, set_by FROM settings ORDER BY k")?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The `tag` events that put a tag on a note.
+    ///
+    /// An untag names these rather than naming the tag. Tags are an add-wins
+    /// set: a tag added on a device this one has not heard from must survive a
+    /// removal that never saw it, which is only expressible by retracting the
+    /// specific additions that were observed.
+    pub fn tag_events(&self, tgt: &EventId, tag: &str) -> Result<Vec<EventId>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT event_id FROM tag_adds WHERE tgt = ?1 AND tag = ?2")?;
+        let rows = st.query_map(params![tgt.0.to_vec(), tag], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(id) = id_from(r?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The competing versions of a note that nothing has superseded.
+    pub fn divergent_versions(&self, tgt: &EventId) -> Result<Vec<EventId>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT other FROM divergences WHERE tgt = ?1")?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(id) = id_from(r?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Links written in a note, in the order they appear in its text.
+    pub fn links_from(&self, tgt: &EventId) -> Result<Vec<LinkRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT l.name,
+                    l.resolved,
+                    (SELECT tgt FROM notes WHERE slug = l.name OR alias = l.name),
+                    (SELECT slug FROM notes WHERE tgt = l.resolved)
+             FROM links l
+             WHERE l.src = ?1 ORDER BY l.ord",
+        )?;
+        let rows = st.query_map(params![tgt.0.to_vec()], link_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Notes linking to this one.
+    pub fn links_to(&self, tgt: &EventId) -> Result<Vec<Backlink>> {
+        let mut st = self.conn.prepare(
+            "SELECT n.tgt, n.slug, l.name
+             FROM links l JOIN notes n ON n.tgt = l.src
+             WHERE l.resolved = ?1 ORDER BY n.created_wall DESC",
+        )?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
+            Ok(Backlink {
+                tgt: id_from(r.get::<_, Vec<u8>>(0)?).unwrap_or(EventId([0; 32])),
+                slug: r.get(1)?,
+                name: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Replace the materialised roster.
@@ -494,16 +944,46 @@ fn fts_row(tx: &rusqlite::Transaction<'_>, tgt: &EventId) -> Result<Option<i64>>
 }
 
 fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
+    for (k, v) in &p.settings {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (k, v, set_by, hlc_wall, hlc_counter)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                k,
+                v.value,
+                dev_hex(&v.set_by),
+                v.at.wall as i64,
+                v.at.counter as i64
+            ],
+        )?;
+    }
+
     for (tgt, n) in &p.notes {
+        if let Some(pending) = &n.redaction_pending {
+            tx.execute(
+                "INSERT OR REPLACE INTO redact_queue (redact_evt, tgt, execute_after, cancelled)
+                 VALUES (?1,?2,?3,0)",
+                params![
+                    pending.redact.0.to_vec(),
+                    tgt.0.to_vec(),
+                    pending.execute_after as i64
+                ],
+            )?;
+        }
+
         let t = tgt.0.to_vec();
         tx.execute(
             "INSERT INTO notes
-               (tgt, slug, text, head, created_wall, created_counter,
-                updated_wall, updated_counter, tz, pinned, muted_until, redacted_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+               (tgt, slug, alias, alias_wall, alias_counter, text, head,
+                created_wall, created_counter, updated_wall, updated_counter,
+                tz, pinned, muted_until, redacted_at, credential)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 t,
                 n.slug,
+                n.alias,
+                n.alias_at.map(|h| h.wall as i64),
+                n.alias_at.map(|h| h.counter as i64),
                 n.text,
                 n.head.0.to_vec(),
                 n.created.wall as i64,
@@ -514,6 +994,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
                 n.pinned as i64,
                 n.muted_until.map(|v| v as i64),
                 n.redacted_at.map(|h| h.wall as i64),
+                n.credential as i64,
             ],
         )?;
 
@@ -541,10 +1022,24 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
             )?;
         }
 
+        for (i, l) in n.links.iter().enumerate() {
+            tx.execute(
+                "INSERT OR REPLACE INTO links (src, ord, name, resolved) VALUES (?1,?2,?3,?4)",
+                params![t, i as i64, l.name, l.resolved.map(|x| x.0.to_vec())],
+            )?;
+        }
+
         for tag in &n.tags {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (tgt, tag) VALUES (?1, ?2)",
                 params![t, tag],
+            )?;
+        }
+
+        for (tag, add) in &n.tag_adds {
+            tx.execute(
+                "INSERT OR REPLACE INTO tag_adds (tgt, tag, event_id) VALUES (?1,?2,?3)",
+                params![t, tag, add.0.to_vec()],
             )?;
         }
 
@@ -627,6 +1122,37 @@ pub fn discard_generation(base: &Path, generation: u64) -> Result<()> {
         let _ = std::fs::remove_file(PathBuf::from(q));
     }
     Ok(())
+}
+
+fn id_from(b: Vec<u8>) -> Option<EventId> {
+    <[u8; 32]>::try_from(b.as_slice()).ok().map(EventId)
+}
+
+fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
+    Ok(NoteRow {
+        tgt: id_from(r.get::<_, Vec<u8>>(0)?).unwrap_or(EventId([0; 32])),
+        slug: r.get(1)?,
+        alias: r.get(2)?,
+        text: r.get(3)?,
+        created: (r.get::<_, i64>(4)? as u64, r.get::<_, i64>(5)? as u32),
+        updated: (r.get::<_, i64>(6)? as u64, r.get::<_, i64>(7)? as u32),
+        tz: r.get(8)?,
+        pinned: r.get::<_, i64>(9)? != 0,
+        muted_until: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        redacted_at: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+        credential: r.get::<_, i64>(12)? != 0,
+        tags: Vec::new(),
+        divergences: 0,
+    })
+}
+
+fn link_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRow> {
+    Ok(LinkRow {
+        name: r.get(0)?,
+        resolved: r.get::<_, Option<Vec<u8>>>(1)?.and_then(id_from),
+        now: r.get::<_, Option<Vec<u8>>>(2)?.and_then(id_from),
+        target_slug: r.get(3)?,
+    })
 }
 
 fn dev_hex(d: &Dev) -> String {
@@ -729,7 +1255,7 @@ mod tests {
         );
         let g = rebuild(&b, std::slice::from_ref(&e), 0).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
-        let hits = store.search("staging").unwrap();
+        let hits = store.search("staging", 1_800_000_000_000).unwrap();
         assert_eq!(hits, alloc_vec(&[e.header.id()]));
         clean(&b);
     }
@@ -757,8 +1283,16 @@ mod tests {
         );
         let g = rebuild(&b, &[cap, edit], 0).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
-        assert_eq!(store.search("pangolin").unwrap().len(), 1);
-        assert!(store.search("original").unwrap().is_empty());
+        assert_eq!(
+            store.search("pangolin", 1_800_000_000_000).unwrap().len(),
+            1
+        );
+        assert!(
+            store
+                .search("original", 1_800_000_000_000)
+                .unwrap()
+                .is_empty()
+        );
         clean(&b);
     }
 
@@ -789,9 +1323,27 @@ mod tests {
         );
 
         let g = rebuild(&b, &[cap, red], 0).unwrap();
-        let store = Store::open_read(&generation_path(&b, g)).unwrap();
+        let mut store = Store::open(&generation_path(&b, g)).unwrap();
+
+        // A redaction on its own destroys nothing: that is the cancellation
+        // window, and the content stays readable and findable throughout it.
+        assert_eq!(
+            store
+                .search("distinctive", 1_800_000_000_000)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.text_of(&tgt).unwrap().is_some());
+        assert_eq!(store.redact_queue().unwrap().len(), 1, "and it is queued");
+
+        // The purge is what removes it.
+        store.purge_note(&tgt, 1_700_000_003_000).unwrap();
         assert!(
-            store.search("distinctive").unwrap().is_empty(),
+            store
+                .search("distinctive", 1_800_000_000_000)
+                .unwrap()
+                .is_empty(),
             "destroying the payload but leaving the index would keep it searchable"
         );
         assert!(store.text_of(&tgt).unwrap().is_none());
