@@ -16,7 +16,7 @@ CARGO ?= cargo
 SCRATCH ?= /tmp/brain-scratch-$(USER)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact purity deny \
+.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
         build release install demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -42,7 +42,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool purity deny
+ci: fmt-check lint test pty tamper roundtrip spool redact purity deny
 	@echo
 	@echo 'ci: all gates passed'
 
@@ -95,6 +95,28 @@ tamper:
 # produces at the same layer, without needing a spare filesystem.
 spool:
 	$(CARGO) test -p brain-cli --test spool -- --ignored --test-threads=1
+
+## accept: the M1 exit criteria — every suite that gates the milestone
+#
+# Everything `ci` runs, plus the scenario suite. What it cannot cover is
+# written into the summary rather than left implied: two of the thirteen
+# acceptance items need a person.
+accept: ci scenarios
+	@echo
+	@echo 'M1 acceptance'
+	@echo '  automated gates:  passed'
+	@echo
+	@echo '  still needs a person:'
+	@echo '    13.5  press the chord on this compositor and see the window'
+	@echo '    13.6  use it for a day; fix what makes capture feel slow'
+	@echo
+	@echo '  blocked:'
+	@echo '    group 12  browse — needs libwebkit2gtk-4.1-dev'
+	@echo '    8.7/8.8   portal and X11 backends are unreachable on this session'
+
+## scenarios: the spec's scenarios, driven through the binary
+scenarios:
+	$(CARGO) test -p brain-cli --test scenarios -- --ignored --test-threads=1
 
 ## redact: destroy content and check what has to survive it
 redact:

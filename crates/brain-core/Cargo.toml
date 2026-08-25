@@ -26,7 +26,9 @@ any_ascii = { workspace = true }
 proptest = { workspace = true }
 minicbor = { workspace = true }
 # Integration tests link std; the library itself remains no_std.
-brain-core = { path = ".", features = ["std"] }
+# `testing` is needed by the acceptance suite, which drives the same generated
+# scenarios the unit tests use.
+brain-core = { path = ".", features = ["std", "testing"] }
 
 [features]
 default = []

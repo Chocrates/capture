@@ -144,9 +144,9 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 
 ## 13. Verification and acceptance
 
-- [ ] 13.1 Assemble the `brain-core` property suite: encoding determinism against golden vectors, identity, chain, HLC ordering, fold determinism, incremental ≡ full, divergence detection, tag convergence, slug collision resolution.
-- [ ] 13.2 Write CLI integration tests asserting against `--json`, covering each spec scenario.
-- [ ] 13.3 Run the crash harness across append, purge, spool drain and rebuild; assert no gaps, no partial rows, and no state in which the index matches destroyed content.
-- [ ] 13.4 Run `brain verify` over a synthetic log containing redacted, quarantined and rejected events; confirm exit codes.
+- [x] 13.1 Assemble the `brain-core` property suite: encoding determinism against golden vectors, identity, chain, HLC ordering, fold determinism, incremental ≡ full, divergence detection, tag convergence, slug collision resolution.
+- [x] 13.2 Write CLI integration tests asserting against `--json`, covering each spec scenario.
+- [x] 13.3 Run the crash harness across append, purge, spool drain and rebuild; assert no gaps, no partial rows, and no state in which the index matches destroyed content.
+- [x] 13.4 Run `brain verify` over a synthetic log containing redacted, quarantined and rejected events; confirm exit codes.
 - [ ] 13.5 Confirm the hotkey works end to end on the actual target compositor before declaring M1 done.
 - [ ] 13.6 Use it for a day. Fix what makes capture feel slow or uncertain before starting M2.

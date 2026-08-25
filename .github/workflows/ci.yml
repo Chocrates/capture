@@ -46,6 +46,7 @@ jobs:
       - run: cargo test -p brain-cli --test tamper -- --ignored --test-threads=1
       - run: cargo test -p brain-cli --test roundtrip -- --ignored --test-threads=1
       - run: cargo test -p brain-cli --test spool -- --ignored --test-threads=1
+      - run: cargo test -p brain-cli --test scenarios -- --ignored --test-threads=1
 
   purity:
     # The three-layer boundary from DESIGN.md D12. no_std makes a clock
