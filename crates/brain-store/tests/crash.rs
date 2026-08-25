@@ -48,7 +48,7 @@ use brain_store::{
     log::Log,
     ops::Ops,
     projection::{self, Store},
-    spool,
+    purge, spool,
 };
 
 /// How many kill-and-inspect rounds each mode gets.
@@ -135,11 +135,18 @@ impl Drop for Scratch {
 /// a leaked victim would keep writing to the store the next round is inspecting
 /// and turn one failure into a run of unrelated ones.
 fn run_and_kill(mode: &str, root: &Path, rng: &mut Rng) -> Duration {
-    let mut child: Child = Command::new(victim())
-        .arg(mode)
-        .arg(root)
-        .spawn()
-        .expect("victim starts");
+    let mut cmd = Command::new(victim());
+    cmd.arg(mode).arg(root);
+
+    // The purge's interesting window — between the projection being cleared and
+    // the payload being destroyed — is microseconds wide. Widening it is the
+    // only way a kill lands there often enough to test, and it widens a real
+    // window rather than simulating a fake one.
+    if mode == "redact" {
+        cmd.env("BRAIN_PURGE_PAUSE_MS", "40");
+    }
+
+    let mut child: Child = cmd.spawn().expect("victim starts");
 
     let lifetime = rng.duration(MIN_RUN, MAX_RUN);
     let start = Instant::now();
@@ -325,6 +332,113 @@ fn a_killed_drain_neither_loses_nor_duplicates_a_capture() {
     assert!(
         highest > 0,
         "nothing was ever spooled or drained — the harness proved nothing"
+    );
+}
+
+#[test]
+fn a_killed_purge_never_leaves_content_half_destroyed() {
+    // The purge writes across two databases with no transaction spanning them,
+    // and nothing in the log distinguishes an interrupted purge from a finished
+    // one — the redaction event reads identically either way. The intent marker
+    // is the only thing that can tell them apart, and this is what kills a
+    // process in the middle to find out whether it does.
+    //
+    // The dangerous direction is specific: content gone from the log but still
+    // in the search index, which is the one place that hands it back on a
+    // query. The ordering exists to make that impossible, so it is what gets
+    // asserted.
+    let scratch = Scratch::new("purge").with_store();
+    let mut rng = Rng(seed());
+    let mut ever_purged = false;
+
+    for round in 0..ROUNDS {
+        run_and_kill("redact", scratch.path(), &mut rng);
+        check_log(scratch.path());
+
+        let ops = Ops::open_read(&scratch.path().join("ops.db")).expect("local state opens");
+        let unfinished = ops.unfinished_purges().expect("markers are readable");
+
+        // Finish whatever was interrupted, exactly as a real startup would.
+        let mut log = Log::open(&scratch.path().join("events.db")).expect("the log opens");
+        let generation = Ops::open(&scratch.path().join("ops.db"))
+            .unwrap()
+            .generation()
+            .unwrap();
+        let state_path = projection::generation_path(&scratch.path().join("state.db"), generation);
+        if !state_path.exists() {
+            continue;
+        }
+        let mut state = Store::open(&state_path).expect("the projection opens");
+        let ops_w = Ops::open(&scratch.path().join("ops.db")).unwrap();
+        purge::resume(&mut log, &mut state, &ops_w, 1_800_000_000_000)
+            .expect("an interrupted purge can always be finished");
+
+        assert!(
+            ops_w.unfinished_purges().unwrap().is_empty(),
+            "round {round}: a purge could not be finished"
+        );
+
+        // Now the invariant. Every capture whose payload is gone must also be
+        // gone from the projection and from the search index.
+        for e in log.all().unwrap() {
+            if e.header.kind != brain_core::event::Kind::CAPTURE || e.body.is_some() {
+                continue;
+            }
+            ever_purged = true;
+            let tgt = e.header.id();
+            assert!(
+                state.text_of(&tgt).unwrap().is_none(),
+                "round {round}: a destroyed payload is still readable in the projection"
+            );
+        }
+
+        // The other half, and the one that actually depends on the marker: a
+        // note the projection reports as destroyed must have no payload left in
+        // the log. A crash between purging the projection and destroying the
+        // body leaves exactly that state, and nothing in the log describes it —
+        // so if `resume` did not find it, the content survives forever behind a
+        // note that says it is gone.
+        for n in state.timeline(10_000).unwrap() {
+            if !n.is_redacted() {
+                continue;
+            }
+            let survivors: Vec<_> = log
+                .all()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.header.kind == brain_core::event::Kind::CAPTURE)
+                .filter(|e| e.header.id() == n.tgt && e.body.is_some())
+                .collect();
+            assert!(
+                survivors.is_empty(),
+                "round {round}: {} reports its content destroyed, and the payload is still there",
+                n.slug
+            );
+        }
+
+        // And nothing findable has lost its payload — the same statement from
+        // the other side, which is the one that catches an index left behind.
+        for hit in state.search("capture", 1_800_000_000_000).unwrap() {
+            let held: Vec<_> = log
+                .all()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.header.id() == hit)
+                .collect();
+            for e in held {
+                assert!(
+                    e.body.is_some(),
+                    "round {round}: content is findable but its payload is destroyed"
+                );
+            }
+        }
+
+        let _ = unfinished;
+    }
+
+    assert!(
+        ever_purged,
+        "nothing was ever destroyed — the harness proved nothing"
     );
 }
 

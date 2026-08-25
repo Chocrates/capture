@@ -27,7 +27,7 @@ use brain_store::{
     log::Log,
     ops::Ops,
     projection::{self, Store},
-    spool,
+    purge, spool,
 };
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -40,6 +40,7 @@ fn main() {
         "append" => append(&root),
         "drain" => drain_loop(&root),
         "rebuild" => rebuild_loop(&root),
+        "redact" => redact_loop(&root),
         other => {
             eprintln!("unknown mode {other}");
             std::process::exit(2);
@@ -109,6 +110,11 @@ impl Author {
             seq,
             last,
         })
+    }
+
+    /// Sign a header that was adjusted after authoring.
+    fn sign(&self, header: &Header) -> [u8; 64] {
+        self.key.sign(&header.id().0).to_bytes()
     }
 
     fn author(&mut self, body: Vec<u8>, now: u64) -> Envelope {
@@ -225,6 +231,74 @@ fn drain_loop(root: &Path) -> Result<()> {
             Ok(a.author(p.to_vec(), BASE_MS + n))
         })?;
     }
+}
+
+/// Capture notes and destroy them, until killed.
+///
+/// Calls the purge directly rather than waiting for a deadline. Whether a
+/// redaction is *due* is a separate question with its own tests; what this
+/// exists to interrupt is the purge itself, which writes across two databases
+/// with no transaction spanning them.
+///
+/// Each note carries a distinctive word so the supervisor can ask the one
+/// question that matters: is this content gone from every place it was, or
+/// present in every place it was? A note that is gone from the log and still in
+/// the search index is the failure the ordering is chosen to prevent.
+fn redact_loop(root: &Path) -> Result<()> {
+    use brain_core::body::{RedactBody, RedactScope};
+
+    let mut log = Log::open(&root.join("events.db"))?;
+    let ops = Ops::open(&root.join("ops.db"))?;
+    let mut a = Author::new(&log)?;
+    let mut n = highest_index(&log, &root.join("spool"))?;
+
+    loop {
+        // A note nobody else will produce, so the supervisor can look for it
+        // by name and know what it should find.
+        n += 1;
+        let cap = a.author(payload(n), BASE_MS + n);
+        let tgt = cap.header.id();
+        log.append(&cap)?;
+
+        let mut body = Vec::new();
+        minicbor::encode(
+            &RedactBody {
+                nonce: [(n % 251) as u8; 16],
+                scope: RedactScope::WholeNote,
+                targets: alloc_one(tgt),
+            },
+            &mut body,
+        )
+        .expect("encoding into Vec is infallible");
+
+        let mut red = a.author(body, BASE_MS + n);
+        red.header.kind = Kind::REDACT;
+        red.header.tgt = Some(tgt);
+        // The header changed, so the signature has to cover the new id.
+        red.sig = a.sign(&red.header);
+        log.append(&red)?;
+
+        // The projection has to know about the note before it can be purged
+        // from it.
+        let events = log.all()?;
+        let generation = ops.generation()?;
+        let g = projection::rebuild(&root.join("state.db"), &events, generation)?;
+        ops.set_generation(g)?;
+        let mut state = Store::open(&projection::generation_path(&root.join("state.db"), g))?;
+
+        purge::execute(
+            &mut log,
+            &mut state,
+            &ops,
+            &red.header.id(),
+            &tgt,
+            BASE_MS + n,
+        )?;
+    }
+}
+
+fn alloc_one(id: brain_core::EventId) -> Vec<brain_core::EventId> {
+    vec![id]
 }
 
 /// Append, then rebuild the projection into a fresh generation, until killed.
