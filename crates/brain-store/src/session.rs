@@ -496,7 +496,7 @@ fn local_zone() -> String {
         .to_string()
 }
 
-fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
+pub(crate) fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
     let mut b = Vec::new();
     minicbor::encode(v, &mut b).expect("encoding into Vec is infallible");
     b

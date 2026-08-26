@@ -38,15 +38,15 @@
 
 ## 5. Promotion — where recognitions become events
 
-- [ ] 5.1 Author `promote` from a recognition at or above the 0.75 floor. Enforce the floor in one place.
-- [ ] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing.
-- [ ] 5.3 Implement the reparse path on text edit, respecting pins.
-- [ ] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep.
-- [ ] 5.4 Implement the human correction path, authoring `pinned: true`.
-- [ ] 5.5 Implement tasks: state, optional floating due date, list membership as tags with a display order, optional ordering.
-- [ ] 5.6 Implement recurring obligations, with uncompleted instances recorded as lapsed and **not** rolling over, stacking or accumulating.
-- [ ] 5.7 Implement `carries_forward`, defaulting to false and never set by the recognizer. A series that has lapsed repeatedly prompts once, in review. This is the foot-gun exception: a missed dose is not the same as a missed walk.
-- [ ] 5.8 Confirm parsing never delays capture — the overlay closes on Enter with no parser present, and the latency histogram is unchanged.
+- [x] 5.1 Author `promote` from a recognition at or above the 0.75 floor. Enforce the floor in one place.
+- [~] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing. **Partial**: nothing is applied, which is the half that matters and is tested. Where a suggestion is *stored* waits for the projection columns in 6.2 — it is derived data, not a decision, so it must not become an event.
+- [x] 5.3 Implement the reparse path on text edit, respecting pins.
+- [~] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep. **Partial**: the version is recorded and `promote::sweep` reparses on it, tested end to end. Calling it from startup waits for 6.4a, which is where the due-queue wiring lives.
+- [x] 5.4 Implement the human correction path, authoring `pinned: true`.
+- [~] 5.5 Implement tasks: state, optional floating due date, list membership as tags with a display order, optional ordering. **Partial**: the fields exist and the correction path writes them. Nothing *recognises* a task as a type — a task verb scores 0.40 and is deliberately under the floor, so today a task is only ever created by hand. Reading state and ordering back needs the projection (6.2).
+- [ ] 5.6 Implement recurring obligations, with uncompleted instances recorded as lapsed and **not** rolling over, stacking or accumulating. **Blocked on 6.1**: "lapsed" is a statement about an occurrence that was expanded and not completed, and nothing expands occurrences into the projection yet.
+- [x] 5.7 Implement `carries_forward`, defaulting to false and never set by the recognizer. A series that has lapsed repeatedly prompts once, in review. This is the foot-gun exception: a missed dose is not the same as a missed walk.
+- [x] 5.8 Confirm parsing never delays capture — the overlay closes on Enter with no parser present, and the latency histogram is unchanged.
 
 ## 6. Projection — occurrences and the widened queue
 

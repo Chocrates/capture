@@ -537,6 +537,8 @@ name = "brain-store"
 version = "0.1.0"
 dependencies = [
  "brain-core",
+ "brain-parse",
+ "brain-time",
  "ed25519-dalek",
  "getrandom 0.3.4",
  "jiff",

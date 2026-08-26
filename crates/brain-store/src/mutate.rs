@@ -31,7 +31,7 @@ use brain_core::{
 use crate::{Error, Result, StorePaths, session::Session};
 
 /// Resolve a name, or say it is not there.
-fn find(s: &Session, name: &str) -> Result<EventId> {
+pub(crate) fn find(s: &Session, name: &str) -> Result<EventId> {
     s.state
         .resolve(name)?
         .ok_or_else(|| Error::NotFound(name.to_string()))

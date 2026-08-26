@@ -27,6 +27,7 @@ pub mod mutate;
 pub mod ops;
 pub mod paths;
 pub mod projection;
+pub mod promote;
 pub mod purge;
 pub mod ratelimit;
 pub mod session;
