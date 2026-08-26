@@ -102,6 +102,7 @@ pub struct Setting {
 }
 
 /// A redaction as the fold collected it.
+#[derive(Clone, Copy)]
 struct Ordered {
     event: EventId,
     at: Hlc,
@@ -328,7 +329,13 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
     // it were applied in timestamp order, an event that turned up afterwards
     // would simply be readable again — and "destroyed" would mean "destroyed
     // unless something is slow", which is not a guarantee.
-    let mut redacted: BTreeMap<EventId, Ordered> = BTreeMap::new();
+    // Every redaction naming a target, not just the first. Which one governs
+    // cannot be decided here, because the cancellations are still being read:
+    // keeping only the first meant that once a redaction was cancelled, the
+    // dead one was the only one on record and every later redaction of that
+    // note was silently discarded — content ordered destroyed stayed readable,
+    // was never queued, and nothing anywhere said so.
+    let mut ordered_redactions: BTreeMap<EventId, Vec<Ordered>> = BTreeMap::new();
     let mut cancelled: BTreeSet<EventId> = BTreeSet::new();
 
     for e in &ordered {
@@ -341,7 +348,7 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
                 // Capped. An uncapped redaction lets one loop destroy the whole
                 // archive everywhere within a single push round.
                 for t in r.targets.iter().take(crate::body::REDACT_TARGET_CAP) {
-                    redacted.entry(*t).or_insert(Ordered {
+                    ordered_redactions.entry(*t).or_default().push(Ordered {
                         event: e.header.id(),
                         at: e.header.hlc,
                         window_ms: crate::REDACT_WINDOW_MS,
@@ -359,9 +366,29 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
         }
     }
 
-    for r in redacted.values_mut() {
-        r.cancelled = cancelled.contains(&r.event);
-    }
+    // The earliest redaction still standing governs the note.
+    //
+    // Earliest rather than latest, for the same reason the window is measured
+    // from the redaction's own timestamp: a later order must not grant the
+    // content a fresh window and so outlive the earlier one. And still
+    // standing, because a cancelled redaction is not an order any more — it
+    // must not shadow the ones that came after it.
+    //
+    // A note whose every redaction has been cancelled keeps the last of them,
+    // marked cancelled, so the fold still records that one was asked for.
+    let redacted: BTreeMap<EventId, Ordered> = ordered_redactions
+        .into_iter()
+        .filter_map(|(tgt, mut rs)| {
+            let live = rs.iter().find(|r| !cancelled.contains(&r.event)).copied();
+            let governing = live.or_else(|| {
+                rs.pop().map(|mut r| {
+                    r.cancelled = true;
+                    r
+                })
+            })?;
+            Some((tgt, governing))
+        })
+        .collect();
 
     for e in &ordered {
         if !e.header.kind.is_known() {
@@ -1913,6 +1940,95 @@ mod tests {
         assert!(n.text.is_some(), "the content is still readable");
         assert!(!n.is_redacted(), "and not reported as destroyed");
         assert!(n.redaction_pending.is_some(), "but a redaction is queued");
+    }
+
+    #[test]
+    fn a_redaction_after_a_cancellation_still_takes_effect() {
+        // The bug this exists for: the fold kept only the *first* redaction
+        // naming a note. Cancel that one and the dead order was the only one on
+        // record, so every later redaction of the same note was silently
+        // discarded — content the user had ordered destroyed stayed readable,
+        // was never queued, and nothing anywhere reported it.
+        let s = testing::mixed(30, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+
+        let first = testing::Origin::new(9).author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_100_000,
+        );
+        let first_id = first.header.id();
+        set.push(first);
+
+        set.push(testing::Origin::new(9).author(
+            Kind::REDACT_CANCEL,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::RedactCancelBody {
+                nonce: [1u8; 16],
+                redact: first_id,
+            }),
+            1_700_000_200_000,
+        ));
+
+        // Cancelled: readable again, and nothing queued.
+        let p = fold(&set);
+        assert!(p.notes[&tgt].redaction_pending.is_none());
+
+        // Ordered again. This has to stand on its own.
+        set.push(testing::Origin::new(9).author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_300_000,
+        ));
+
+        let p = fold(&set);
+        let n = &p.notes[&tgt];
+        assert!(
+            n.redaction_pending.is_some(),
+            "a redaction issued after a cancellation was discarded"
+        );
+        assert_ne!(
+            n.redaction_pending.unwrap().redact,
+            first_id,
+            "the cancelled redaction is governing a note it no longer governs"
+        );
+    }
+
+    #[test]
+    fn the_earliest_standing_redaction_governs() {
+        // Two live redactions on one note. The earlier deadline wins, for the
+        // same reason the window is measured from the redaction's own timestamp:
+        // a later order must not grant the content a fresh window and so let it
+        // outlive the first order.
+        let s = testing::mixed(31, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+
+        let early = testing::Origin::new(9).author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_100_000,
+        );
+        let early_id = early.header.id();
+        set.push(early);
+        set.push(testing::Origin::new(9).author(
+            Kind::REDACT,
+            Some(tgt),
+            None,
+            redact_body(tgt),
+            1_700_000_900_000,
+        ));
+
+        let p = fold(&set);
+        assert_eq!(p.notes[&tgt].redaction_pending.unwrap().redact, early_id);
     }
 
     #[test]
