@@ -1,11 +1,11 @@
 ## 1. brain-time — the durable layer, nothing depends on it yet
 
-- [ ] 1.1 Create `crates/brain-time`, `no_std`, no dependency that can reach a clock. Every entry point takes `now` as a value; the crate must not be able to name a clock, for the same reason `brain-core` cannot (`DESIGN.md` §8.3, D12).
-- [ ] 1.2 Implement the two time kinds: an instant as UTC milliseconds plus its IANA zone id, and a floating date as `YYYY-MM-DD` with no zone and no conversion path. Make converting a floating date to an instant impossible to express rather than merely discouraged — it is the single most common calendar bug in the wild.
-- [ ] 1.3 Implement the RFC 5545 subset: `FREQ`, `INTERVAL`, `BYDAY`, `BYMONTHDAY`, `COUNT`, `UNTIL`. Accept unbounded series ("get up at 7" has no end date).
-- [ ] 1.4 Implement expansion in local wall time, converting to instants afterwards. **Property-tested**: expanding the same rule with the same `now` twice yields identical occurrences, and expansion is a pure function of its inputs.
-- [ ] 1.5 Implement the DST policy as fixtures rather than reasoning: a nonexistent local time shifts forward to the first valid instant, an ambiguous one takes the first, and both record on the occurrence that it happened. §4.4 draws a marker from this — a silent shift is what makes someone distrust the whole system.
-- [ ] 1.6 Add the timezone database dependency and confirm it does not drag in a clock. **Purity gate**: extend `make purity` to cover `brain-time` the way it covers `brain-core`.
+- [x] 1.1 Create `crates/brain-time`, `no_std`, no dependency that can reach a clock. Every entry point takes `now` as a value; the crate must not be able to name a clock, for the same reason `brain-core` cannot (`DESIGN.md` §8.3, D12).
+- [x] 1.2 Implement the two time kinds: an instant as UTC milliseconds plus its IANA zone id, and a floating date as `YYYY-MM-DD` with no zone and no conversion path. Make converting a floating date to an instant impossible to express rather than merely discouraged — it is the single most common calendar bug in the wild.
+- [x] 1.3 Implement the RFC 5545 subset: `FREQ`, `INTERVAL`, `BYDAY`, `BYMONTHDAY`, `COUNT`, `UNTIL`. Accept unbounded series ("get up at 7" has no end date).
+- [x] 1.4 Implement expansion in local wall time, converting to instants afterwards. **Property-tested**: expanding the same rule with the same `now` twice yields identical occurrences, and expansion is a pure function of its inputs.
+- [x] 1.5 Implement the DST policy as fixtures rather than reasoning: a nonexistent local time shifts forward to the first valid instant, an ambiguous one takes the first, and both record on the occurrence that it happened. §4.4 draws a marker from this — a silent shift is what makes someone distrust the whole system. **Done**: the gap is found by walking forward a minute at a time rather than assuming an hour — `Australia/Lord_Howe` shifts by 30 minutes and is in the property tests for that reason.
+- [x] 1.6 Add the timezone database dependency and confirm it does not drag in a clock. **Purity gate**: extend `make purity` to cover `brain-time` the way it covers `brain-core`.
 
 ## 2. Event kinds — permanent from their first write
 

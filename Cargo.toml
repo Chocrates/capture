@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/brain-core",
     "crates/brain-parse",
+    "crates/brain-time",
     "crates/brain-store",
     "apps/brain-cli",
     "apps/brain-capture",
@@ -71,6 +72,17 @@ x11rb = { version = "0.13", default-features = false }
 # not own, and adding an async runtime alongside it would be a second scheduler
 # for one subscription. This runs on its own thread and blocks on it.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
+# --- time (group M2). ---
+#
+# Taken without default features so neither can reach a clock: `chrono`'s
+# `Local` and `Utc::now` live behind `std`/`clock`, and `chrono-tz` embeds the
+# IANA database rather than reading /usr/share/zoneinfo at runtime. That is what
+# lets brain-time stay no_std while still answering the only question that
+# matters for expansion — what the offset was at a given local time in a given
+# zone, and whether that local time existed once, twice, or not at all.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+chrono-tz = { version = "0.10", default-features = false }
 
 # --- host-side only ---
 getrandom = "0.3"

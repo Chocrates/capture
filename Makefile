@@ -159,6 +159,22 @@ purity:
 	   echo '  FAILED: brain-core compiled a std::time reference'; exit 1; \
 	 fi; \
 	 echo '  holds'
+	@echo '--- brain-time builds without std'
+	@$(CARGO) build -p brain-time --quiet
+	@echo '--- a clock cannot be reached from brain-time'
+	@lib=crates/brain-time/src/lib.rs; \
+	 backup=$$(mktemp); cp "$$lib" "$$backup"; \
+	 trap 'cp "$$backup" "$$lib"; rm -f "$$backup"' EXIT HUP INT TERM; \
+	 echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' >> "$$lib"; \
+	 if $(CARGO) build -p brain-time --quiet 2>/dev/null; then \
+	   echo '  FAILED: brain-time compiled a std::time reference'; exit 1; \
+	 fi; \
+	 echo '  holds'
+	@echo '--- chrono cannot reach a clock from brain-time'
+	@if $(CARGO) tree -p brain-time -e normal -f '{p} {f}' | grep -qE 'chrono v[^ ]+ .*(^| )clock'; then \
+	   echo '  FAILED: chrono is compiled with its clock feature'; exit 1; \
+	 fi; \
+	 echo '  holds'
 
 ## deny: licence and dependency bans
 deny:
