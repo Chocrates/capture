@@ -12,6 +12,7 @@
 //! launch is one that cannot be told to stop.
 
 mod autostart;
+mod due;
 mod gnome;
 mod overlay;
 mod portal;
@@ -110,6 +111,13 @@ fn run() -> Result<()> {
         // spawns. Nothing to start here.
         Mechanism::Gnome | Mechanism::None => {}
     }
+
+    // The other half of the due-work rule (§8.7). Startup is the floor; this is
+    // what makes a deadline land near its time. It has to be started here
+    // because this is the process that is already running — which is the whole
+    // reason the rule names it.
+    let due_paths = paths.clone();
+    std::thread::spawn(move || due::tick(due_paths));
 
     std::thread::spawn(move || {
         loop {
