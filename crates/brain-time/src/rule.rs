@@ -221,7 +221,7 @@ pub fn expand(
         };
 
         if rule.matches(day, start_day) {
-            let (ms, shift) = resolve(local, zone);
+            let (ms, shift) = resolve_local(local, zone);
 
             if let Some(until) = rule.until
                 && ms > until
@@ -299,7 +299,7 @@ fn add_months(day: NaiveDate, months: u32, start: NaiveDate) -> Option<NaiveDate
 }
 
 /// Turn a local wall time into an instant, applying the DST policy.
-fn resolve(local: NaiveDateTime, zone: Zone) -> (i64, Option<Shift>) {
+pub(crate) fn resolve_local(local: NaiveDateTime, zone: Zone) -> (i64, Option<Shift>) {
     match zone.tz().from_local_datetime(&local) {
         LocalResult::Single(t) => (t.timestamp_millis(), None),
 

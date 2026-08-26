@@ -1839,7 +1839,7 @@ inference.
 | `rec_head` | every, each |
 | `day_set` | weekday, weekdays, weekend, weekends |
 | `determiner` | next, this, last, coming, upcoming |
-| `marker` | at, on, by, due, from, before, after, starting, until |
+| `marker` | in, at, on, by, due, from, before, after, starting, until |
 | `range_op` | `-`, `..`, to, through, thru, until |
 | `meridiem` | am, pm, a.m., p.m. |
 | `interval` | other (as in "every other week") |
@@ -1847,7 +1847,7 @@ inference.
 Two classes carry a fixed numeric meaning rather than a lookup: `quarter` is `Q1`–`Q4`, and
 `ordinal` is `1st`–`31st`.
 
-**`at` is not special.** It is one marker among nine, and it means nothing on its own — "meet me
+**`at` is not special.** It is one marker among ten, and it means nothing on its own — "meet me
 at the pub" contains it and no time. Markers exist to give a following expression permission to be
 temporal, never to be temporal themselves. The same is true of every word above: none of them is
 a keyword you have to reach for, because §3.1.1 already committed to a recognizer over English

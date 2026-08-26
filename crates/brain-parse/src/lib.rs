@@ -64,6 +64,25 @@
 
 #![no_std]
 
+extern crate alloc;
+
+mod recognize;
+mod token;
+
+pub use recognize::{Markers, Recognition, Shape, When, recognize};
+pub use token::{Class, Token, tokenize};
+
+/// The version of the vocabulary, the grammar and the bands, together.
+///
+/// Bumped whenever any of the three changes. Every promotion records the
+/// version it was parsed under, and startup reparses anything older.
+///
+/// This exists because nothing in the system observes a build. A parser
+/// improving is not an event, so without a version written into the data a note
+/// captured in March could never benefit from a grammar fix shipped in June —
+/// the improvement would apply only to whatever was captured after it.
+pub const GRAMMAR_VERSION: u32 = 1;
+
 /// A word the recognizer knows, and what it is worth.
 ///
 /// `minutes` carries the fixed numeric meaning where a word has one: the clock
@@ -223,6 +242,12 @@ pub const DETERMINERS: &[Word] = &[w("next"), w("this"), w("last"), w("coming"),
 /// None of these means anything on its own. "meet me at the pub" contains a
 /// marker and no time, and the guards in §3.1.5 are what keep it that way.
 pub const MARKERS: &[Word] = &[
+    // `in`, as in "in 3 weeks". The grammar in §3.1.5 uses it as a bare literal
+    // in the `anchor` production and no table contained it, so the shape the
+    // document lists as a worked example could not be recognised at all. It is
+    // a marker like the rest: it means nothing alone and gives what follows it
+    // permission to be temporal.
+    w("in"),
     w("at"),
     w("on"),
     w("by"),
@@ -455,9 +480,6 @@ pub const BANDS: &[(&str, &str)] = &[
 /// display is examples rather than rules. Each is a real production from the
 /// grammar in the module docs.
 pub const SHAPES: &[&str] = &["friday 2pm", "every weekday at 7", "aug 1-14", "in 3 weeks"];
-
-#[cfg(test)]
-extern crate alloc;
 
 #[cfg(test)]
 mod tests {

@@ -13,3 +13,8 @@ publish.workspace = true
 # two devices.
 
 [dependencies]
+# The recogniser resolves "thursday 2pm" against a moment and a zone, which is
+# what brain-time exists to do. It cannot reach a clock either — the current
+# instant arrives as an argument, so a parse is reproducible.
+brain-core = { path = "../brain-core" }
+brain-time = { path = "../brain-time" }

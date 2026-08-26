@@ -26,15 +26,15 @@
 
 ## 4. The recognizer — a parser over the tables that already exist
 
-- [ ] 4.1 Implement the tokenizer over the closed vocabulary in `brain-parse`. A word outside `CLASSES` is not matched approximately.
-- [ ] 4.2 Implement tier 1: the six sigils. A sigil always beats inference and suppresses the competing inference entirely — not even a suggestion (§3.1.1).
-- [ ] 4.3 Implement tier 2 over the EBNF in §3.1.5: `point`, `range`, `recurrence`, and the `clock` and `anchor` productions.
-- [ ] 4.4 Implement the guards, which are not part of the grammar and matter more than it: an article kills a match, a bare number is never a time, a following noun kills a bare weekday or month, and a match must start at the head, at a comma, or after a marker. **Each of §3.1.3's own examples is a test**: "the march timeline slipped", "the 7am problem", "budget 40k".
-- [ ] 4.5 Implement confidence scoring against the bands in `BANDS`, and return a recognition rather than an event — the parser stays a pure function of `(text, now, zone)`.
-- [ ] 4.6 Test exhaustively over the closed vocabulary rather than representatively. The vocabulary is closed precisely so this is possible.
-- [ ] 4.7 Check the five worked examples in §3.1 parse to the types the document claims, and record any that do not — the vocabulary was written without a parser to test it against.
-- [ ] 4.8 Add a grammar version constant to `brain-parse`, bumped whenever the vocabulary, the grammar or the bands change. This is the reparse trigger: nothing in the system observes a build, so without it a note captured in March can never benefit from a fix shipped in June.
-- [ ] 4.9 Treat the confidence bands as provisional and strict. A band moves only when a real capture forces it, and that capture is pinned alongside as a test case — so the bands accumulate evidence in the direction §3.1.3 prefers, where a miss costs a glance and a false positive costs a calendar entry.
+- [x] 4.1 Implement the tokenizer over the closed vocabulary in `brain-parse`. A word outside `CLASSES` is not matched approximately.
+- [x] 4.2 Implement tier 1: the six sigils. A sigil always beats inference and suppresses the competing inference entirely — not even a suggestion (§3.1.1).
+- [x] 4.3 Implement tier 2 over the EBNF in §3.1.5: `point`, `range`, `recurrence`, and the `clock` and `anchor` productions.
+- [x] 4.4 Implement the guards, which are not part of the grammar and matter more than it: an article kills a match, a bare number is never a time, a following noun kills a bare weekday or month, and a match must start at the head, at a comma, or after a marker. **Each of §3.1.3's own examples is a test**: "the march timeline slipped", "the 7am problem", "budget 40k".
+- [x] 4.5 Implement confidence scoring against the bands in `BANDS`, and return a recognition rather than an event — the parser stays a pure function of `(text, now, zone)`.
+- [x] 4.6 Test exhaustively over the closed vocabulary rather than representatively. The vocabulary is closed precisely so this is possible.
+- [x] 4.7 Check the five worked examples in §3.1 parse to the types the document claims, and record any that do not — the vocabulary was written without a parser to test it against. **Found one**: the EBNF's `anchor` production uses the bare literal `"in"` ("in 3 weeks") and no vocabulary class contained the word, so one of the document's own worked examples was unrecognisable by construction. `in` is now a marker, in the tables and in §3.1.5.
+- [x] 4.8 Add a grammar version constant to `brain-parse`, bumped whenever the vocabulary, the grammar or the bands change. This is the reparse trigger: nothing in the system observes a build, so without it a note captured in March can never benefit from a fix shipped in June.
+- [x] 4.9 Treat the confidence bands as provisional and strict. A band moves only when a real capture forces it, and that capture is pinned alongside as a test case — so the bands accumulate evidence in the direction §3.1.3 prefers, where a miss costs a glance and a false positive costs a calendar entry.
 
 ## 5. Promotion — where recognitions become events
 

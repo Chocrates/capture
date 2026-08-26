@@ -43,7 +43,7 @@ mod rule;
 
 pub use rule::{Freq, Occurrence, Rule, Shift, Weekday, expand, horizon};
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use chrono_tz::Tz;
 
 /// A named IANA timezone.
@@ -116,6 +116,10 @@ impl FloatingDate {
         Some(FloatingDate { year, month, day })
     }
 
+    pub(crate) fn naive(&self) -> Option<NaiveDate> {
+        NaiveDate::from_ymd_opt(self.year, self.month as u32, self.day as u32)
+    }
+
     /// `YYYY-MM-DD`, which is how it is stored.
     pub fn parse(s: &str) -> Option<FloatingDate> {
         let b = s.as_bytes();
@@ -134,6 +138,59 @@ impl core::fmt::Display for FloatingDate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
+}
+
+/// The local date at an instant.
+pub fn civil_date(now: i64, zone: Zone) -> FloatingDate {
+    let local = chrono::DateTime::from_timestamp_millis(now)
+        .unwrap_or_default()
+        .with_timezone(&zone.tz())
+        .date_naive();
+    FloatingDate {
+        year: local.year(),
+        month: local.month() as u8,
+        day: local.day() as u8,
+    }
+}
+
+/// The local date some whole number of days from an instant.
+pub fn add_days(now: i64, zone: Zone, days: i64) -> Option<FloatingDate> {
+    let d = civil_date(now, zone).naive()?;
+    let moved = d.checked_add_signed(chrono::Duration::days(days))?;
+    Some(FloatingDate {
+        year: moved.year(),
+        month: moved.month() as u8,
+        day: moved.day() as u8,
+    })
+}
+
+/// The next occurrence of a weekday, counting today as eligible.
+///
+/// Monday is zero. On-or-after rather than strictly-after because "thursday"
+/// said on a Thursday means today — treating it as next week's would silently
+/// move an appointment seven days.
+pub fn next_weekday_on_or_after(now: i64, zone: Zone, weekday: u8) -> Option<FloatingDate> {
+    let today = civil_date(now, zone).naive()?;
+    let current = today.weekday().num_days_from_monday() as i64;
+    let wanted = weekday as i64;
+    let delta = (wanted - current).rem_euclid(7);
+    add_days(now, zone, delta)
+}
+
+/// An instant for a date, at a stated local time, in a stated zone.
+///
+/// This is the only path from a [`FloatingDate`] to a moment, and it is not the
+/// conversion the module documentation forbids. That one is the silent kind:
+/// treating an all-day event *as* an instant, which is what makes a vacation
+/// jump a day for a reader in another zone. This asks for the two things such a
+/// conversion always needs and never has — which time of day, and in which zone
+/// — so the caller is deciding rather than inheriting a decision.
+///
+/// The DST policy applies: a local time that does not exist moves forward to
+/// the first valid instant, and one that happens twice takes the first.
+pub fn at_local(date: FloatingDate, hour: u32, minute: u32, zone: Zone) -> Option<i64> {
+    let local = date.naive()?.and_hms_opt(hour, minute, 0)?;
+    Some(rule::resolve_local(local, zone).0)
 }
 
 #[cfg(test)]
