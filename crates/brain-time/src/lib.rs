@@ -153,6 +153,17 @@ pub fn civil_date(now: i64, zone: Zone) -> FloatingDate {
     }
 }
 
+/// An instant as a local wall time, for feeding back into expansion.
+///
+/// Expansion advances in local wall time (§3.2), so a series stored as an
+/// instant has to be read back into one before it can be expanded.
+pub fn local_of(now: i64, zone: Zone) -> chrono::NaiveDateTime {
+    chrono::DateTime::from_timestamp_millis(now)
+        .unwrap_or_default()
+        .with_timezone(&zone.tz())
+        .naive_local()
+}
+
 /// The local wall clock at an instant, as `(hour, minute)`.
 pub fn civil_clock(now: i64, zone: Zone) -> (u32, u32) {
     use chrono::Timelike;

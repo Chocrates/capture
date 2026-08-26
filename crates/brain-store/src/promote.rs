@@ -23,7 +23,7 @@
 //! anything older.
 
 use brain_core::body::{
-    EventFields, PromoteBody, Promoted, RuleSpec, SeriesFields, TaskFields, When as BodyWhen,
+    EventFields, PromoteBody, Promoted, SeriesFields, TaskFields, When as BodyWhen,
 };
 use brain_core::event::Kind;
 use brain_core::fold::Note;
@@ -54,7 +54,7 @@ pub fn clears_floor(r: &Recognition) -> bool {
 /// Returns `None` for anything below it, and for the shapes that carry no
 /// structure worth recording. A task verb never reaches here: it scores 0.40
 /// and is a hint for review, not a type.
-pub fn promoted_from(r: &Recognition, zone: Zone) -> Option<Promoted> {
+pub fn promoted_from(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
     if !clears_floor(r) {
         return None;
     }
@@ -95,7 +95,7 @@ pub fn promoted_from(r: &Recognition, zone: Zone) -> Option<Promoted> {
         })),
 
         Shape::Recurring { rule, at_minute } => Some(Promoted::Series(SeriesFields {
-            when: series_start(rule, *at_minute, zone)?,
+            when: series_start(*at_minute, zone, now)?,
             rule: rule.clone(),
             // Never inferred. A series that genuinely accumulates — a missed
             // dose, an unpaid invoice — is indistinguishable by phrasing from
@@ -109,27 +109,27 @@ pub fn promoted_from(r: &Recognition, zone: Zone) -> Option<Promoted> {
 
 /// The first occurrence of a recognised series.
 ///
-/// A recurrence with no time of day is a series of days rather than moments,
-/// and is stored as such — "walk the dog daily" has no 00:00 about it.
-fn series_start(_rule: &RuleSpec, at_minute: Option<u32>, zone: Zone) -> Option<BodyWhen> {
-    let minutes = at_minute?;
-    Some(BodyWhen::Timed {
-        start_ms: 0,
-        end_ms: None,
-        tz: String::from(zone.name()),
-    })
-    .map(|w| match w {
-        BodyWhen::Timed { end_ms, tz, .. } => BodyWhen::Timed {
-            // Minutes past local midnight; the date comes from the capture when
-            // the projection expands it (§3.4). Stored as an offset rather than
-            // a resolved instant so that changing the rule does not require
-            // re-deriving a start nobody wrote.
-            start_ms: (minutes as i64) * 60_000,
-            end_ms,
-            tz,
-        },
-        other => other,
-    })
+/// A real instant, on the day the capture was made. An earlier version stored
+/// minutes past local midnight in `start_ms`, which is not a start: expansion
+/// needs a day to count from, and a rule with no anchor cannot be expanded at
+/// all.
+///
+/// A recurrence with no time of day stays a series of days rather than moments
+/// — "walk the dog daily" has no 00:00 about it, and storing one would put a
+/// midnight on the calendar that nobody wrote.
+fn series_start(at_minute: Option<u32>, zone: Zone, now: i64) -> Option<BodyWhen> {
+    let today = brain_time::civil_date(now, zone);
+    match at_minute {
+        Some(minutes) => Some(BodyWhen::Timed {
+            start_ms: brain_time::at_local(today, minutes / 60, minutes % 60, zone)?,
+            end_ms: None,
+            tz: String::from(zone.name()),
+        }),
+        None => Some(BodyWhen::AllDay {
+            start_date: format!("{today}"),
+            end_date: format!("{today}"),
+        }),
+    }
 }
 
 /// Whether a note needs reading again.
@@ -180,7 +180,7 @@ pub fn sweep(s: &mut Session, now: i64) -> Result<usize> {
             .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"));
 
         let r = brain_parse::recognize(text, now, zone);
-        let Some(as_) = promoted_from(&r, zone) else {
+        let Some(as_) = promoted_from(&r, zone, now) else {
             continue;
         };
 
@@ -247,6 +247,10 @@ mod tests {
         recognize(text, NOW, denver())
     }
 
+    fn promoted_from_at(r: &Recognition, zone: Zone) -> Option<Promoted> {
+        promoted_from(r, zone, NOW)
+    }
+
     #[test]
     fn the_floor_is_the_one_the_design_states() {
         assert_eq!(FLOOR, 75);
@@ -254,7 +258,7 @@ mod tests {
 
     #[test]
     fn a_confident_reading_becomes_an_event() {
-        let p = promoted_from(&read("dentist thursday 2pm"), denver());
+        let p = promoted_from_at(&read("dentist thursday 2pm"), denver());
         assert!(matches!(p, Some(Promoted::Event(_))), "{p:?}");
     }
 
@@ -269,7 +273,7 @@ mod tests {
             "send sarah the migration doc",
         ] {
             assert!(
-                promoted_from(&read(text), denver()).is_none(),
+                promoted_from_at(&read(text), denver()).is_none(),
                 "{text:?} promoted from under the floor"
             );
         }
@@ -279,7 +283,7 @@ mod tests {
     fn a_range_becomes_all_day_dates_and_never_an_instant() {
         // The most common calendar bug in the wild, refused at the point where
         // it would be introduced.
-        match promoted_from(&read("vacation aug 1-14"), denver()) {
+        match promoted_from_at(&read("vacation aug 1-14"), denver()) {
             Some(Promoted::Event(f)) => match f.when {
                 BodyWhen::AllDay {
                     start_date,
@@ -299,7 +303,7 @@ mod tests {
         // §3.6: the recognizer must not infer that a series accumulates.
         // "walk the dog daily" and "take the pill daily" are the same sentence
         // to a parser and opposite answers to a person.
-        match promoted_from(&read("walk the dog every day at 7"), denver()) {
+        match promoted_from_at(&read("walk the dog every day at 7"), denver()) {
             Some(Promoted::Series(s)) => assert!(!s.carries_forward),
             other => panic!("expected a series, got {other:?}"),
         }
@@ -308,7 +312,7 @@ mod tests {
     #[test]
     fn a_duration_is_used_but_never_invented() {
         // An end time nobody wrote is harder to notice than a missing one.
-        match promoted_from(&read("standup thursday 9am"), denver()) {
+        match promoted_from_at(&read("standup thursday 9am"), denver()) {
             Some(Promoted::Event(f)) => match f.when {
                 BodyWhen::Timed { end_ms, .. } => assert_eq!(end_ms, None),
                 other => panic!("{other:?}"),
@@ -316,7 +320,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        match promoted_from(&read("standup thursday 9am ~30m"), denver()) {
+        match promoted_from_at(&read("standup thursday 9am ~30m"), denver()) {
             Some(Promoted::Event(f)) => match f.when {
                 BodyWhen::Timed {
                     start_ms, end_ms, ..

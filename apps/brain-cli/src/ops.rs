@@ -455,7 +455,12 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
     let ops = Ops::open(&s.paths.ops)?;
     let current = ops.generation()?;
 
-    let next = projection::rebuild(&s.paths.state, &events, current)?;
+    let next = projection::rebuild(
+        &s.paths.state,
+        &events,
+        current,
+        jiff::Timestamp::now().as_millisecond().max(0),
+    )?;
     ops.set_generation(next)?;
 
     let store = Store::open_read(&projection::generation_path(&s.paths.state, next))?;

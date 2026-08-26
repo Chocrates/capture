@@ -315,7 +315,12 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
     // rebuild is what the projection is for.
     let all = s.log.all()?;
     let generation = ops.generation()?;
-    let next = brain_store::projection::rebuild(&s.paths.state, &all, generation)?;
+    let next = brain_store::projection::rebuild(
+        &s.paths.state,
+        &all,
+        generation,
+        jiff::Timestamp::now().as_millisecond().max(0),
+    )?;
     ops.set_generation(next)?;
 
     let store = Store::open_read(&brain_store::projection::generation_path(

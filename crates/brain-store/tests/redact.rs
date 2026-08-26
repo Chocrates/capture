@@ -69,7 +69,7 @@ impl Fixture {
         }
 
         let ops = Ops::open(&paths.ops).unwrap();
-        let g = projection::rebuild(&paths.state, &events, 0).unwrap();
+        let g = projection::rebuild(&paths.state, &events, 0, 1_800_000_000_000).unwrap();
         ops.set_generation(g).unwrap();
         let state = Store::open(&projection::generation_path(&paths.state, g)).unwrap();
 
@@ -353,7 +353,7 @@ fn a_copy_is_not_kept_for_something_that_looks_like_a_credential() {
         log.append(e).unwrap();
     }
     let ops = Ops::open(&paths.ops).unwrap();
-    let g = projection::rebuild(&paths.state, &events, 0).unwrap();
+    let g = projection::rebuild(&paths.state, &events, 0, 1_800_000_000_000).unwrap();
     ops.set_generation(g).unwrap();
     let mut state = Store::open(&projection::generation_path(&paths.state, g)).unwrap();
 
@@ -462,7 +462,7 @@ fn the_projection_can_be_rebuilt_after_a_purge() {
     f.drain(NOW);
 
     let events = f.log.all().unwrap();
-    let g = projection::rebuild(&f.paths.state, &events, 1).unwrap();
+    let g = projection::rebuild(&f.paths.state, &events, 1, 1_800_000_000_000).unwrap();
     let fresh = Store::open_read(&projection::generation_path(&f.paths.state, g)).unwrap();
 
     assert_eq!(

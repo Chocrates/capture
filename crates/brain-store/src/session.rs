@@ -244,7 +244,7 @@ impl Session {
 
         if !authored.is_empty() {
             let all = self.log.all()?;
-            incremental::apply(&mut self.state, &all, &authored)?;
+            incremental::apply(&mut self.state, &all, &authored, now_ms() as i64)?;
             if let Some(last) = authored.last() {
                 let (wall, counter) = self.clock.persist();
                 self.identity
@@ -404,7 +404,7 @@ impl Session {
         }
 
         let all = self.log.all()?;
-        incremental::apply(&mut self.state, &all, events)?;
+        incremental::apply(&mut self.state, &all, events, now_ms() as i64)?;
 
         if let Some(last) = events.last() {
             let (wall, counter) = self.clock.persist();

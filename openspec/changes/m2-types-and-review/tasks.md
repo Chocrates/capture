@@ -50,13 +50,13 @@
 
 ## 6. Projection — occurrences and the widened queue
 
-- [ ] 6.1 Expand occurrences into `state.db` over the rolling horizon of −1 year / +1 year (§3.4), extended in the background and on view access.
+- [x] 6.1 Expand occurrences into `state.db` over the rolling horizon of −1 year / +1 year (§3.4), extended in the background and on view access.
 - [ ] 6.1a Measure what the horizon actually costs — rows and rebuild time for a dozen unbounded daily series. It is a performance choice, not a correctness one (failure mode 23), and it was kept rather than re-guessed, so it should be measured once rather than argued about again.
 - [x] 6.2 Store promoted fields and descriptors so agenda and calendar queries never parse text at read time. **Also finishes 3.6**: until the projection has columns for promotions and occurrences, the incremental-equals-full-rebuild comparison cannot see them — its snapshot covers slug, text, divergence and links. Widen `snapshot` here, or the equivalence stays silent about the one rule that is not last-write-wins.
 - [ ] 6.3 Implement the series split for "this and future": bound with `UNTIL`, new series, `split_from`, and exceptions binding to whichever series covers their `original_start`.
 - [ ] 6.4 Widen the due-work queue to carry review and intent deadlines beside redaction deadlines, processed by the same startup-is-the-floor mechanism.
 - [ ] 6.4a Drain the due queue from the resident overlay on a timer. It runs all day for the chord and is already the elected writer (§8.8), but it never opens a `Session` — so today a machine with the overlay running and nothing else touching the store leaves due work undone until some command happens to run. Startup stays the floor; this is what makes a deadline land near its time without adding a process that can be silently not running.
-- [ ] 6.5 Confirm a rebuild reproduces every expansion exactly, and that a timezone database change is fixed by re-folding rather than by migration.
+- [x] 6.5 Confirm a rebuild reproduces every expansion exactly, and that a timezone database change is fixed by re-folding rather than by migration.
 
 ## 7. Surfaces — the desktop first, it is the first-party one
 

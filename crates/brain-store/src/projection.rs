@@ -253,6 +253,36 @@ CREATE INDEX IF NOT EXISTS promotions_start ON promotions(start_ms);
 CREATE INDEX IF NOT EXISTS promotions_due   ON promotions(due);
 CREATE INDEX IF NOT EXISTS promotions_kind  ON promotions(kind);
 
+-- Expanded occurrences of every recurring series, over a rolling horizon.
+--
+-- Derived data, never truth. The rule is the truth (§3.4) and this is what a
+-- calendar draws; a rebuild discards every row here and recomputes it, and an
+-- exhausted horizon costs an expansion rather than losing anything.
+--
+-- `occ` is the occurrence's *name* — the instant the rule would have produced
+-- before any move — and `start_ms` is where it is actually shown. They differ
+-- exactly when something moved it, which is why an exception written on another
+-- device can still find the occurrence it is about.
+CREATE TABLE IF NOT EXISTS occurrences (
+  tgt       BLOB NOT NULL,
+  occ       INTEGER NOT NULL,
+  start_ms  INTEGER NOT NULL,
+  end_ms    INTEGER,
+  all_day   INTEGER NOT NULL DEFAULT 0,
+  -- gap | ambiguous, when a DST transition moved this occurrence. Shown rather
+  -- than applied silently: a time that moves on its own with no explanation is
+  -- what makes someone stop trusting the whole system (§4.4).
+  shift     TEXT,
+  cancelled INTEGER NOT NULL DEFAULT 0,
+  done      INTEGER NOT NULL DEFAULT 0,
+  title     TEXT,
+  location  TEXT,
+  notes     TEXT,
+  PRIMARY KEY (tgt, occ)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS occurrences_start ON occurrences(start_ms);
+
 CREATE TABLE IF NOT EXISTS mutes (
   scope TEXT NOT NULL,
   value TEXT NOT NULL,
@@ -276,6 +306,31 @@ CREATE TABLE IF NOT EXISTS quarantine (
 /// One note, as a view needs it.
 ///
 /// Every state a note can be in is representable here rather than being an
+/// One expanded occurrence.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OccurrenceRow {
+    /// Its name: the instant the rule would have produced, before any move.
+    pub occ: i64,
+    /// Where it is actually shown. Differs from `occ` exactly when moved.
+    pub start_ms: i64,
+    /// When it ends, where an exception said so.
+    pub end_ms: Option<i64>,
+    /// Whether this is a day rather than a moment.
+    pub all_day: bool,
+    /// `gap` or `ambiguous`, when a DST transition moved it.
+    pub shift: Option<String>,
+    /// Skipped. Still drawn if it was also moved.
+    pub cancelled: bool,
+    /// Completed, for a recurring obligation.
+    pub done: bool,
+    /// A title for this occurrence only.
+    pub title: Option<String>,
+    /// A location for this occurrence only.
+    pub location: Option<String>,
+    /// Notes on this occurrence only.
+    pub notes: Option<String>,
+}
+
 /// A promotion, as the projection stores it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PromotionRow {
@@ -438,15 +493,21 @@ impl Store {
     }
 
     /// Replace everything with a freshly folded projection.
-    pub fn write(&mut self, p: &Projection) -> Result<()> {
+    /// Write a folded projection.
+    ///
+    /// `now` is taken as a value rather than read, because it decides the
+    /// occurrence horizon and nothing that decides what a store contains may
+    /// depend on when it happened to run.
+    pub fn write(&mut self, p: &Projection, now: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
-             DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;",
+             DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
+             DELETE FROM occurrences;",
         )?;
-        write_into(&tx, p)?;
+        write_into(&tx, p, now)?;
         tx.commit()?;
         self.set_meta("schema", &PROJECTION_SCHEMA.to_string())?;
         Ok(())
@@ -457,7 +518,7 @@ impl Store {
     /// Used for incremental updates: the caller selects every event belonging
     /// to the affected notes, folds those, and hands the result here. Notes the
     /// partial fold does not mention are left alone.
-    pub fn merge(&mut self, p: &Projection) -> Result<()> {
+    pub fn merge(&mut self, p: &Projection, now: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
         for tgt in p.notes.keys() {
             let t = tgt.0.to_vec();
@@ -469,11 +530,13 @@ impl Store {
             tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM promotions WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
             if let Some(row) = fts_row(&tx, tgt)? {
                 tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
             }
         }
-        write_into(&tx, p)?;
+        write_into(&tx, p, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -602,6 +665,76 @@ impl Store {
             let (id, d) = r?;
             if let Some(id) = id_from(id) {
                 out.push((id, d));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Occurrences of a series, in time order.
+    ///
+    /// Cancelled ones are included and flagged rather than filtered out here: a
+    /// view decides whether to draw them, and a moved occurrence is drawn even
+    /// when something also cancelled it (§6).
+    pub fn occurrences_of(&self, tgt: &EventId) -> Result<Vec<OccurrenceRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT occ, start_ms, end_ms, all_day, shift, cancelled, done, title, location, notes
+             FROM occurrences WHERE tgt = ?1 ORDER BY start_ms",
+        )?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
+            Ok(OccurrenceRow {
+                occ: r.get(0)?,
+                start_ms: r.get(1)?,
+                end_ms: r.get(2)?,
+                all_day: r.get::<_, i64>(3)? != 0,
+                shift: r.get(4)?,
+                cancelled: r.get::<_, i64>(5)? != 0,
+                done: r.get::<_, i64>(6)? != 0,
+                title: r.get(7)?,
+                location: r.get(8)?,
+                notes: r.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Everything occurring inside a window, across every series.
+    ///
+    /// The query a calendar or an agenda runs. Answered from expanded rows and
+    /// stored fields, never by reading a note's text.
+    pub fn occurring_between(&self, from: i64, to: i64) -> Result<Vec<(EventId, OccurrenceRow)>> {
+        let mut st = self.conn.prepare(
+            "SELECT tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done,
+                    title, location, notes
+             FROM occurrences
+             WHERE start_ms >= ?1 AND start_ms < ?2
+             ORDER BY start_ms",
+        )?;
+        let rows = st.query_map(params![from, to], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                OccurrenceRow {
+                    occ: r.get(1)?,
+                    start_ms: r.get(2)?,
+                    end_ms: r.get(3)?,
+                    all_day: r.get::<_, i64>(4)? != 0,
+                    shift: r.get(5)?,
+                    cancelled: r.get::<_, i64>(6)? != 0,
+                    done: r.get::<_, i64>(7)? != 0,
+                    title: r.get(8)?,
+                    location: r.get(9)?,
+                    notes: r.get(10)?,
+                },
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, o) = r?;
+            if let Some(id) = id_from(id) {
+                out.push((id, o));
             }
         }
         Ok(out)
@@ -1264,7 +1397,155 @@ fn write_promotion(
     Ok(())
 }
 
-fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
+/// Expand a promoted series into the occurrences a calendar draws.
+///
+/// Occurrences are projection data: the rule is truth, this is a cache of what
+/// the rule produces over the window that anybody is going to look at. A
+/// rebuild throws all of it away and recomputes it, which is what makes a
+/// timezone database update a re-fold rather than a migration (§3.4).
+///
+/// Exceptions are applied on top, keyed by the occurrence's original start. One
+/// that names an occurrence outside the window — or one the rule no longer
+/// produces — is still written, because it is a fact somebody recorded and a
+/// completion that vanished when the schedule moved would be a completion
+/// silently lost.
+fn expand_occurrences(
+    tx: &rusqlite::Transaction<'_>,
+    tgt: &EventId,
+    note: &brain_core::fold::Note,
+    promotion: &brain_core::fold::Promotion,
+    now: i64,
+) -> Result<()> {
+    use brain_core::body::{Promoted, When};
+
+    let mut written: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+
+    if let Promoted::Series(sf) = &promotion.as_ {
+        let (from, to) = brain_time::horizon(now);
+
+        // An all-day series is expanded at local midnight purely so the rows
+        // order; `all_day` is what a view reads, and it renders the date.
+        let (start_ms, all_day, tz) = match &sf.when {
+            When::Timed { start_ms, tz, .. } => (Some(*start_ms), false, tz.clone()),
+            When::AllDay { start_date, .. } => (
+                brain_time::FloatingDate::parse(start_date).and_then(|d| {
+                    let z = brain_time::Zone::new(note.tz.as_deref().unwrap_or("UTC"))?;
+                    brain_time::at_local(d, 0, 0, z)
+                }),
+                true,
+                note.tz.clone().unwrap_or_else(|| String::from("UTC")),
+            ),
+        };
+
+        if let (Some(start_ms), Some(zone)) = (start_ms, brain_time::Zone::new(&tz)) {
+            let rule = to_rule(&sf.rule);
+            let local = brain_time::local_of(start_ms, zone);
+
+            for o in brain_time::expand(&rule, local, zone, from, to) {
+                let ex = note.occurrences.get(&o.start);
+                let (shown, end) = match ex.and_then(|e| e.moved_to) {
+                    Some((s, e)) => (s, e),
+                    None => (o.start, None),
+                };
+                tx.execute(
+                    "INSERT OR REPLACE INTO occurrences
+                       (tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done,
+                        title, location, notes)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![
+                        tgt.0.to_vec(),
+                        o.start,
+                        shown,
+                        end,
+                        all_day as i64,
+                        o.shift.map(|s| match s {
+                            brain_time::Shift::Gap => "gap",
+                            brain_time::Shift::Ambiguous => "ambiguous",
+                        }),
+                        ex.map(|e| e.cancelled).unwrap_or(false) as i64,
+                        ex.map(|e| e.done).unwrap_or(false) as i64,
+                        ex.and_then(|e| e.title.clone()),
+                        ex.and_then(|e| e.location.clone()),
+                        ex.and_then(|e| e.notes.clone()),
+                    ],
+                )?;
+                written.insert(o.start);
+            }
+        }
+    }
+
+    // Exceptions the expansion did not reach. Kept rather than dropped: the
+    // rule can be edited later, and a completion recorded against an occurrence
+    // the schedule has since moved is still something somebody did.
+    for (occ, state) in &note.occurrences {
+        if written.contains(occ) {
+            continue;
+        }
+        let (shown, end) = state.moved_to.unwrap_or((*occ, None));
+        tx.execute(
+            "INSERT OR REPLACE INTO occurrences
+               (tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done, title, location, notes)
+             VALUES (?1,?2,?3,?4,0,NULL,?5,?6,?7,?8,?9)",
+            params![
+                tgt.0.to_vec(),
+                occ,
+                shown,
+                end,
+                state.cancelled as i64,
+                state.done as i64,
+                state.title.clone(),
+                state.location.clone(),
+                state.notes.clone(),
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// The stored rule, as `brain-time` expands it.
+fn to_rule(r: &brain_core::body::RuleSpec) -> brain_time::Rule {
+    use brain_time::{Freq, Rule, Weekday};
+
+    let freq = match r.freq {
+        0 => Freq::Daily,
+        1 => Freq::Weekly,
+        2 => Freq::Monthly,
+        _ => Freq::Yearly,
+    };
+    let mut rule = Rule::new(freq, r.interval);
+
+    if r.by_day != 0 {
+        let all = [
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+            Weekday::Sun,
+        ];
+        let days: Vec<Weekday> = all
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| r.by_day & (1 << i) != 0)
+            .map(|(_, d)| *d)
+            .collect();
+        rule = rule.on_days(&days);
+    }
+    if !r.by_month_day.is_empty() {
+        rule = rule.on_month_days(&r.by_month_day);
+    }
+    if let Some(n) = r.count {
+        rule = rule.count(n);
+    }
+    if let Some(u) = r.until {
+        rule = rule.until(u);
+    }
+    rule
+}
+
+fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Result<()> {
     for (k, v) in &p.settings {
         tx.execute(
             "INSERT OR REPLACE INTO settings (k, v, set_by, hlc_wall, hlc_counter)
@@ -1282,6 +1563,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
     for (tgt, n) in &p.notes {
         if let Some(promotion) = &n.promotion {
             write_promotion(tx, tgt, promotion)?;
+            expand_occurrences(tx, tgt, n, promotion, now)?;
         }
 
         if let Some(pending) = &n.redaction_pending {
@@ -1426,14 +1708,14 @@ pub fn generation_path(base: &Path, generation: u64) -> PathBuf {
 /// Returns the new generation number. The caller moves the pointer once this
 /// succeeds, so a rebuild that fails partway leaves the previous generation
 /// untouched and still current.
-pub fn rebuild(base: &Path, events: &[Envelope], current: u64) -> Result<u64> {
+pub fn rebuild(base: &Path, events: &[Envelope], current: u64, now: i64) -> Result<u64> {
     let next = current + 1;
     let path = generation_path(base, next);
     let _ = std::fs::remove_file(&path);
 
     let p = brain_core::fold::fold(events);
     let mut store = Store::open(&path)?;
-    store.write(&p)?;
+    store.write(&p, now)?;
 
     // Record how far each origin has been consumed, so later updates can be
     // incremental rather than starting again.
@@ -1518,7 +1800,7 @@ mod tests {
         let s = testing::mixed(1, 2, 3, 12);
         let p = brain_core::fold::fold(&s.events);
         let mut store = Store::open(&generation_path(&b, 1)).unwrap();
-        store.write(&p).unwrap();
+        store.write(&p, 1_800_000_000_000).unwrap();
 
         assert_eq!(store.note_count().unwrap(), p.notes.len() as u64);
         for (tgt, n) in &p.notes {
@@ -1537,8 +1819,8 @@ mod tests {
         // one they opened, and the sidecar files are named from the path.
         let b = base("generations");
         let s = testing::mixed(2, 2, 2, 8);
-        let g1 = rebuild(&b, &s.events, 0).unwrap();
-        let g2 = rebuild(&b, &s.events, g1).unwrap();
+        let g1 = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
+        let g2 = rebuild(&b, &s.events, g1, 1_800_000_000_000).unwrap();
         assert_eq!((g1, g2), (1, 2));
         assert!(
             generation_path(&b, 1).exists(),
@@ -1552,11 +1834,11 @@ mod tests {
     fn a_rebuild_reproduces_the_same_state() {
         let b = base("reproduce");
         let s = testing::mixed(3, 3, 3, 20);
-        let g = rebuild(&b, &s.events, 0).unwrap();
+        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
         let a = Store::open_read(&generation_path(&b, g)).unwrap();
         let n1 = a.note_count().unwrap();
 
-        let g2 = rebuild(&b, &s.events, g).unwrap();
+        let g2 = rebuild(&b, &s.events, g, 1_800_000_000_000).unwrap();
         let c = Store::open_read(&generation_path(&b, g2)).unwrap();
         assert_eq!(n1, c.note_count().unwrap());
         clean(&b);
@@ -1590,7 +1872,7 @@ mod tests {
             testing::capture_body(1, "the deploy keeps timing out on staging"),
             1_700_000_000_000,
         );
-        let g = rebuild(&b, std::slice::from_ref(&e), 0).unwrap();
+        let g = rebuild(&b, std::slice::from_ref(&e), 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         let hits = store.search("staging", 1_800_000_000_000).unwrap();
         assert_eq!(hits, alloc_vec(&[e.header.id()]));
@@ -1626,7 +1908,7 @@ mod tests {
             1_700_000_001_000,
         );
 
-        let g = rebuild(&b, &[cap, redact], 0).unwrap();
+        let g = rebuild(&b, &[cap, redact], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
 
         let row = store.note(&tgt).unwrap().expect("the note still exists");
@@ -1670,7 +1952,7 @@ mod tests {
             testing::edit_body(2, "replacement wording with pangolin in it"),
             1_700_000_001_000,
         );
-        let g = rebuild(&b, &[cap, edit], 0).unwrap();
+        let g = rebuild(&b, &[cap, edit], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         assert_eq!(
             store.search("pangolin", 1_800_000_000_000).unwrap().len(),
@@ -1711,7 +1993,7 @@ mod tests {
             1_700_000_002_000,
         );
 
-        let g = rebuild(&b, &[cap, red], 0).unwrap();
+        let g = rebuild(&b, &[cap, red], 0, 1_800_000_000_000).unwrap();
         let mut store = Store::open(&generation_path(&b, g)).unwrap();
 
         // A redaction on its own destroys nothing — that is the cancellation
@@ -1753,7 +2035,7 @@ mod tests {
     fn held_events_are_recorded() {
         let b = base("held");
         let s = testing::unknown_kind(4);
-        let g = rebuild(&b, &s.events, 0).unwrap();
+        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         assert!(store.held_count().unwrap() > 0);
         clean(&b);
@@ -1763,7 +2045,7 @@ mod tests {
     fn discarding_a_generation_removes_its_sidecars() {
         let b = base("discard");
         let s = testing::mixed(5, 1, 1, 2);
-        let g = rebuild(&b, &s.events, 0).unwrap();
+        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
         discard_generation(&b, g).unwrap();
         assert!(!generation_path(&b, g).exists());
         clean(&b);

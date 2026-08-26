@@ -282,7 +282,12 @@ fn redact_loop(root: &Path) -> Result<()> {
         // from it.
         let events = log.all()?;
         let generation = ops.generation()?;
-        let g = projection::rebuild(&root.join("state.db"), &events, generation)?;
+        let g = projection::rebuild(
+            &root.join("state.db"),
+            &events,
+            generation,
+            (BASE_MS + n) as i64,
+        )?;
         ops.set_generation(g)?;
         let mut state = Store::open(&projection::generation_path(&root.join("state.db"), g))?;
 
@@ -316,7 +321,12 @@ fn rebuild_loop(root: &Path) -> Result<()> {
         }
         let events = log.all()?;
         let current = ops.generation()?;
-        let next = projection::rebuild(&root.join("state.db"), &events, current)?;
+        let next = projection::rebuild(
+            &root.join("state.db"),
+            &events,
+            current,
+            (BASE_MS + n) as i64,
+        )?;
         ops.set_generation(next)?;
 
         // Prove the pointed-at generation is usable before moving on, so a

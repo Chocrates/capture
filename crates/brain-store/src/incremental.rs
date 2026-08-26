@@ -31,7 +31,12 @@ use crate::{Result, projection::Store};
 /// `all` is every event in the log; `arriving` is what has just been added.
 /// The full set is needed because re-folding a note requires its whole history,
 /// not only the part that just turned up.
-pub fn apply(store: &mut Store, all: &[Envelope], arriving: &[Envelope]) -> Result<usize> {
+pub fn apply(
+    store: &mut Store,
+    all: &[Envelope],
+    arriving: &[Envelope],
+    now: i64,
+) -> Result<usize> {
     // Some events do not name the notes they change. A mute by tag or by date
     // is a *rule*, and which notes it covers is decided by matching, not by a
     // target field — so there is nothing in the event to re-fold from.
@@ -42,7 +47,7 @@ pub fn apply(store: &mut Store, all: &[Envelope], arriving: &[Envelope]) -> Resu
     // until somebody notices a muted tag still turning up in searches.
     if arriving.iter().any(is_global) {
         let whole = fold::fold(all);
-        store.write(&whole)?;
+        store.write(&whole, now)?;
         return Ok(whole.notes.len());
     }
 
@@ -77,7 +82,7 @@ pub fn apply(store: &mut Store, all: &[Envelope], arriving: &[Envelope]) -> Resu
     // nothing would look wrong.
     let known = store.known_names()?;
     let partial = fold::fold_seeded(&relevant, &known);
-    store.merge(&partial)?;
+    store.merge(&partial, now)?;
     Ok(touched.len())
 }
 
@@ -187,7 +192,8 @@ mod tests {
             // Full: one fold over everything.
             let full_path = generation_path(&b, 1);
             let mut full = Store::open(&full_path).unwrap();
-            full.write(&fold::fold(&s.events)).unwrap();
+            full.write(&fold::fold(&s.events), 1_800_000_000_000)
+                .unwrap();
 
             // Incremental: the same events, in batches, applied one at a time.
             let incr_path = generation_path(&b, 2);
@@ -195,7 +201,7 @@ mod tests {
             let mut seen: Vec<Envelope> = Vec::new();
             for chunk in s.events.chunks(3) {
                 seen.extend(chunk.iter().cloned());
-                apply(&mut incr, &seen, chunk).unwrap();
+                apply(&mut incr, &seen, chunk, 1_800_000_000_000).unwrap();
             }
 
             assert_eq!(
@@ -226,14 +232,15 @@ mod tests {
 
             let full_path = generation_path(&b, 1);
             let mut full = Store::open(&full_path).unwrap();
-            full.write(&fold::fold(&s.events)).unwrap();
+            full.write(&fold::fold(&s.events), 1_800_000_000_000)
+                .unwrap();
 
             let incr_path = generation_path(&b, 2);
             let mut incr = Store::open(&incr_path).unwrap();
             let mut seen: Vec<Envelope> = Vec::new();
             for chunk in s.events.chunks(2) {
                 seen.extend(chunk.iter().cloned());
-                apply(&mut incr, &seen, chunk).unwrap();
+                apply(&mut incr, &seen, chunk, 1_800_000_000_000).unwrap();
             }
 
             let snaps = snapshot(&full, &s.notes);
@@ -286,6 +293,7 @@ mod tests {
             &mut store,
             std::slice::from_ref(&first),
             std::slice::from_ref(&first),
+            1_800_000_000_000,
         )
         .unwrap();
         let slug = store.slug_of(&first_id).unwrap().unwrap();
@@ -301,7 +309,13 @@ mod tests {
         );
         let second_id = second.header.id();
         let all = vec![first, second.clone()];
-        apply(&mut store, &all, std::slice::from_ref(&second)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&second),
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         let links = store.links_from(&second_id).unwrap();
         assert_eq!(links.len(), 1);
@@ -315,7 +329,7 @@ mod tests {
         // And it agrees with a full rebuild, which is the property that matters.
         let full_path = generation_path(&b, 2);
         let mut full = Store::open(&full_path).unwrap();
-        full.write(&fold::fold(&all)).unwrap();
+        full.write(&fold::fold(&all), 1_800_000_000_000).unwrap();
         assert_eq!(links_of(&store, &second_id), links_of(&full, &second_id));
         clean(&b);
     }
@@ -358,9 +372,21 @@ mod tests {
         let early_id = early.header.id();
 
         let all = vec![early.clone(), later.clone()];
-        apply(&mut store, &all, std::slice::from_ref(&later)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&later),
+            1_800_000_000_000,
+        )
+        .unwrap();
         // Now re-fold the earlier note with the later name already known.
-        apply(&mut store, &all, std::slice::from_ref(&early)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&early),
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         let links = store.links_from(&early_id).unwrap();
         assert_eq!(links.len(), 1, "the link is recorded either way");
@@ -372,7 +398,7 @@ mod tests {
         // And a full rebuild says the same thing.
         let full_path = generation_path(&b, 2);
         let mut full = Store::open(&full_path).unwrap();
-        full.write(&fold::fold(&all)).unwrap();
+        full.write(&fold::fold(&all), 1_800_000_000_000).unwrap();
         assert_eq!(links_of(&store, &early_id), links_of(&full, &early_id));
         clean(&b);
     }
@@ -413,10 +439,22 @@ mod tests {
         );
 
         let mut all = vec![cap.clone()];
-        apply(&mut store, &all, std::slice::from_ref(&cap)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&cap),
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         all.push(named.clone());
-        apply(&mut store, &all, std::slice::from_ref(&named)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&named),
+            1_800_000_000_000,
+        )
+        .unwrap();
         assert_eq!(
             store.resolve("q4-budget").unwrap(),
             Some(tgt),
@@ -425,7 +463,13 @@ mod tests {
 
         // Anything at all touching the note re-folds it.
         all.push(tagged.clone());
-        apply(&mut store, &all, std::slice::from_ref(&tagged)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&tagged),
+            1_800_000_000_000,
+        )
+        .unwrap();
         assert_eq!(
             store.resolve("q4-budget").unwrap(),
             Some(tgt),
@@ -435,7 +479,7 @@ mod tests {
         // And it matches a full rebuild.
         let full_path = generation_path(&b, 2);
         let mut full = Store::open(&full_path).unwrap();
-        full.write(&fold::fold(&all)).unwrap();
+        full.write(&fold::fold(&all), 1_800_000_000_000).unwrap();
         assert_eq!(full.resolve("q4-budget").unwrap(), Some(tgt));
         clean(&b);
     }
@@ -483,12 +527,18 @@ mod tests {
         );
 
         let mut all = vec![cap.clone(), tag.clone()];
-        apply(&mut store, &all, &all.clone()).unwrap();
+        apply(&mut store, &all, &all.clone(), 1_800_000_000_000).unwrap();
         assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
 
         let mute = tag_mute(&mut d, "noise", 1_700_000_002_000);
         all.push(mute.clone());
-        apply(&mut store, &all, std::slice::from_ref(&mute)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&mute),
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         assert_eq!(
             store.note(&tgt).unwrap().unwrap().muted_until,
@@ -519,7 +569,7 @@ mod tests {
         let mute = tag_mute(&mut d, "noise", 1_700_000_001_000);
 
         let mut all = vec![cap.clone(), mute.clone()];
-        apply(&mut store, &all, &all.clone()).unwrap();
+        apply(&mut store, &all, &all.clone(), 1_800_000_000_000).unwrap();
         assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
 
         // Now it qualifies.
@@ -531,7 +581,13 @@ mod tests {
             1_700_000_002_000,
         );
         all.push(tag.clone());
-        apply(&mut store, &all, std::slice::from_ref(&tag)).unwrap();
+        apply(
+            &mut store,
+            &all,
+            std::slice::from_ref(&tag),
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         assert_eq!(
             store.note(&tgt).unwrap().unwrap().muted_until,
@@ -542,7 +598,7 @@ mod tests {
         // And a full rebuild agrees, which is the property that matters.
         let full_path = generation_path(&b, 2);
         let mut full = Store::open(&full_path).unwrap();
-        full.write(&fold::fold(&all)).unwrap();
+        full.write(&fold::fold(&all), 1_800_000_000_000).unwrap();
         assert_eq!(
             full.note(&tgt).unwrap().unwrap().muted_until,
             store.note(&tgt).unwrap().unwrap().muted_until
@@ -562,7 +618,7 @@ mod tests {
         let mut seen = Vec::new();
         for chunk in s.events.chunks(4) {
             seen.extend(chunk.iter().cloned());
-            apply(&mut a, &seen, chunk).unwrap();
+            apply(&mut a, &seen, chunk, 1_800_000_000_000).unwrap();
         }
 
         let shuffled = s.shuffled(777);
@@ -571,7 +627,7 @@ mod tests {
         let mut seen2 = Vec::new();
         for chunk in shuffled.chunks(4) {
             seen2.extend(chunk.iter().cloned());
-            apply(&mut c, &seen2, chunk).unwrap();
+            apply(&mut c, &seen2, chunk, 1_800_000_000_000).unwrap();
         }
 
         assert_eq!(snapshot(&a, &s.notes), snapshot(&c, &s.notes));
@@ -594,17 +650,18 @@ mod tests {
         // conflict that no longer exists.
         let mut early = s.events.clone();
         let late = early.remove(2);
-        apply(&mut store, &early, &early).unwrap();
+        apply(&mut store, &early, &early, 1_800_000_000_000).unwrap();
         let before = snapshot(&store, &s.notes);
 
         let mut all = early.clone();
         all.push(late.clone());
-        apply(&mut store, &all, &[late]).unwrap();
+        apply(&mut store, &all, &[late], 1_800_000_000_000).unwrap();
         let after = snapshot(&store, &s.notes);
 
         let full_path = generation_path(&b, 2);
         let mut full = Store::open(&full_path).unwrap();
-        full.write(&fold::fold(&s.events)).unwrap();
+        full.write(&fold::fold(&s.events), 1_800_000_000_000)
+            .unwrap();
 
         assert_ne!(before, after, "the late event must have changed something");
         assert_eq!(
@@ -621,10 +678,13 @@ mod tests {
         let s = testing::mixed(11, 1, 2, 4);
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
-        apply(&mut store, &s.events, &s.events).unwrap();
+        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
         let before = snapshot(&store, &s.notes);
 
-        assert_eq!(apply(&mut store, &s.events, &[]).unwrap(), 0);
+        assert_eq!(
+            apply(&mut store, &s.events, &[], 1_800_000_000_000).unwrap(),
+            0
+        );
         assert_eq!(snapshot(&store, &s.notes), before);
         clean(&b);
     }
@@ -636,11 +696,11 @@ mod tests {
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
 
-        apply(&mut store, &s.events, &s.events).unwrap();
+        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
         let once = snapshot(&store, &s.notes);
         let count = store.note_count().unwrap();
 
-        apply(&mut store, &s.events, &s.events).unwrap();
+        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
         assert_eq!(snapshot(&store, &s.notes), once);
         assert_eq!(store.note_count().unwrap(), count, "no duplicated rows");
         clean(&b);
@@ -652,7 +712,7 @@ mod tests {
         let s = testing::mixed(13, 2, 4, 16);
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
-        apply(&mut store, &s.events, &s.events).unwrap();
+        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
 
         // One further event against one note.
         let target = s.notes[0];
@@ -668,7 +728,7 @@ mod tests {
         all.push(e.clone());
 
         assert_eq!(
-            apply(&mut store, &all, &[e]).unwrap(),
+            apply(&mut store, &all, &[e], 1_800_000_000_000).unwrap(),
             1,
             "one event against one note must re-fold exactly one note"
         );
@@ -695,6 +755,7 @@ mod tests {
             &mut store,
             std::slice::from_ref(&cap),
             std::slice::from_ref(&cap),
+            1_800_000_000_000,
         )
         .unwrap();
         assert_eq!(
@@ -710,7 +771,7 @@ mod tests {
             1_700_000_001_000,
         );
         let all = vec![cap, edit.clone()];
-        apply(&mut store, &all, &[edit]).unwrap();
+        apply(&mut store, &all, &[edit], 1_800_000_000_000).unwrap();
 
         assert_eq!(
             store.search("pangolin", 1_800_000_000_000).unwrap().len(),
