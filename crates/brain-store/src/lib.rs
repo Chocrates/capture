@@ -10,6 +10,7 @@
 
 pub mod ambient;
 pub mod db;
+pub mod descriptor;
 pub mod drain;
 pub mod due;
 pub mod entropy;

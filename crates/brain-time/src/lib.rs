@@ -153,6 +153,15 @@ pub fn civil_date(now: i64, zone: Zone) -> FloatingDate {
     }
 }
 
+/// The local wall clock at an instant, as `(hour, minute)`.
+pub fn civil_clock(now: i64, zone: Zone) -> (u32, u32) {
+    use chrono::Timelike;
+    let local = chrono::DateTime::from_timestamp_millis(now)
+        .unwrap_or_default()
+        .with_timezone(&zone.tz());
+    (local.hour(), local.minute())
+}
+
 /// The local date some whole number of days from an instant.
 pub fn add_days(now: i64, zone: Zone, days: i64) -> Option<FloatingDate> {
     let d = civil_date(now, zone).naive()?;

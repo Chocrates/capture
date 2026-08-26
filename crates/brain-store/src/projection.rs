@@ -37,7 +37,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{Result, db};
 
 /// Bumped when the shape below changes. A mismatch triggers a rebuild.
-pub const PROJECTION_SCHEMA: u32 = 1;
+pub const PROJECTION_SCHEMA: u32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -222,6 +222,37 @@ CREATE TABLE IF NOT EXISTS redact_queue (
   cancelled     INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
+-- What each note was recognised as, decoded once at write time.
+--
+-- The fields are kept whole as CBOR *and* the parts a query needs are stored
+-- beside them. That duplication is deliberate: an agenda asking what is on
+-- Tuesday must not decode every promotion in the store to find out, and
+-- §3.1.4 wants a descriptor rendered when the fields change rather than on
+-- every read.
+CREATE TABLE IF NOT EXISTS promotions (
+  tgt        BLOB PRIMARY KEY,
+  -- note | task | event | series
+  kind       TEXT NOT NULL,
+  fields     BLOB NOT NULL,
+  -- The one-line rendering of the fields, regenerated with them.
+  descriptor TEXT NOT NULL,
+  -- A human correction, which no reparse may displace.
+  pinned     INTEGER NOT NULL DEFAULT 0,
+  grammar    INTEGER,
+  confidence INTEGER,
+  -- Denormalised so the calendar and the agenda are indexed queries.
+  start_ms   INTEGER,
+  end_ms     INTEGER,
+  start_date TEXT,
+  end_date   TEXT,
+  due        TEXT,
+  done       INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS promotions_start ON promotions(start_ms);
+CREATE INDEX IF NOT EXISTS promotions_due   ON promotions(due);
+CREATE INDEX IF NOT EXISTS promotions_kind  ON promotions(kind);
+
 CREATE TABLE IF NOT EXISTS mutes (
   scope TEXT NOT NULL,
   value TEXT NOT NULL,
@@ -245,6 +276,24 @@ CREATE TABLE IF NOT EXISTS quarantine (
 /// One note, as a view needs it.
 ///
 /// Every state a note can be in is representable here rather than being an
+/// A promotion, as the projection stores it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PromotionRow {
+    /// `note`, `task`, `event` or `series`.
+    pub kind: String,
+    /// The fields, decoded.
+    pub as_: brain_core::body::Promoted,
+    /// The one-line rendering, generated when the fields were written.
+    pub descriptor: String,
+    /// Whether a person authored it, and therefore whether a reparse may
+    /// replace it.
+    pub pinned: bool,
+    /// The grammar behind it, where a recognizer produced it.
+    pub grammar: Option<u32>,
+    /// The confidence it was written with, where a recognizer produced it.
+    pub confidence: Option<u32>,
+}
+
 /// absence: a note with no readable text is not the same thing as a note that
 /// was redacted, and rendering either as a blank row loses the distinction the
 /// reader most needs.
@@ -395,7 +444,7 @@ impl Store {
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
-             DELETE FROM note_fts; DELETE FROM fts_map;",
+             DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;",
         )?;
         write_into(&tx, p)?;
         tx.commit()?;
@@ -492,6 +541,70 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// What a note was recognised as, if anything.
+    ///
+    /// Returns the decoded fields, the rendered descriptor, and whether a
+    /// person pinned it. A caller wanting only the descriptor should take it
+    /// from here rather than re-rendering: two surfaces rendering the same
+    /// fields differently would be a third version of the truth.
+    pub fn promotion_of(&self, tgt: &EventId) -> Result<Option<PromotionRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT kind, fields, descriptor, pinned, grammar, confidence
+                 FROM promotions WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)? != 0,
+                        r.get::<_, Option<i64>>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((kind, fields, descriptor, pinned, grammar, confidence)) = row else {
+            return Ok(None);
+        };
+
+        Ok(Some(PromotionRow {
+            kind,
+            as_: minicbor::decode(&fields).map_err(|e| {
+                crate::Error::Integrity(format!("a stored promotion could not be read: {e}"))
+            })?,
+            descriptor,
+            pinned,
+            grammar: grammar.map(|g| g as u32),
+            confidence: confidence.map(|c| c as u32),
+        }))
+    }
+
+    /// Every note promoted to a given type, newest first.
+    pub fn promoted(&self, kind: &str, limit: usize) -> Result<Vec<(EventId, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT p.tgt, p.descriptor
+             FROM promotions p JOIN notes n ON n.tgt = p.tgt
+             WHERE p.kind = ?1
+             ORDER BY n.created_wall DESC
+             LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![kind, limit as i64], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, d) = r?;
+            if let Some(id) = id_from(id) {
+                out.push((id, d));
+            }
+        }
+        Ok(out)
     }
 
     /// A note's name.
@@ -1078,6 +1191,79 @@ fn fts_row(tx: &rusqlite::Transaction<'_>, tgt: &EventId) -> Result<Option<i64>>
         .optional()?)
 }
 
+/// Store what a note was recognised as, decoded once rather than per read.
+///
+/// The whole `Promoted` is kept as CBOR so nothing is lost, and the parts a
+/// query needs are written beside it so the agenda and the calendar are indexed
+/// lookups rather than a decode of every promotion in the store. The descriptor
+/// is rendered here, with the fields, because §3.1.4 wants it regenerated when
+/// they change rather than computed by every surface that draws one.
+fn write_promotion(
+    tx: &rusqlite::Transaction<'_>,
+    tgt: &EventId,
+    p: &brain_core::fold::Promotion,
+) -> Result<()> {
+    use brain_core::body::{Promoted, When};
+
+    let (kind, start_ms, end_ms, start_date, end_date, due, done) = match &p.as_ {
+        Promoted::Note => ("note", None, None, None, None, None, None),
+        Promoted::Task(t) => (
+            "task",
+            None,
+            None,
+            None,
+            None,
+            t.due.clone(),
+            Some(t.done as i64),
+        ),
+        Promoted::Event(e) => match &e.when {
+            When::Timed {
+                start_ms, end_ms, ..
+            } => ("event", Some(*start_ms), *end_ms, None, None, None, None),
+            When::AllDay {
+                start_date,
+                end_date,
+            } => (
+                "event",
+                None,
+                None,
+                Some(start_date.clone()),
+                Some(end_date.clone()),
+                None,
+                None,
+            ),
+        },
+        Promoted::Series(_) => ("series", None, None, None, None, None, None),
+    };
+
+    let mut fields = Vec::new();
+    minicbor::encode(&p.as_, &mut fields)
+        .map_err(|e| crate::Error::Integrity(format!("a promotion could not be stored: {e}")))?;
+
+    tx.execute(
+        "INSERT OR REPLACE INTO promotions
+           (tgt, kind, fields, descriptor, pinned, grammar, confidence,
+            start_ms, end_ms, start_date, end_date, due, done)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            tgt.0.to_vec(),
+            kind,
+            fields,
+            crate::descriptor::render(&p.as_),
+            p.pinned as i64,
+            p.grammar.map(|g| g as i64),
+            p.confidence.map(|c| c as i64),
+            start_ms,
+            end_ms,
+            start_date,
+            end_date,
+            due,
+            done,
+        ],
+    )?;
+    Ok(())
+}
+
 fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
     for (k, v) in &p.settings {
         tx.execute(
@@ -1094,6 +1280,10 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
     }
 
     for (tgt, n) in &p.notes {
+        if let Some(promotion) = &n.promotion {
+            write_promotion(tx, tgt, promotion)?;
+        }
+
         if let Some(pending) = &n.redaction_pending {
             tx.execute(
                 "INSERT OR REPLACE INTO redact_queue (redact_evt, tgt, execute_after, cancelled)

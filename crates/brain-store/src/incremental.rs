@@ -144,7 +144,7 @@ mod tests {
     /// depends on events that may arrive long after the branch did — exactly
     /// the case a partial fold could get wrong while the text still looks
     /// right.
-    type Snap = (Option<String>, Option<String>, u64, String);
+    type Snap = (Option<String>, Option<String>, u64, String, Option<String>);
 
     fn snapshot(s: &Store, notes: &[EventId]) -> Vec<Snap> {
         notes
@@ -155,9 +155,25 @@ mod tests {
                     s.text_of(t).unwrap(),
                     s.divergence_count(t).unwrap(),
                     links_of(s, t),
+                    // The promotion, as a string that changes when anything
+                    // about it does. Without this the equivalence was silent
+                    // about the one rule in the fold that is not
+                    // last-write-wins — an incremental fold could resolve a
+                    // pinned promotion differently from a full one and nothing
+                    // would notice.
+                    promotion_of(s, t),
                 )
             })
             .collect()
+    }
+
+    fn promotion_of(s: &Store, t: &EventId) -> Option<String> {
+        s.promotion_of(t).unwrap().map(|p| {
+            format!(
+                "{}|{}|{}|{:?}|{:?}",
+                p.kind, p.descriptor, p.pinned, p.grammar, p.confidence
+            )
+        })
     }
 
     #[test]
@@ -197,17 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn the_typed_kinds_do_not_disturb_an_incremental_fold() {
-        // Deliberately named for what it checks rather than what would be
-        // useful. `snapshot` compares slug, text, divergence count and links —
-        // the projection has no columns for promotions or occurrences yet, so
-        // this cannot compare them and does not claim to.
-        //
-        // What it does establish is that folding the M2 kinds incrementally
-        // leaves everything the store *does* hold identical to a full rebuild:
-        // they do not disturb text, links or divergence, and they do not panic
-        // a partial fold. The real equivalence for promotions arrives with the
-        // projection columns in task 6.2, and this test grows then.
+    fn incremental_matches_a_full_rebuild_for_the_typed_kinds() {
+        // Now that the projection stores promotions, this compares them. The
+        // scenario deliberately puts a machine promotion and a human one on
+        // every note, so an incremental fold that saw the correction in an
+        // earlier batch has to still refuse the machine promotion arriving
+        // later — the authority-before-recency rule, checked across two
+        // independent implementations of the same fold.
         for seed in [2u64, 13, 77] {
             let b = base(&format!("equiv-typed-{seed}"));
             let s = testing::typed(seed);
@@ -224,8 +236,25 @@ mod tests {
                 apply(&mut incr, &seen, chunk).unwrap();
             }
 
+            let snaps = snapshot(&full, &s.notes);
+
+            // Non-vacuous, checked rather than assumed. A comparison of two
+            // empty things passes for the wrong reason, and this test existed
+            // in exactly that state until the projection learned to store a
+            // promotion.
+            assert!(
+                snaps.iter().any(|s| s.4.is_some()),
+                "seed {seed}: the snapshot contains no promotion, so it compares nothing"
+            );
+            assert!(
+                snaps
+                    .iter()
+                    .any(|s| s.4.as_deref().is_some_and(|p| p.contains("|true|"))),
+                "seed {seed}: no pinned promotion survived, so authority is untested"
+            );
+
             assert_eq!(
-                snapshot(&full, &s.notes),
+                snaps,
                 snapshot(&incr, &s.notes),
                 "seed {seed}: incremental fold disagreed with a full rebuild"
             );
