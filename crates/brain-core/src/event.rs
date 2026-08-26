@@ -73,12 +73,35 @@ impl Kind {
     /// note that every replica must agree on, an event rather than local state.
     pub const UNFLAG: Kind = Kind(15);
 
+    /// Assigns a derived type — event, task, or recurring series — with its
+    /// fields (§3.1). Reversible; a later `promote` supersedes it.
+    pub const PROMOTE: Kind = Kind(16);
+    /// An if-then plan: a cue specification and an action (§2.4).
+    pub const INTENT: Kind = Kind(17);
+    /// A scheduled resurfacing happened, and what became of it (§2.7).
+    pub const REVIEW: Kind = Kind(18);
+
+    // Single-occurrence exceptions to a recurring series, keyed by
+    // `(tgt, occ)` (§3.5). Each affects exactly one occurrence and leaves the
+    // rule untouched.
+
+    /// This occurrence only: new start and end.
+    pub const OCC_MOVE: Kind = Kind(19);
+    /// This occurrence only: different title, location or notes.
+    pub const OCC_EDIT: Kind = Kind(20);
+    /// This occurrence only: skipped. The series continues.
+    pub const OCC_CANCEL: Kind = Kind(21);
+    /// Completion of one instance of a recurring obligation (§3.6).
+    pub const OCC_DONE: Kind = Kind(22);
+    /// Un-completing a mistaken tick. Not a pure union, deliberately.
+    pub const OCC_UNDONE: Kind = Kind(23);
+
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=15).contains(&self.0)
+        (1..=23).contains(&self.0)
     }
 }
 
@@ -141,6 +164,51 @@ impl Header {
         let mut buf = alloc::vec::Vec::new();
         minicbor::encode(self, &mut buf).expect("header encoding is infallible into Vec");
         buf
+    }
+}
+
+#[cfg(test)]
+mod m2_kinds {
+    use super::*;
+
+    #[test]
+    fn the_new_kinds_are_known() {
+        for k in [
+            Kind::PROMOTE,
+            Kind::INTENT,
+            Kind::REVIEW,
+            Kind::OCC_MOVE,
+            Kind::OCC_EDIT,
+            Kind::OCC_CANCEL,
+            Kind::OCC_DONE,
+            Kind::OCC_UNDONE,
+        ] {
+            assert!(k.is_known(), "{k:?} was added and not admitted");
+        }
+    }
+
+    #[test]
+    fn kind_numbers_are_permanent() {
+        // Written down so that inserting a kind in the middle — which would
+        // silently reinterpret every event already written under the numbers it
+        // displaced — fails here instead of in somebody's archive.
+        assert_eq!(Kind::PROMOTE.0, 16);
+        assert_eq!(Kind::INTENT.0, 17);
+        assert_eq!(Kind::REVIEW.0, 18);
+        assert_eq!(Kind::OCC_MOVE.0, 19);
+        assert_eq!(Kind::OCC_EDIT.0, 20);
+        assert_eq!(Kind::OCC_CANCEL.0, 21);
+        assert_eq!(Kind::OCC_DONE.0, 22);
+        assert_eq!(Kind::OCC_UNDONE.0, 23);
+    }
+
+    #[test]
+    fn a_kind_from_a_later_build_is_still_unknown() {
+        // The boundary has to keep working after it moves. An event written by
+        // a build that knows kind 24 must be held by this one rather than
+        // discarded or misread as something it knows.
+        assert!(!Kind(24).is_known());
+        assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }
 

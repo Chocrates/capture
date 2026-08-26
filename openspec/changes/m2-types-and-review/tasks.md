@@ -9,11 +9,11 @@
 
 ## 2. Event kinds — permanent from their first write
 
-- [ ] 2.1 Add `promote`, `intent`, `review`, `occ_move`, `occ_edit`, `occ_cancel`, `occ_done`, `occ_undone` to `Kind`, continuing from `UNFLAG(15)`. Numbers are permanent.
-- [ ] 2.2 Define each body with its nonce at field index 0, like every other body — the redaction commitment depends on it (§1).
-- [ ] 2.3 Write golden encoding vectors for every new body **before any code writes one**. The encoding is frozen from first write; a field forgotten here cannot be added later.
-- [ ] 2.4 Extend the round-trip property test to the new kinds: encode, decode, recompute the id, byte-for-byte identical.
-- [ ] 2.5 Confirm an older build **holds** an unknown new kind with a recorded reason rather than discarding it, and that a held event is reported.
+- [x] 2.1 Add `promote`, `intent`, `review`, `occ_move`, `occ_edit`, `occ_cancel`, `occ_done`, `occ_undone` to `Kind`, continuing from `UNFLAG(15)`. Numbers are permanent.
+- [x] 2.2 Define each body with its nonce at field index 0, like every other body — the redaction commitment depends on it (§1). **Done**: mutually exclusive cases are enums rather than optional fields, so "a timed event that also carries all-day dates" has no representation; and a geofence stores micro-degrees rather than floats, because this body is hashed into the event id and a float would make that id depend on two devices agreeing bit-for-bit about a decimal fraction.
+- [x] 2.3 Write golden encoding vectors for every new body **before any code writes one**. The encoding is frozen from first write; a field forgotten here cannot be added later.
+- [x] 2.4 Extend the round-trip property test to the new kinds: encode, decode, recompute the id, byte-for-byte identical.
+- [x] 2.5 Confirm an older build **holds** an unknown new kind with a recorded reason rather than discarding it, and that a held event is reported.
 
 ## 3. Fold and conflict rules — property-tested, not example-tested
 
