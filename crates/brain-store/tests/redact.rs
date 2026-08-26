@@ -149,12 +149,25 @@ fn redact_at(d: &mut testing::Origin, tgt: EventId, at: u64) -> Envelope {
 fn a_queued_redaction_destroys_nothing_yet() {
     // The cancellation window, and the reason it can exist: if ordering
     // destruction destroyed anything, cancelling would have nothing to save.
+    //
+    // Destroying nothing is not the same as showing it. §1.1 asks for both —
+    // "hides it from every view on ingest, immediately", and physical
+    // destruction only after the window — because the gap between deciding
+    // something must go and it being gone is the gap in which it can leak.
     let f = Fixture::new("queued", |d, tgt| {
         vec![redact_at(d, tgt, 1_700_000_100_000)]
     });
-    assert!(f.readable());
-    assert!(f.findable());
+    assert!(!f.readable(), "the content is still readable to a reader");
+    assert!(!f.findable(), "the content is still reachable by search");
     assert_eq!(f.state.redact_queue().unwrap().len(), 1);
+
+    // Nothing has actually been destroyed, which is what makes the queue
+    // meaningful and what the recovery snapshot is taken from.
+    assert!(
+        f.state.text_for_purge(&f.target).unwrap().is_some(),
+        "ordering a redaction destroyed the content the window exists to save"
+    );
+    assert!(f.bodies_present() > 0, "a body was destroyed early");
 }
 
 #[test]

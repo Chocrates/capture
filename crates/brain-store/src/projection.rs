@@ -254,7 +254,8 @@ pub struct NoteRow {
     pub slug: String,
     /// A chosen name, if one is assigned. Shares one namespace with slugs.
     pub alias: Option<String>,
-    /// Absent when the note has been redacted, or has no readable text yet.
+    /// Absent when the note has been redacted, when a redaction is queued
+    /// against it, or when it has no readable text yet.
     pub text: Option<String>,
     pub created: (u64, u32),
     pub updated: (u64, u32),
@@ -264,6 +265,13 @@ pub struct NoteRow {
     pub pinned: bool,
     pub muted_until: Option<u64>,
     pub redacted_at: Option<u64>,
+    /// Whether a redaction has been ordered and not yet carried out.
+    ///
+    /// Distinct from `redacted_at`, which is destruction. Between the two the
+    /// content is withheld but still recoverable, and a view has to be able to
+    /// say which of those it is looking at: "queued for destruction" is a thing
+    /// the user can still cancel, and "destroyed" is not.
+    pub redaction_queued: bool,
     /// Kept out of exports until cleared. See the fold's `credential` field.
     pub credential: bool,
     pub tags: Vec<String>,
@@ -456,6 +464,28 @@ impl Store {
         Ok(self
             .conn
             .query_row(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM redact_queue q
+                                          WHERE q.tgt = notes.tgt AND q.cancelled = 0)
+                             THEN NULL ELSE text END
+                 FROM notes WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// The text as stored, withholding nothing.
+    ///
+    /// Exists for exactly one caller: the purge, which needs the content in
+    /// order to take the recovery snapshot §1.1 promises — and which only ever
+    /// runs against a note whose text every other reader is being refused.
+    /// Reading a note's content through this is a decision, which is why it is
+    /// not the ordinary accessor and why the name says so.
+    pub fn text_for_purge(&self, tgt: &EventId) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
                 "SELECT text FROM notes WHERE tgt = ?1",
                 params![tgt.0.to_vec()],
                 |r| r.get::<_, Option<String>>(0),
@@ -566,9 +596,13 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT tgt, slug, alias, text, created_wall, created_counter,
-                        updated_wall, updated_counter, tz, pinned, muted_until,
-                        redacted_at, credential
+                "SELECT tgt, slug, alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
+                                          WHERE q2.tgt = notes.tgt AND q2.cancelled = 0)
+                             THEN NULL ELSE text END, created_wall,
+                        created_counter, updated_wall, updated_counter, tz,
+                        pinned, muted_until, redacted_at, credential,
+                        EXISTS (SELECT 1 FROM redact_queue q
+                                WHERE q.tgt = notes.tgt AND q.cancelled = 0)
                  FROM notes WHERE tgt = ?1",
                 params![tgt.0.to_vec()],
                 note_row,
@@ -605,9 +639,13 @@ impl Store {
     /// the user remembering where they filed things.
     pub fn timeline(&self, limit: usize) -> Result<Vec<NoteRow>> {
         let mut st = self.conn.prepare(
-            "SELECT tgt, slug, alias, text, created_wall, created_counter,
-                    updated_wall, updated_counter, tz, pinned, muted_until,
-                    redacted_at, credential
+            "SELECT tgt, slug, alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
+                                          WHERE q2.tgt = notes.tgt AND q2.cancelled = 0)
+                             THEN NULL ELSE text END, created_wall,
+                    created_counter, updated_wall, updated_counter, tz,
+                    pinned, muted_until, redacted_at, credential,
+                    EXISTS (SELECT 1 FROM redact_queue q
+                            WHERE q.tgt = notes.tgt AND q.cancelled = 0)
              FROM notes
              ORDER BY created_wall DESC, created_counter DESC
              LIMIT ?1",
@@ -778,9 +816,13 @@ impl Store {
         };
 
         let sql = format!(
-            "SELECT n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
-                    n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
-                    n.redacted_at, n.credential
+            "SELECT n.tgt, n.slug, n.alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
+                                      WHERE q2.tgt = n.tgt AND q2.cancelled = 0)
+                         THEN NULL ELSE n.text END, n.created_wall,
+                    n.created_counter, n.updated_wall, n.updated_counter, n.tz,
+                    n.pinned, n.muted_until, n.redacted_at, n.credential,
+                    EXISTS (SELECT 1 FROM redact_queue q
+                            WHERE q.tgt = n.tgt AND q.cancelled = 0)
              FROM notes n JOIN ambient a ON a.tgt = n.tgt
              WHERE a.{column} = ?1
              ORDER BY n.created_wall DESC"
@@ -1148,8 +1190,10 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
         // Index the *current* text. Indexing the original capture instead would
         // mean nothing added in an edit was ever findable. A redacted note has
         // no text and contributes no entry, which is what makes its content
-        // unfindable after destruction.
-        if let Some(text) = &n.text {
+        // unfindable after destruction — and a note merely *queued* for
+        // redaction contributes none either, or the content would stay
+        // searchable for the whole cancellation window.
+        if let Some(text) = n.text.as_ref().filter(|_| n.redaction_pending.is_none()) {
             tx.execute(
                 "INSERT OR IGNORE INTO fts_map (tgt) VALUES (?1)",
                 params![t],
@@ -1243,6 +1287,7 @@ fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
         muted_until: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
         redacted_at: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
         credential: r.get::<_, i64>(12)? != 0,
+        redaction_queued: r.get::<_, i64>(13)? != 0,
         tags: Vec::new(),
         divergences: 0,
     })
@@ -1363,6 +1408,58 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_redaction_withholds_the_text_and_the_index() {
+        // DESIGN.md §1.1: a replica "marks the target redacted and hides it
+        // from every view on ingest, immediately — that part is not delayed",
+        // because the gap between deciding something must go and it being gone
+        // is the window in which it can still leak. The fold keeps the text so
+        // the redaction stays cancellable; nothing readable does.
+        let b = base("queued-redaction");
+        let mut d = testing::Origin::new(0);
+        let cap = d.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "a password nobody should still be able to read"),
+            1_700_000_000_000,
+        );
+        let tgt = cap.header.id();
+        let redact = d.author(
+            brain_core::Kind::REDACT,
+            Some(tgt),
+            None,
+            testing::encode(&brain_core::body::RedactBody {
+                nonce: [0u8; 16],
+                scope: brain_core::body::RedactScope::WholeNote,
+                targets: vec![tgt],
+            }),
+            1_700_000_001_000,
+        );
+
+        let g = rebuild(&b, &[cap, redact], 0).unwrap();
+        let store = Store::open_read(&generation_path(&b, g)).unwrap();
+
+        let row = store.note(&tgt).unwrap().expect("the note still exists");
+        assert!(
+            row.text.is_none(),
+            "the content is readable while a redaction is queued"
+        );
+        assert!(
+            row.redaction_queued,
+            "and nothing says why it cannot be read"
+        );
+        assert!(
+            row.redacted_at.is_none(),
+            "it is queued, not destroyed — cancelling has to still mean something"
+        );
+        assert_eq!(
+            store.search("password", 1_800_000_000_000).unwrap().len(),
+            0,
+            "the content is still findable by search"
+        );
+    }
+
+    #[test]
     fn search_indexes_the_current_text_not_the_original() {
         // Indexing the capture instead would mean nothing added in an edit was
         // ever findable.
@@ -1427,17 +1524,27 @@ mod tests {
         let g = rebuild(&b, &[cap, red], 0).unwrap();
         let mut store = Store::open(&generation_path(&b, g)).unwrap();
 
-        // A redaction on its own destroys nothing: that is the cancellation
-        // window, and the content stays readable and findable throughout it.
+        // A redaction on its own destroys nothing — that is the cancellation
+        // window — but nothing readable survives the order either. §1.1 puts
+        // those two facts side by side: the target is hidden from every view on
+        // ingest, immediately, while physical destruction waits.
         assert_eq!(
             store
                 .search("distinctive", 1_800_000_000_000)
                 .unwrap()
                 .len(),
-            1
+            0,
+            "the content stayed searchable after destruction was ordered"
         );
-        assert!(store.text_of(&tgt).unwrap().is_some());
+        assert!(store.text_of(&tgt).unwrap().is_none());
         assert_eq!(store.redact_queue().unwrap().len(), 1, "and it is queued");
+
+        // Withheld, not destroyed. The body is still there to be recovered,
+        // which is the whole difference between this state and the next one.
+        assert!(
+            store.text_for_purge(&tgt).unwrap().is_some(),
+            "ordering a redaction destroyed the content the window exists to save"
+        );
 
         // The purge is what removes it.
         store.purge_note(&tgt, 1_700_000_003_000).unwrap();

@@ -142,7 +142,11 @@ function noteRow(note, onOpen) {
     // wrong story about their own archive.
     body.className = "body absent";
     body.textContent =
-      note.state === "redacted" ? "(content destroyed)" : "(no readable text)";
+      note.state === "redacted"
+        ? "(content destroyed)"
+        : note.state === "withheld"
+          ? "(content withheld — queued for destruction)"
+          : "(no readable text)";
   }
   row.append(body);
   return row;
@@ -232,7 +236,11 @@ async function showNote(name) {
     text.textContent = n.text;
   } else {
     text.className = "text absent";
-    text.textContent = n.redacted ? "(content destroyed)" : "(no readable text)";
+    text.textContent = n.redacted
+      ? "(content destroyed)"
+      : n.state === "withheld"
+        ? "(content withheld — queued for destruction)"
+        : "(no readable text)";
   }
   view.append(text);
 

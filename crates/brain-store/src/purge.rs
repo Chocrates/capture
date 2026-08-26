@@ -109,11 +109,17 @@ pub fn execute(
     // probably a credential, leaving a plaintext copy lying around for a month
     // is the wrong default in exactly the case the redaction was most
     // deliberate.
+    // Read through the accessor that withholds nothing. Every other reader is
+    // refused this note's text from the moment the redaction was ordered — that
+    // is what §1.1 requires — and the snapshot is the one thing that has to see
+    // it anyway, or the recovery copy is taken empty and the mistake it exists
+    // to survive becomes unsurvivable.
     if let Some(note) = state.note(target)?
         && !note.credential
-        && let Some(text) = note.text.as_deref()
+        && let Some(text) = state.text_for_purge(target)?
     {
-        ops.take_snapshot(redact, target, text, now)?;
+        let _ = note;
+        ops.take_snapshot(redact, target, &text, now)?;
     }
 
     // 2. Derived copies first. They are the ones that answer queries, and a

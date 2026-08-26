@@ -61,6 +61,12 @@ impl From<NoteRow> for Note {
     fn from(n: NoteRow) -> Note {
         let state = if n.redacted_at.is_some() {
             "redacted"
+        } else if n.redaction_queued {
+            // Ordered and not yet carried out. The content is already withheld
+            // — that is not delayed — but it is still cancellable, and a reader
+            // told "destroyed" has been told something they can no longer act
+            // on when in fact they can.
+            "withheld"
         } else if n.text.is_none() {
             // Not the same as redacted. A note whose content has not arrived is
             // a different fact from one whose content was destroyed, and a
@@ -473,6 +479,7 @@ mod tests {
             pinned: false,
             muted_until: None,
             redacted_at: None,
+            redaction_queued: false,
             credential: false,
             tags: Vec::new(),
             divergences: 0,
@@ -485,6 +492,26 @@ mod tests {
     }
 
     #[test]
+    fn withheld_outranks_incomplete_and_is_not_destroyed() {
+        // A note queued for redaction has no readable text, which is exactly
+        // what "incomplete" also looks like from the row alone. Telling them
+        // apart is the point: one is content that has not arrived, the other is
+        // content being withheld on the way to destruction — and only the
+        // second is something the reader can still cancel.
+        let mut queued = row();
+        queued.text = None;
+        queued.redaction_queued = true;
+        assert_eq!(Note::from(queued).state, "withheld");
+
+        // Destruction still wins. Once the body is gone, "queued" is history.
+        let mut both = row();
+        both.text = None;
+        both.redaction_queued = true;
+        both.redacted_at = Some(1);
+        assert_eq!(Note::from(both).state, "redacted");
+    }
+
+    #[test]
     fn destroyed_and_incomplete_are_different_states() {
         // The distinction the interface most needs to get right. A note whose
         // content has not arrived and one whose content was destroyed both have
@@ -494,6 +521,10 @@ mod tests {
         destroyed.text = None;
         destroyed.redacted_at = Some(1_700_000_100_000);
         assert_eq!(Note::from(destroyed).state, "redacted");
+
+        let mut withheld = row();
+        withheld.text = None;
+        withheld.redaction_queued = true;
 
         let mut incomplete = row();
         incomplete.text = None;
@@ -542,6 +573,10 @@ mod tests {
         destroyed.text = None;
         destroyed.redacted_at = Some(1);
 
+        let mut withheld = row();
+        withheld.text = None;
+        withheld.redaction_queued = true;
+
         let mut incomplete = row();
         incomplete.text = None;
 
@@ -551,14 +586,21 @@ mod tests {
         let mut muted = row();
         muted.muted_until = Some(0);
 
-        let named: Vec<&str> = [row(), destroyed, incomplete, diverged, muted]
+        let named: Vec<&str> = [row(), destroyed, withheld, incomplete, diverged, muted]
             .into_iter()
             .map(|n| Note::from(n).state)
             .collect();
         assert!(named.iter().all(|s| !s.is_empty()));
         assert_eq!(
             named,
-            ["ordinary", "redacted", "incomplete", "diverged", "muted"]
+            [
+                "ordinary",
+                "redacted",
+                "withheld",
+                "incomplete",
+                "diverged",
+                "muted"
+            ]
         );
     }
 }

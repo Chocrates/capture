@@ -192,6 +192,10 @@ fn row(n: &NoteRow, width: usize) -> String {
     let body = match &n.text {
         Some(t) => first_line(t),
         None if n.redacted_at.is_some() => "(content destroyed)".to_string(),
+        // Withheld, not yet destroyed. Saying "destroyed" here would be a lie
+        // the user could act on — the redaction is still cancellable, and this
+        // is the line that has to make that difference visible.
+        None if n.redaction_queued => "(content withheld — queued for destruction)".to_string(),
         None => "(no readable text)".to_string(),
     };
 
@@ -219,6 +223,12 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     match &n.text {
         Some(t) => say!("{t}"),
         None if n.redacted_at.is_some() => say!("(content destroyed)"),
+        None if n.redaction_queued => {
+            say!("(content withheld — queued for destruction)");
+            say!();
+            say!("It is still recoverable: brain redact --cancel <id>");
+            say!("Listed by: brain status");
+        }
         None => say!("(no readable text)"),
     }
 
