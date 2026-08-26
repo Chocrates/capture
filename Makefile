@@ -17,7 +17,7 @@ SCRATCH ?= /tmp/brain-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
-        build release install install-chord demo smoke tasks clean distclean
+        build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
 help:
@@ -196,6 +196,36 @@ install:
 # from adding a file of our own.
 install-chord:
 	@./install.sh --with-chord
+
+# --------------------------------------------------------------- scratch ----
+
+## scratch: an empty store to test against, thrown away with rm -rf
+#
+# There is deliberately no command that deletes a note. Redaction destroys
+# content, and `DESIGN.md` §1.1 keeps its cancellation window, its cap and its
+# recovery snapshot even under `--force` — none of which you want in the middle
+# of a test, and all of which exist for a reason worth not weakening for
+# convenience. Every note redacted also stays in the timeline as a tombstone,
+# because the log is append-only and that is the point of it.
+#
+# So testing gets its own store instead of a way to damage the real one. The
+# whole store is one directory named by BRAIN_HOME, and deleting notes is
+# deleting it.
+scratch: build
+	@rm -rf $(SCRATCH)
+	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain init >/dev/null
+	@echo 'empty store at $(SCRATCH)'
+	@echo
+	@echo 'Use it:'
+	@echo '  export BRAIN_HOME=$(SCRATCH)'
+	@echo
+	@echo 'The overlay takes it too, and binds its own socket under it — so'
+	@echo 'this one runs alongside the real one rather than replacing it:'
+	@echo '  BRAIN_HOME=$(SCRATCH) ./target/debug/brain-capture --run &'
+	@echo '  BRAIN_HOME=$(SCRATCH) ./target/debug/brain-capture --show'
+	@echo
+	@echo 'Throw it away:'
+	@echo '  make scratch      # or: rm -rf $(SCRATCH)'
 
 # ------------------------------------------------------------------ demo ----
 
