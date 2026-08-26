@@ -41,7 +41,20 @@ rustix = { version = "1", features = ["fs", "process"] }
 # Default features are trimmed: the overlay is a single text field that must
 # appear instantly, so it takes the glow renderer and skips persistence,
 # accesskit and the default icon loaders.
+#
+# It does not take `default_fonts`, and that is not free: without it egui has no
+# font data at all, so every galley comes back empty. The field renders as a
+# one-pixel line, typed characters never appear, and — because the cursor is
+# clamped against that empty galley on the frame after each keystroke — every
+# new character lands at position zero and the note is stored backwards. The
+# overlay loads a font from the system instead; see `window::fonts`.
 eframe = { version = "0.36", default-features = false, features = ["glow", "wayland", "x11"] }
+
+# Pinned to the version eframe uses, because the overlay has to reach past
+# eframe to choose the windowing backend itself. See `window.rs`: on Wayland
+# winit cannot hide a window, raise it, or give it the keyboard, and those are
+# the only three things this window does.
+winit = { version = "0.30", default-features = false, features = ["x11", "wayland"] }
 
 # --- host-side only ---
 getrandom = "0.3"
