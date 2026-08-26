@@ -33,12 +33,15 @@
 - [ ] 4.5 Implement confidence scoring against the bands in `BANDS`, and return a recognition rather than an event — the parser stays a pure function of `(text, now, zone)`.
 - [ ] 4.6 Test exhaustively over the closed vocabulary rather than representatively. The vocabulary is closed precisely so this is possible.
 - [ ] 4.7 Check the five worked examples in §3.1 parse to the types the document claims, and record any that do not — the vocabulary was written without a parser to test it against.
+- [ ] 4.8 Add a grammar version constant to `brain-parse`, bumped whenever the vocabulary, the grammar or the bands change. This is the reparse trigger: nothing in the system observes a build, so without it a note captured in March can never benefit from a fix shipped in June.
+- [ ] 4.9 Treat the confidence bands as provisional and strict. A band moves only when a real capture forces it, and that capture is pinned alongside as a test case — so the bands accumulate evidence in the direction §3.1.3 prefers, where a miss costs a glance and a false positive costs a calendar entry.
 
 ## 5. Promotion — where recognitions become events
 
 - [ ] 5.1 Author `promote` from a recognition at or above the 0.75 floor. Enforce the floor in one place.
 - [ ] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing.
 - [ ] 5.3 Implement the reparse path on text edit, respecting pins.
+- [ ] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep.
 - [ ] 5.4 Implement the human correction path, authoring `pinned: true`.
 - [ ] 5.5 Implement tasks: state, optional floating due date, list membership as tags with a display order, optional ordering.
 - [ ] 5.6 Implement recurring obligations, with uncompleted instances recorded as lapsed and **not** rolling over, stacking or accumulating.
@@ -47,10 +50,12 @@
 
 ## 6. Projection — occurrences and the widened queue
 
-- [ ] 6.1 Expand occurrences into `state.db` over the rolling horizon, extended in the background and on view access.
+- [ ] 6.1 Expand occurrences into `state.db` over the rolling horizon of −1 year / +1 year (§3.4), extended in the background and on view access.
+- [ ] 6.1a Measure what the horizon actually costs — rows and rebuild time for a dozen unbounded daily series. It is a performance choice, not a correctness one (failure mode 23), and it was kept rather than re-guessed, so it should be measured once rather than argued about again.
 - [ ] 6.2 Store promoted fields and descriptors so agenda and calendar queries never parse text at read time.
 - [ ] 6.3 Implement the series split for "this and future": bound with `UNTIL`, new series, `split_from`, and exceptions binding to whichever series covers their `original_start`.
 - [ ] 6.4 Widen the due-work queue to carry review and intent deadlines beside redaction deadlines, processed by the same startup-is-the-floor mechanism.
+- [ ] 6.4a Drain the due queue from the resident overlay on a timer. It runs all day for the chord and is already the elected writer (§8.8), but it never opens a `Session` — so today a machine with the overlay running and nothing else touching the store leaves due work undone until some command happens to run. Startup stays the floor; this is what makes a deadline land near its time without adding a process that can be silently not running.
 - [ ] 6.5 Confirm a rebuild reproduces every expansion exactly, and that a timezone database change is fixed by re-folding rather than by migration.
 
 ## 7. Surfaces — the desktop first, it is the first-party one
@@ -64,7 +69,7 @@
 
 ## 8. Review — the component with the best evidence
 
-- [ ] 8.1 Decide the session size. §2.8 says "a fixed small number" and does not choose one; the scheduler cannot be written without it.
+- [ ] 8.1 Implement the session at **five items**. The property that matters is that it is always finishable — a session you do not finish is a backlog by another name. Not a setting: a knob nobody turns is a default with extra code.
 - [ ] 8.2 Implement selection in the stated priority order: forward markers, active project or upcoming event, never engaged since capture (oldest first), matching ambient context.
 - [ ] 8.3 Implement the session shape: bounded, ending, and saying so. Never an unbounded queue — §3.6 spends its length on why manufactured backlogs are the wrong shape here.
 - [ ] 8.4 Implement the `review` event with outcomes `shown / engaged / deferred` only.

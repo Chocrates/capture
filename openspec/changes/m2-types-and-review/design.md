@@ -112,12 +112,31 @@ difficulty is memory.
 *Alternative considered:* `recalled / missed / snoozed`, which an earlier draft
 specified. Withdrawn in `DESIGN.md` §2.7 and not revisited here.
 
-### The due queue grows rather than a scheduler being added
+### The due queue grows, and the overlay drains it
 
 Review sessions and time-based intents join redaction deadlines in the existing
-due-work queue, processed at every process startup with a resident window making
-deadlines land near their time. No timer thread, no daemon — the property that
-matters is that nothing is silently not running.
+due-work queue. Every process startup remains the floor: that is the property
+that matters, because a queue drained at startup can be late but cannot be
+quietly dead, while a daemon that dies leaves deadlines unfired with nothing to
+notice.
+
+Startup alone is not enough for intents, though, and this is where they differ
+from redaction. A 30-minute redaction window makes lateness invisible; a
+reminder set for 3pm that fires at 3:40 because nothing was opened until then is
+close to not firing at all.
+
+So the resident overlay drains the queue on a timer. It is already running all
+day for the chord, so this costs no new process and no new failure mode — and it
+closes a gap that exists today: the overlay never opens a `Session`, so a
+machine with the overlay running and nothing else touching the store leaves due
+work undone until some command happens to run. The overlay is already the
+elected writer under §8.8; this is it doing the job it already holds the lock
+for.
+
+*Alternative considered:* a real scheduler with wake-up timers for intents.
+Rejected — it is a component that can be silently not running, which is the
+exact property this design avoids, and it would need its own health surfacing to
+compensate for that.
 
 ## Risks / Trade-offs
 
@@ -147,6 +166,13 @@ matters is that nothing is silently not running.
   window does not wait for M2. → The capture gesture is frozen; nothing here
   requires pausing use of M1.
 
+- **A pinned promotion is invisible and permanent.** `pinned: true` exempts a
+  note from every future reparse, and nothing surfaces which notes are pinned.
+  Anything that sets it wrongly — a bulk edit, an import — makes those notes
+  permanently unreparseable with no way to notice. → Accepted for M2 rather than
+  mitigated: the pin is only settable from an explicit correction path today.
+  Revisit if a second author of promotions appears.
+
 - **`carries_forward` defaults to false, and the class of thing that needs it is
   exactly the class where forgetting hurts most** — a missed dose, an unpaid
   invoice. → The flag is never inferred, and a repeatedly-lapsing series prompts
@@ -173,14 +199,61 @@ Order of work, each step usable before the next:
 Rollback is per-step: nothing before step 4 writes an event, and steps 1–3 are
 inert additions.
 
+### A review session is five items
+
+§2.8 asks for "a fixed small number" and declines to pick one. Five.
+
+The property that matters is that the session is always finishable, because a
+session you do not finish is a backlog by another name and §3.6 spends its
+length on why manufactured backlogs are the wrong shape for this user. Five is
+small enough to always complete and still reaches two or three of §2.8's four
+selection tiers on an ordinary day. Ten reaches further down the priority order
+but is abandonable halfway; three guarantees completion and means most of the
+selection logic never runs.
+
+Deliberately not a setting. A knob nobody turns is a default with extra code,
+and §0.2 rates the cost of decisions highly enough that offering one here is not
+free.
+
+### The expansion horizon stays ±1 year, and gets measured
+
+§3.4's bounds are kept rather than re-guessed. This is a performance choice
+rather than a correctness one — failure mode 23 already establishes that an
+exhausted horizon costs a brief expansion on first open and never missing or
+wrong data, because the rule is the truth and the expansion is not.
+
+An unbounded daily series is roughly 730 rows inside that window, recomputed on
+every rebuild. Whether that stays comfortable with a dozen such series is
+measured during M2 rather than argued about now.
+
+### A reparse sweep is triggered by a grammar version, on startup
+
+Failure mode 20b establishes that reparsing the backlog is *safe* — pins are
+never overridden — and says nothing about when it happens. Nothing in the system
+observes a build, so without a trigger a note captured in March could never
+benefit from a grammar fix shipped in June.
+
+So `brain-parse` carries a version, bumped whenever the vocabulary or grammar
+changes, and every promotion records the version it was parsed under. Startup
+reparses anything parsed under an older one. The trigger becomes a fact in the
+data rather than an event nobody observes, and the cost is the one §2.5.1
+already anticipated: one `promote` per note per sweep.
+
+### The confidence bands are provisional, and only loosen against evidence
+
+The bands in §3.1.5 were reasoned, not measured — there was no parser and no
+corpus when they were written. They decide what silently becomes a calendar
+entry and what waits as a suggestion, so being wrong in the generous direction
+produces exactly the false positives §3.1.3 calls the worse error.
+
+They ship as written and are treated as strict. A band moves only when a real
+capture forces it, and the capture that forced it is pinned alongside as a test
+case. That way the bands accumulate evidence in the direction the design already
+prefers — a miss costs a glance at a suggestion, a false positive costs a
+calendar entry.
+
 ## Open Questions
 
-- **What the review session's fixed size actually is.** §2.8 says "a fixed small
-  number" and does not choose. Needs a number before the scheduler is written.
-- **Expansion horizon bounds.** §3.4 says −1 year / +1 year; whether that is
-  right for a device that has been off for a season is untested.
-- **Where the reparse sweep is triggered from.** The parser improving is a build
-  event, not a data event, and nothing currently observes it.
-- **Whether the recognizer's confidence bands survive contact with real
-  captures.** The bands in §3.1.5 are reasoned, not measured. M1's captures are
-  the sample to check them against.
+None outstanding. The four that were open — session size, horizon bounds, the
+reparse trigger, and what to do about the unmeasured confidence bands — are
+settled above.
