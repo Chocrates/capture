@@ -227,6 +227,7 @@ fn promote_series() -> PromoteBody {
                 until: None,
             },
             carries_forward: false,
+            split_from: None,
         }),
         pinned: false,
         grammar: Some(1),

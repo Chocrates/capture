@@ -1414,6 +1414,7 @@ fn expand_occurrences(
     tgt: &EventId,
     note: &brain_core::fold::Note,
     promotion: &brain_core::fold::Promotion,
+    all: &std::collections::BTreeMap<EventId, brain_core::fold::Note>,
     now: i64,
 ) -> Result<()> {
     use brain_core::body::{Promoted, When};
@@ -1441,8 +1442,23 @@ fn expand_occurrences(
             let rule = to_rule(&sf.rule);
             let local = brain_time::local_of(start_ms, zone);
 
+            // Exceptions written against the series this one was split from,
+            // for the occurrences this one now covers. §3.5: exceptions survive
+            // a split by binding to whichever series covers their original
+            // start. Without this, completing next Tuesday and *then* changing
+            // the schedule from Tuesday onward would silently lose the
+            // completion — it would still be in the log, attached to a series
+            // that no longer produces that occurrence.
+            let inherited = sf
+                .split_from
+                .and_then(|parent| all.get(&parent))
+                .map(|parent| &parent.occurrences);
+
             for o in brain_time::expand(&rule, local, zone, from, to) {
-                let ex = note.occurrences.get(&o.start);
+                let ex = note
+                    .occurrences
+                    .get(&o.start)
+                    .or_else(|| inherited.and_then(|m| m.get(&o.start)));
                 let (shown, end) = match ex.and_then(|e| e.moved_to) {
                     Some((s, e)) => (s, e),
                     None => (o.start, None),
@@ -1563,7 +1579,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
     for (tgt, n) in &p.notes {
         if let Some(promotion) = &n.promotion {
             write_promotion(tx, tgt, promotion)?;
-            expand_occurrences(tx, tgt, n, promotion, now)?;
+            expand_occurrences(tx, tgt, n, promotion, &p.notes, now)?;
         }
 
         if let Some(pending) = &n.redaction_pending {

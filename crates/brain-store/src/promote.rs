@@ -23,7 +23,7 @@
 //! anything older.
 
 use brain_core::body::{
-    EventFields, PromoteBody, Promoted, SeriesFields, TaskFields, When as BodyWhen,
+    EventFields, PromoteBody, Promoted, RuleSpec, SeriesFields, TaskFields, When as BodyWhen,
 };
 use brain_core::event::Kind;
 use brain_core::fold::Note;
@@ -103,6 +103,7 @@ pub fn promoted_from(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> 
             // really matters" is the guess that must not be made silently. A
             // repeatedly-lapsing series prompts once, in review, instead.
             carries_forward: false,
+            split_from: None,
         })),
     }
 }
@@ -219,6 +220,92 @@ pub fn correct(paths: &StorePaths, name: &str, as_: Promoted) -> Result<()> {
             confidence: None,
         })
     })?;
+    Ok(())
+}
+
+/// Change a series from one occurrence onward.
+///
+/// Bounds the existing rule with `UNTIL` immediately before the occurrence,
+/// captures a new note carrying the same text, and promotes it to a series
+/// starting at that occurrence with `split_from` naming the original (§3.5).
+///
+/// # Why this is not an edit
+///
+/// Editing the rule in place would change what the schedule *was* last March.
+/// For an ordinary calendar that is a wrong entry; here it is worse, because a
+/// log that quietly revises its own history is an unreliable narrator, and the
+/// whole purpose of the system is compensating for unreliable memory. Splitting
+/// leaves the past exactly as it happened.
+///
+/// The two other scopes are already available and are not this: changing one
+/// occurrence is an `occ_*` exception, and changing every occurrence is an
+/// ordinary edit of the rule.
+pub fn split_series(paths: &StorePaths, name: &str, at_occ: i64, new_rule: RuleSpec) -> Result<()> {
+    let (tgt, current, text, tz) = {
+        let s = Session::open(paths.clone())?;
+        let tgt = crate::mutate::find(&s, name)?;
+        let all = s.log.all()?;
+        let folded = brain_core::fold::fold(&all);
+        let note = folded
+            .notes
+            .get(&tgt)
+            .ok_or_else(|| crate::Error::NotFound(name.into()))?;
+
+        let Some(brain_core::fold::Promotion {
+            as_: Promoted::Series(sf),
+            ..
+        }) = note.promotion.clone()
+        else {
+            return Err(crate::Error::Usage(format!(
+                "'{name}' is not a recurring series, so there is nothing to split"
+            )));
+        };
+        (
+            tgt,
+            sf,
+            note.text.clone().unwrap_or_default(),
+            note.tz.clone(),
+        )
+    };
+
+    // 1. Bound the old rule. Pinned, because a person asked for this and no
+    //    reparse may undo it.
+    let mut bounded = current.clone();
+    bounded.rule.until = Some(at_occ - 1);
+    correct(paths, name, Promoted::Series(bounded))?;
+
+    // 2. The new series is its own note. It carries the same text because it is
+    //    the same commitment continuing under a different schedule — and the
+    //    text is what a person recognises it by.
+    let mut s = Session::open(paths.clone())?;
+    let body = crate::session::capture_body_in(&text, tz.as_deref())?;
+    let new_tgt = s.capture(&body)?;
+    let new_tgt = crate::mutate::find(&s, &new_tgt.slug)?;
+
+    let when = match &current.when {
+        BodyWhen::Timed { end_ms, tz, .. } => BodyWhen::Timed {
+            start_ms: at_occ,
+            end_ms: *end_ms,
+            tz: tz.clone(),
+        },
+        all_day => all_day.clone(),
+    };
+
+    s.append(Kind::PROMOTE, Some(new_tgt), None, |nonce| {
+        encode(&PromoteBody {
+            nonce,
+            as_: Promoted::Series(SeriesFields {
+                when: when.clone(),
+                rule: new_rule.clone(),
+                carries_forward: current.carries_forward,
+                split_from: Some(tgt),
+            }),
+            pinned: true,
+            grammar: None,
+            confidence: None,
+        })
+    })?;
+
     Ok(())
 }
 

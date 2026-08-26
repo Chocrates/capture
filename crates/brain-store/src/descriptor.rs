@@ -50,12 +50,14 @@ pub fn render(p: &Promoted) -> String {
         Promoted::Series(sf) => {
             let mut s = rule(&sf.rule);
             if let When::Timed { start_ms, tz, .. } = &sf.when {
-                // A series stores its time of day as minutes past local
-                // midnight rather than an instant (see `promote::series_start`),
-                // so this reads it as a clock and not as a date.
-                let minutes = (start_ms / 60_000).rem_euclid(24 * 60);
-                s.push_str(&format!(" at {:02}:{:02}", minutes / 60, minutes % 60));
-                let _ = tz;
+                // The clock the series happens at, read in its own zone. Taking
+                // the remainder of the instant instead would be the local time
+                // only in UTC, and silently an hour or several out everywhere
+                // else — which is the whole reason the zone is stored.
+                if let Some(z) = Zone::new(tz) {
+                    let (h, m) = brain_time::civil_clock(*start_ms, z);
+                    s.push_str(&format!(" at {h:02}:{m:02}"));
+                }
             }
             if sf.carries_forward {
                 // Worth saying, because it is the difference between a missed
@@ -275,6 +277,7 @@ mod tests {
             },
             rule: spec(1, 1, 0b0001_1111),
             carries_forward: false,
+            split_from: None,
         });
         assert_eq!(render(&weekdays), "every weekday");
 
@@ -285,6 +288,7 @@ mod tests {
             },
             rule: spec(1, 1, 0b0110_0000),
             carries_forward: false,
+            split_from: None,
         });
         assert_eq!(render(&weekend), "every weekend");
     }
@@ -299,8 +303,28 @@ mod tests {
             },
             rule: spec(0, 1, 0),
             carries_forward: true,
+            split_from: None,
         });
         assert!(render(&s).contains("carries forward"), "{}", render(&s));
+    }
+
+    #[test]
+    fn a_series_clock_is_read_in_its_own_zone() {
+        // The bug this replaced took the remainder of the instant, which is the
+        // local time only in UTC. A series at 07:00 in Denver would have read
+        // as 13:00 or 14:00 depending on the season.
+        let seven_denver = 1_780_318_800_000; // 2026-06-01 07:00 America/Denver
+        let s = Promoted::Series(SeriesFields {
+            when: When::Timed {
+                start_ms: seven_denver,
+                end_ms: None,
+                tz: "America/Denver".into(),
+            },
+            rule: spec(0, 1, 0),
+            carries_forward: false,
+            split_from: None,
+        });
+        assert!(render(&s).ends_with(" at 07:00"), "{}", render(&s));
     }
 
     #[test]
@@ -312,6 +336,7 @@ mod tests {
             },
             rule: spec(1, 2, 0),
             carries_forward: false,
+            split_from: None,
         });
         assert_eq!(render(&s), "every 2 weeks");
     }

@@ -463,6 +463,16 @@ pub struct Captured {
 /// opened at all. That case is not exotic: a disk that has filled up is exactly
 /// a disk whose databases will not open.
 pub fn capture_body(text: &str) -> Result<Vec<u8>> {
+    capture_body_in(text, None)
+}
+
+/// The same, carrying a zone chosen by the caller.
+///
+/// Used where a capture continues an existing one rather than being made now —
+/// splitting a recurring series, for instance. Inheriting the original's zone
+/// keeps the two halves on the same clock; taking this machine's would move the
+/// continuation to wherever the split happened to be performed.
+pub fn capture_body_in(text: &str, tz: Option<&str>) -> Result<Vec<u8>> {
     let nonce = entropy::nonce()?;
     Ok(encode(&CaptureBody {
         nonce: nonce.0,
@@ -470,7 +480,7 @@ pub fn capture_body(text: &str) -> Result<Vec<u8>> {
         // Recorded now because it cannot be recovered later, and day grouping
         // depends on it: a note captured at 23:40 in one zone must not move to
         // a different day when read in another.
-        tz: Some(local_zone()),
+        tz: Some(tz.map(String::from).unwrap_or_else(local_zone)),
         ambient: ambient::collect(&ambient::Host),
     }))
 }

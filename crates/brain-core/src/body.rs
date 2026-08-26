@@ -396,6 +396,21 @@ pub struct SeriesFields {
     /// made silently. A missed walk is not a missed dose (§3.6).
     #[n(2)]
     pub carries_forward: bool,
+    /// The series this one was split from, if it was (§3.5).
+    ///
+    /// Changing a recurring series from a given occurrence onward bounds the
+    /// old rule and starts a new series rather than editing the rule in place.
+    /// Editing in place would silently rewrite what the schedule *was* last
+    /// March, and a log that revises its own history is an unreliable narrator
+    /// — fatal for a system whose whole purpose is compensating for unreliable
+    /// memory.
+    ///
+    /// Added after the first golden vectors were written, which is only safe
+    /// because a trailing `None` is not encoded at all: every body that omits
+    /// it produces the bytes it always did. See `a_trailing_absent_field_is_
+    /// simply_absent`.
+    #[n(3)]
+    pub split_from: Option<EventId>,
 }
 
 /// What a capture was recognised as.

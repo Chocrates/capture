@@ -59,6 +59,7 @@ fn weekday_series(paths: &StorePaths) -> (String, brain_core::EventId) {
                 until: None,
             },
             carries_forward: false,
+            split_from: None,
         }),
     )
     .unwrap();
@@ -212,4 +213,155 @@ fn a_calendar_query_is_answered_from_rows_rather_than_text() {
         .occurring_between(NOW, NOW + 7 * 24 * 60 * 60 * 1000)
         .unwrap();
     assert_eq!(week.len(), 5, "a week of weekdays is five days");
+}
+
+// ------------------------------------------------------------- splitting ----
+
+#[test]
+fn a_split_leaves_the_past_exactly_as_it_happened() {
+    // §3.5. Editing the rule in place would rewrite what the schedule *was*,
+    // and a log that revises its own history is an unreliable narrator.
+    let sc = Scratch::new("split");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let before = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let boundary = before[10].occ;
+    let past: Vec<i64> = before
+        .iter()
+        .map(|o| o.occ)
+        .filter(|o| *o < boundary)
+        .collect();
+
+    // From the boundary onward: weekends instead of weekdays.
+    promote::split_series(
+        &p,
+        &slug,
+        boundary,
+        RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0b0110_0000,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        },
+    )
+    .unwrap();
+
+    let store = rebuild(&p, NOW);
+    let after: Vec<i64> = store
+        .occurrences_of(&tgt)
+        .unwrap()
+        .into_iter()
+        .map(|o| o.occ)
+        .collect();
+
+    assert_eq!(after, past, "the past changed when the future did");
+    assert!(
+        !after.contains(&boundary),
+        "the old series still produces the occurrence it was bounded before"
+    );
+}
+
+#[test]
+fn the_new_series_carries_on_from_the_split() {
+    let sc = Scratch::new("split-new");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+    let boundary = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[10].occ;
+
+    promote::split_series(
+        &p,
+        &slug,
+        boundary,
+        RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0b0110_0000,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        },
+    )
+    .unwrap();
+
+    let store = rebuild(&p, NOW);
+    let series = store.promoted("series", 100).unwrap();
+    assert_eq!(series.len(), 2, "a split should leave two series");
+
+    // The continuation occurs, and does so on weekends.
+    let new = series
+        .iter()
+        .find(|(id, _)| *id != tgt)
+        .expect("the new series exists");
+    let occ = store.occurrences_of(&new.0).unwrap();
+    assert!(!occ.is_empty(), "the continuation expanded to nothing");
+    assert!(occ.iter().all(|o| o.start_ms >= boundary));
+}
+
+#[test]
+fn a_completion_survives_a_split_that_moves_past_it() {
+    // The fiddly half of §3.5: exceptions bind to whichever series covers their
+    // original start. Complete an occurrence, then change the schedule from
+    // before it — the completion must still be there.
+    let sc = Scratch::new("split-exception");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let occ = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let boundary = occ[10].occ;
+    let completed = occ[12].occ;
+
+    let mut s = Session::open(p.clone()).unwrap();
+    s.append(Kind::OCC_DONE, Some(tgt), None, |nonce| {
+        let mut b = Vec::new();
+        minicbor::encode(
+            &brain_core::body::OccBody {
+                nonce,
+                occ: completed,
+            },
+            &mut b,
+        )
+        .unwrap();
+        b
+    })
+    .unwrap();
+    drop(s);
+
+    // Split before the completed occurrence, keeping the same weekday rule so
+    // the continuation still produces it.
+    promote::split_series(
+        &p,
+        &slug,
+        boundary,
+        RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0b0001_1111,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        },
+    )
+    .unwrap();
+
+    let store = rebuild(&p, NOW);
+    let new = store
+        .promoted("series", 100)
+        .unwrap()
+        .into_iter()
+        .find(|(id, _)| *id != tgt)
+        .expect("the continuation exists");
+
+    let hit = store
+        .occurrences_of(&new.0)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.occ == completed);
+
+    assert!(
+        hit.is_some_and(|o| o.done),
+        "a completion was lost when the schedule moved past it"
+    );
 }
