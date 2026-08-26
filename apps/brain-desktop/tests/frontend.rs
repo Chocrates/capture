@@ -106,6 +106,67 @@ fn nothing_on_screen_creates_a_note() {
 }
 
 #[test]
+fn nothing_chains_onto_append() {
+    // `Node.append` returns undefined, so `parent.append(child).append(x)`
+    // throws on the second call. It reads like it works, and three of them
+    // shipped.
+    //
+    // What made it expensive is where they were: one sat in the pending
+    // redaction block, which `showTimeline` awaits *before* it asks for any
+    // notes. So the window came up completely empty — no notes, no error,
+    // nothing in the log — and only for stores that happened to have a
+    // redaction queued. The store was never involved.
+    let code = ui_code("app.js");
+    for (i, line) in code.lines().enumerate() {
+        let Some(after) = line.split_once(".append(").map(|(_, a)| a) else {
+            continue;
+        };
+        assert!(
+            !after.contains(").append("),
+            "app.js:{} chains onto the result of append, which is undefined: {}",
+            i + 1,
+            line.trim()
+        );
+    }
+}
+
+#[test]
+fn a_throw_in_the_page_is_shown_rather_than_swallowed() {
+    // The corollary of the bug above. An exception used to leave a blank view
+    // that was indistinguishable from an empty store — and the empty state
+    // reads "Nothing captured yet", which is the one wrong answer.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("unhandledrejection"),
+        "a rejected promise must reach the page, not the void"
+    );
+    assert!(
+        code.contains(r#"addEventListener("error""#),
+        "a thrown error must reach the page, not the void"
+    );
+}
+
+#[test]
+fn the_api_the_page_needs_is_actually_injected() {
+    // `window.__TAURI__` exists only if `withGlobalTauri` is set, and it
+    // defaults to false. With it unset, app.js throws on its first statement
+    // and the window renders nothing at all — the store, the commands and the
+    // build are all fine, and the cause is one boolean in a file the page never
+    // mentions.
+    let conf = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"),
+    )
+    .expect("reading tauri.conf.json");
+
+    if ui_code("app.js").contains("window.__TAURI__") {
+        assert!(
+            conf.contains(r#""withGlobalTauri": true"#),
+            "app.js reaches for window.__TAURI__, which tauri.conf.json does not ask to be injected"
+        );
+    }
+}
+
+#[test]
 fn the_page_talks_only_to_the_commands_it_is_given() {
     // No fetch, no URL, no server. The capability list is the invoke handler in
     // main.rs, and it is only a real boundary if the page has no other way out.

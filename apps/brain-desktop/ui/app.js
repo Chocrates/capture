@@ -9,8 +9,45 @@
 // ampersands, half-written HTML — and treating any of it as markup would let a
 // note change the page it is displayed on.
 
+// `window.__TAURI__` exists only because `withGlobalTauri` is set in
+// tauri.conf.json. It defaults to false, and with it unset this line throws
+// before anything is rendered — the whole script aborts on its first statement
+// and the window comes up empty with nothing in the log to say why. Said here
+// because the symptom points at the store, the webview, or the build, and the
+// cause is one boolean in a file this script never mentions.
+if (!window.__TAURI__) {
+  document.getElementById("view").textContent =
+    "The Tauri API was not injected — check withGlobalTauri in tauri.conf.json.";
+  throw new Error("window.__TAURI__ is missing; withGlobalTauri is not set");
+}
+
 const invoke = window.__TAURI__.core.invoke;
 const view = document.getElementById("view");
+
+// Say so on the page when something throws.
+//
+// Written because of how long this took to find. `showTimeline` awaits
+// `renderPending` before it asks for any notes, so a throw in the pending
+// redaction block left the whole window empty — no notes, no error, nothing in
+// the process log, and a store that was perfectly fine. An empty view is
+// indistinguishable from an empty store, and the empty state below says
+// "Nothing captured yet", which was actively the wrong story.
+//
+// This is diagnosis, not error handling. Anything it catches is a bug here
+// rather than a condition to recover from, so it says what happened and stops.
+function fatal(what) {
+  const v = document.getElementById("view");
+  if (!v) return;
+  v.replaceChildren();
+  v.append(el("h2", null, "Something in this window is broken"));
+  v.append(el("p", null, String(what)));
+  v.append(el("p", "hint", "Your notes are unaffected — this is the view, not the store."));
+}
+
+window.addEventListener("error", (e) => fatal(e.message || e.error || e));
+window.addEventListener("unhandledrejection", (e) =>
+  fatal((e.reason && (e.reason.message || e.reason)) || "a promise was rejected"),
+);
 
 let current = "timeline";
 
@@ -221,7 +258,9 @@ async function showNote(name) {
       toast(`Dismissed ${n2} competing version(s). Both remain in the log.`);
       showNote(n.slug);
     });
-    d.append(el("div", "row")).append(dismiss);
+    const dismissRow = el("div", "row");
+    dismissRow.append(dismiss);
+    d.append(dismissRow);
     view.append(d);
   }
 
@@ -389,7 +428,9 @@ async function renderPending() {
       toast("Cancelled. Nothing was destroyed.");
       showTimeline();
     });
-    box.append(el("div", "row")).append(cancel);
+    const cancelRow = el("div", "row");
+    cancelRow.append(cancel);
+    box.append(cancelRow);
     view.prepend(box);
 
     // Live, because a countdown that only moves when you navigate is not a
@@ -442,7 +483,9 @@ function condition(c) {
       toast("Acknowledged. Nothing was checked — this records your word for it.");
       showHealth();
     });
-    box.append(el("div", "row")).append(b);
+    const row = el("div", "row");
+    row.append(b);
+    box.append(row);
   }
   return box;
 }
