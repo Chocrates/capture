@@ -87,6 +87,35 @@ impl Chord {
         s
     }
 
+    /// The portal's trigger syntax.
+    ///
+    /// The `GlobalShortcuts` interface takes a *preferred* trigger in the
+    /// shortcuts syntax the XDG specification defines — `CTRL`, `ALT`, `SHIFT`
+    /// and `LOGO` for the Super key, joined with `+`. Preferred is the whole
+    /// character of this backend: the portal asks the user to confirm the
+    /// binding and may hand back a different one, which is the point of a
+    /// desktop-neutral mechanism and the reason it outranks writing directly
+    /// into someone's settings.
+    pub fn portal(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("CTRL".to_string());
+        }
+        if self.alt {
+            parts.push("ALT".to_string());
+        }
+        if self.shift {
+            parts.push("SHIFT".to_string());
+        }
+        if self.super_ {
+            // Not "SUPER". The specification names this key after the logo on
+            // it, and a portal given "SUPER" binds nothing.
+            parts.push("LOGO".to_string());
+        }
+        parts.push(self.key.to_string());
+        parts.join("+")
+    }
+
     /// How to say it to a person.
     pub fn human(&self) -> String {
         let mut parts = Vec::new();
@@ -338,11 +367,28 @@ mod tests {
 
     #[test]
     fn the_chord_is_translated_consistently() {
-        // One definition, two renderings. They drift apart the moment the chord
-        // is written down twice, after which the interface names one chord and
-        // the desktop listens for another.
+        // One definition, three renderings. They drift apart the moment the
+        // chord is written down twice, after which the interface names one
+        // chord and the desktop listens for another.
         assert_eq!(DEFAULT_CHORD.gnome(), "<Control><Super>space");
+        assert_eq!(DEFAULT_CHORD.portal(), "CTRL+LOGO+space");
         assert_eq!(DEFAULT_CHORD.human(), "Ctrl-Super-Space");
+    }
+
+    #[test]
+    fn the_portal_calls_the_super_key_by_its_logo() {
+        // "SUPER" is the obvious guess and binds nothing: the XDG shortcuts
+        // syntax names this key after the logo printed on it.
+        assert_eq!(DEFAULT_CHORD.portal(), "CTRL+LOGO+space");
+
+        let alt_shift = Chord {
+            ctrl: false,
+            alt: true,
+            shift: true,
+            super_: false,
+            key: "n",
+        };
+        assert_eq!(alt_shift.portal(), "ALT+SHIFT+n");
     }
 
     #[test]

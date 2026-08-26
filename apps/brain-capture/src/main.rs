@@ -14,8 +14,10 @@
 mod autostart;
 mod gnome;
 mod overlay;
+mod portal;
 mod socket;
 mod window;
+mod x11;
 
 use std::process::ExitCode as ProcExit;
 
@@ -81,28 +83,41 @@ fn run() -> Result<()> {
     let listener = socket::Listener::bind(&paths.root)?;
     tracing::info!(socket = %listener.path().display(), "overlay listening");
 
-    let ops_path = paths.ops.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let waker = window::Waker::default();
-    let thread_waker = waker.clone();
+
+    let fired = gesture(paths.ops.clone(), tx, waker.clone());
+
+    // The mechanisms that deliver the chord to this process rather than by
+    // spawning a client. Started before the window rather than after: a failure
+    // here is a failure to register the gesture at all, and it should be
+    // reported now rather than discovered later by pressing the chord.
+    //
+    // Both hold their registration for exactly as long as the process runs —
+    // the X11 grab is released with the connection, the portal session with the
+    // bus connection — which is why neither has a `--register` step that
+    // outlives it.
+    match hotkey::select(&hotkey::Host) {
+        Mechanism::X11 => {
+            let held = fired.clone();
+            x11::hold(&DEFAULT_CHORD, move || held())?;
+        }
+        Mechanism::Portal => {
+            let held = fired.clone();
+            portal::hold(&DEFAULT_CHORD, move || held())?;
+        }
+        // The chord arrives on the socket instead, from the client the desktop
+        // spawns. Nothing to start here.
+        Mechanism::Gnome | Mechanism::None => {}
+    }
+
     std::thread::spawn(move || {
         loop {
             match listener.next() {
                 Ok(()) => {
-                    // Recorded here, at the point the request actually
-                    // arrived. Recording it where the chord is *sent* would
-                    // mark the gesture healthy in exactly the case it is not:
-                    // a client that runs and reaches nothing.
-                    if let Ok(ops) = brain_store::ops::Ops::open(&ops_path) {
-                        let _ = ops.gesture_fired(now_ms());
-                    }
-                    if tx.send(()).is_err() {
+                    if !fired() {
                         return;
                     }
-                    // Wake the loop rather than letting it discover this on a
-                    // timer. This is the whole reason the process can sleep
-                    // between presses.
-                    thread_waker.wake();
                 }
                 Err(e) => {
                     tracing::warn!(%e, "capture socket failed");
@@ -113,6 +128,35 @@ fn run() -> Result<()> {
     });
 
     window::run(paths, rx, waker).map_err(|e| brain_store::Error::Usage(format!("overlay: {e}")))
+}
+
+/// What happens when the chord fires, whichever mechanism delivered it.
+///
+/// Shared rather than duplicated per backend. Each of the three steps is one
+/// somebody would forget on a second path — and the one that matters most is
+/// the recording, because leaving it out makes `brain status` report a working
+/// gesture as dead. Returns `false` once the window is gone, which is every
+/// caller's cue to stop.
+fn gesture(
+    ops_path: std::path::PathBuf,
+    tx: std::sync::mpsc::Sender<()>,
+    waker: window::Waker,
+) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
+    std::sync::Arc::new(move || {
+        // Recorded at the point the request actually arrived. Recording it
+        // where the chord is *sent* would mark the gesture healthy in exactly
+        // the case it is not: a client that runs and reaches nothing.
+        if let Ok(ops) = brain_store::ops::Ops::open(&ops_path) {
+            let _ = ops.gesture_fired(now_ms());
+        }
+        if tx.send(()).is_err() {
+            return false;
+        }
+        // Wake the loop rather than letting it discover this on a timer. This
+        // is the whole reason the process can sleep between presses.
+        waker.wake();
+        true
+    })
 }
 
 /// Ask the resident overlay to appear. This is what the chord runs.
@@ -201,10 +245,47 @@ fn register() -> Result<()> {
             println!();
             confirm(&paths()?)
         }
-        Mechanism::Portal | Mechanism::X11 => Err(brain_store::Error::Usage(format!(
-            "the {} backend is not implemented yet; this session needs it",
-            mechanism.name()
-        ))),
+        // Nothing to write, and that is the whole difference. The GNOME
+        // mechanism registers a command with the desktop, which then exists
+        // whether or not anything is listening; an X11 grab is held by the
+        // running process and released with it. So there is no registration
+        // step to perform here — only the same confirmation, which is what
+        // actually answers the question the user asked.
+        Mechanism::X11 => {
+            println!(
+                "registered {} via {}",
+                DEFAULT_CHORD.human(),
+                mechanism.name()
+            );
+            println!("  held by the overlay itself; nothing is written to your configuration");
+            println!();
+            println!("The grab lasts as long as the overlay runs. Start it at login with:");
+            println!("  brain-capture --autostart");
+            println!();
+            confirm(&paths()?)
+        }
+        // The portal binds when the overlay starts, and the binding lives with
+        // the session — so there is nothing to write here either, and the
+        // desktop will ask the user rather than this program deciding. Saying
+        // so matters: this is the one mechanism where the chord that ends up
+        // bound may not be the one that was asked for.
+        Mechanism::Portal => {
+            println!(
+                "registered {} via {}",
+                DEFAULT_CHORD.human(),
+                mechanism.name()
+            );
+            println!("  requested when the overlay starts; the desktop asks you to confirm it");
+            println!("  nothing is written to your configuration");
+            println!();
+            println!("The binding lasts as long as the overlay runs. Start it at login with:");
+            println!("  brain-capture --autostart");
+            println!();
+            println!("The portal may bind a different chord from the one requested.");
+            println!("Whatever it binds is what the overlay reports on startup.");
+            println!();
+            confirm(&paths()?)
+        }
         Mechanism::None => {
             no_mechanism();
             Ok(())

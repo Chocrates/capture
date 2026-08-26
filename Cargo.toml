@@ -56,6 +56,22 @@ eframe = { version = "0.36", default-features = false, features = ["glow", "wayl
 # the only three things this window does.
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland"] }
 
+# The X11 hotkey backend (task 8.8). Already in the tree as winit's X11
+# transport, and pinned to the same version so the overlay is not linking two
+# copies of an X connection.
+x11rb = { version = "0.13", default-features = false }
+
+# The portal hotkey backend (task 8.7). The `GlobalShortcuts` interface needs a
+# live D-Bus connection rather than a one-shot call: the reply to CreateSession
+# arrives as a signal on a separate object, and activations arrive as signals
+# forever after. That rules out shelling out to `gdbus`, which is fine for the
+# capability probe in `hotkey.rs` and cannot subscribe before it calls.
+#
+# The blocking API, deliberately: the overlay already has an event loop it does
+# not own, and adding an async runtime alongside it would be a second scheduler
+# for one subscription. This runs on its own thread and blocks on it.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
 # --- host-side only ---
 getrandom = "0.3"
 jiff = "0.2"

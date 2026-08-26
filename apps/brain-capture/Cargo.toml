@@ -22,3 +22,5 @@ jiff = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 winit = { workspace = true }
+x11rb = { workspace = true }
+zbus = { workspace = true }
