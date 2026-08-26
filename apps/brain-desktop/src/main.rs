@@ -19,7 +19,9 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        .manage(ipc::Watcher::default())
         .invoke_handler(tauri::generate_handler![
+            ipc::changed,
             ipc::timeline,
             ipc::note,
             ipc::search,

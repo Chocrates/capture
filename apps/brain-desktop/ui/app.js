@@ -49,6 +49,11 @@ window.addEventListener("unhandledrejection", (e) =>
   fatal((e.reason && (e.reason.message || e.reason)) || "a promise was rejected"),
 );
 
+// Which view is on screen.
+//
+// Load-bearing beyond the nav highlight: `refresh` reads it to decide whether
+// redrawing is safe. Every function that replaces the view sets it, and one
+// that forgets to would have the timeline reappear underneath whatever it drew.
 let current = "timeline";
 
 // ---------------------------------------------------------------- helpers ---
@@ -206,6 +211,7 @@ function emptyState() {
 }
 
 async function showFiltered(field, value) {
+  current = "filtered";
   view.replaceChildren();
   const back = el("button", "act", "← everything");
   back.addEventListener("click", showTimeline);
@@ -220,6 +226,7 @@ async function showFiltered(field, value) {
 // -------------------------------------------------------------- note page ---
 
 async function showNote(name) {
+  current = "note";
   const page = await call("note", { name });
   const n = page.note;
   view.replaceChildren();
@@ -515,6 +522,7 @@ q.addEventListener("input", () => {
   searchTimer = setTimeout(async () => {
     const query = q.value.trim();
     if (!query) { showTimeline(); return; }
+    current = "search";
     view.replaceChildren();
     const hits = await call("search", { query });
     view.append(el("h2", null, hits.length ? "Results" : `Nothing matches ${query}`));
@@ -527,8 +535,35 @@ q.addEventListener("input", () => {
 // near its time rather than whenever somebody next runs a command.
 setInterval(() => {
   invoke("tick").then((n) => {
-    if (n > 0 && current === "timeline") showTimeline();
+    if (n > 0) refresh();
   }).catch(() => {});
 }, 30000);
+
+// Notice captures. Until this existed the window only ever redrew when a
+// deadline elapsed, so a note captured with the chord did not appear in a
+// window that was already open — and the store was fine, which is the worst
+// version of that: nothing to see, nothing wrong, and no reason given.
+//
+// Half a second, matching `watch::POLL_INTERVAL`. It is a display latency
+// rather than a correctness bound; the cost is two integer reads.
+setInterval(() => {
+  invoke("changed").then((moved) => {
+    if (moved) refresh();
+  }).catch(() => {});
+}, 500);
+
+/// Redraw what is on screen, and nothing else.
+///
+/// Deliberately narrow. A refresh that rebuilt the page wholesale would throw
+/// away a note being read, a half-typed search, or a redaction confirmation
+/// waiting on its typed name — and it would do it under the user's hands,
+/// because something changed somewhere else. Only the two surfaces that are
+/// purely a view of the store redraw on their own; everything else is a place
+/// the user is doing something, and waits.
+function refresh() {
+  if (document.getElementById("confirm").hidden === false) return;
+  if (current === "timeline") showTimeline();
+  else if (current === "health") showHealth();
+}
 
 showTimeline();

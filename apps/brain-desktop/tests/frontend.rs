@@ -167,6 +167,34 @@ fn the_api_the_page_needs_is_actually_injected() {
 }
 
 #[test]
+fn every_view_says_which_one_it_is() {
+    // `refresh` reads `current` to decide whether redrawing is safe. A view
+    // that replaces the page without setting it inherits whichever value was
+    // there — and if that value is "timeline", the timeline reappears
+    // underneath whatever the user was reading the next time anything changes.
+    let code = ui_code("app.js");
+    let replaces = code.matches("view.replaceChildren()").count();
+    let declares = code.matches("current = \"").count();
+    assert!(
+        declares >= replaces,
+        "{replaces} views replace the page but only {declares} say which view they are"
+    );
+}
+
+#[test]
+fn the_page_notices_captures_on_its_own() {
+    // Until this existed the window redrew only when a redaction deadline
+    // elapsed, so a note captured with the chord never appeared in a window
+    // that was already open — and nothing looked wrong, which is the worst
+    // version of it.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains(r#"invoke("changed")"#),
+        "nothing asks the store whether anything moved"
+    );
+}
+
+#[test]
 fn the_page_talks_only_to_the_commands_it_is_given() {
     // No fetch, no URL, no server. The capability list is the invoke handler in
     // main.rs, and it is only a real boundary if the page has no other way out.

@@ -263,6 +263,46 @@ pub fn filter_by_context(field: String, value: String) -> std::result::Result<Ve
     })())
 }
 
+/// What a reader has already accounted for.
+///
+/// Held for the lifetime of the window so that a change is reported once
+/// rather than every time it is asked about.
+#[derive(Default)]
+pub struct Watcher(pub std::sync::Mutex<Option<brain_store::watch::Watch>>);
+
+/// Whether anything has moved since the last look.
+///
+/// The page asks on a short timer. `watch.rs` argues for polling over being
+/// told, and the argument is about failure rather than latency: a reader that
+/// waits to be notified shows stale data forever if the message is dropped or
+/// the writer died between committing and notifying, while a reader that looks
+/// for itself is at worst late. Two integer reads, through read-only
+/// connections that do not need the writer to be running.
+///
+/// Two different things move and both matter. New events mean a capture
+/// happened — from the overlay, the terminal chord, or another window. A new
+/// generation means the projection was rebuilt underneath us, and the file this
+/// window has been reading is one nobody writes to any more: same data, frozen.
+#[tauri::command]
+pub fn changed(watcher: tauri::State<'_, Watcher>) -> std::result::Result<bool, String> {
+    wire((|| {
+        let p = paths()?;
+        let ops = Ops::open_read(&p.ops)?;
+        let log = brain_store::log::Log::open_read(&p.events)?;
+
+        let mut guard = watcher.0.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(w) => Ok(w.poll(&log, &ops)?.any()),
+            None => {
+                // The first look establishes where things stand. Reporting a
+                // change here would refresh the page immediately after it drew.
+                *guard = Some(brain_store::watch::Watch::start(&log, &ops)?);
+                Ok(false)
+            }
+        }
+    })())
+}
+
 #[tauri::command]
 pub fn health() -> std::result::Result<Health, String> {
     wire((|| {
