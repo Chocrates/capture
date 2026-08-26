@@ -1811,6 +1811,138 @@ meeting for next Tuesday. Doing that from the calendar view, with a real form, i
 a considered act, not capture. Two entry points: one that is instant and typeless, one that is
 deliberate and structured. The mistake other tools make is having only the second.
 
+### 3.1.5 The vocabulary, and the grammar over it
+
+§3.1.2 fixes the tiering and leaves the middle tier undescribed, which is the tier that decides
+whether any of this works: sigils cover what you already know you want, the model covers
+whatever is left, and everything in between is tier 2. "A deterministic parser for the common
+shapes" is a commitment to *have* a vocabulary, not a vocabulary. This section is that list and
+the grammar over it.
+
+**The vocabulary is closed, and that is the point.** Every word tier 2 recognises is enumerated
+below. A closed list is what makes the tier testable — the test suite can be exhaustive over the
+language rather than representative of it — and it is what makes the failure mode legible: a word
+that is not in the list is not a near-miss, it is tier 3's problem, and tier 3 declining leaves an
+ordinary note (§3.1.3). Growing the list is a deliberate edit with tests attached, never an
+inference.
+
+#### The closed classes
+
+| Class | Members |
+|---|---|
+| `weekday` | monday, tuesday, wednesday, thursday, friday, saturday, sunday + `mon tue tues wed thu thur thurs fri sat sun` |
+| `month` | january … december + `jan feb mar apr jun jul aug sep sept oct nov dec` |
+| `day_word` | today, tonight, tomorrow, yesterday |
+| `tod_word` | midnight (00:00), morning (09:00), noon (12:00), afternoon (14:00), evening (18:00), night (20:00) |
+| `unit` | minute, hour, day, week, month, year, quarter + `min mins hr hrs wk wks mo mos yr yrs` |
+| `freq_word` | daily, nightly, weekly, monthly, quarterly, yearly, annually, hourly |
+| `rec_head` | every, each |
+| `day_set` | weekday, weekdays, weekend, weekends |
+| `determiner` | next, this, last, coming, upcoming |
+| `marker` | at, on, by, due, from, before, after, starting, until |
+| `range_op` | `-`, `..`, to, through, thru, until |
+| `meridiem` | am, pm, a.m., p.m. |
+| `interval` | other (as in "every other week") |
+
+Two classes carry a fixed numeric meaning rather than a lookup: `quarter` is `Q1`–`Q4`, and
+`ordinal` is `1st`–`31st`.
+
+**`at` is not special.** It is one marker among nine, and it means nothing on its own — "meet me
+at the pub" contains it and no time. Markers exist to give a following expression permission to be
+temporal, never to be temporal themselves. The same is true of every word above: none of them is
+a keyword you have to reach for, because §3.1.1 already committed to a recognizer over English
+rather than a syntax you compose. The list is what the recognizer *reads*, not what you have to
+*write*.
+
+#### The grammar
+
+```ebnf
+capture     = { sigil | temporal | word } ;
+
+(* tier 1 — always wins over anything inferred, §3.1.1 *)
+sigil       = "#" slug | "@" slug | ">" ( iso_date | day_ref )
+            | "!" "p" digit | "~" number unit | "^" slug ;
+
+(* tier 2 *)
+temporal    = recurrence | range | point ;
+
+recurrence  = rec_head [ interval | number ] rec_body [ [ "at" ] clock ]
+            | freq_word [ [ "at" ] clock ] ;
+rec_body    = weekday | day_set | unit ;
+
+range       = month day_num range_op day_num [ year ]
+            | point range_op point ;
+
+point       = [ marker ] anchor [ [ "at" ] clock ] ;
+anchor      = iso_date
+            | month day_num [ year ]
+            | day_num month [ year ]
+            | weekday
+            | day_word
+            | quarter
+            | "in" number unit
+            | determiner ( weekday | unit | quarter ) ;
+
+clock       = hour [ ":" minute ] [ meridiem ]
+            | tod_word ;
+```
+
+Everything the five worked examples in §3.1 need, and nothing else. `dentist thursday 2pm` is
+`point( anchor=weekday, clock=hour+meridiem )`; `walk the dog every day at 7` is
+`recurrence( rec_head, rec_body=unit, clock )`; `vacation aug 1-14` is the first `range`
+production; `in 3 weeks` is the `"in" number unit` anchor.
+
+#### The guards, which matter more than the grammar
+
+A context-free grammar over this vocabulary would fire constantly on ordinary prose, and §3.1.3
+is explicit that false positives are the worse error. So recognition is gated by rules that are
+deliberately not part of the grammar above, because they are about what *surrounds* a match:
+
+1. **An article kills it.** A `month`, `weekday` or bare `clock` immediately preceded by `the`,
+   `a`, `an`, or a possessive is not temporal. This is what makes "the march timeline slipped"
+   and "the 7am problem" — both §3.1.3's own examples — parse as prose.
+2. **A bare number is never a time.** `clock` requires a meridiem, a colon, a `tod_word`, or a
+   marker in front of it. "budget 40k" and "40 users" cannot become 40:00.
+3. **A following noun kills a bare weekday or month.** "march timeline", "friday deploy" — the
+   temporal word is modifying something, so it is a name, not a date.
+4. **Phrase boundaries bound a match.** A temporal expression must start at the beginning of the
+   capture, at a comma, or after a marker. It cannot start mid-clause.
+5. **Sigils pre-empt.** Where a sigil and an inferred expression disagree, the sigil wins and the
+   inference is not recorded at all — not even as a suggestion (§3.1.1).
+
+#### Confidence, and what crosses the floor
+
+§3.1.3 requires a confidence floor and never says what it is. **It is 0.75**, and the bands are
+fixed rather than tuned per-shape so a misfire is diagnosable:
+
+| Confidence | Shape |
+|---|---|
+| 1.00 | a sigil — not scored, and not overridable by inference |
+| 0.90 | a complete date or datetime behind a marker: `on aug 14`, `at 2pm`, `by friday 9am` |
+| 0.85 | two vocabulary items adjacent and unambiguous: `thursday 2pm`, `aug 1-14`, `in 3 weeks` |
+| 0.80 | a recurrence head with a body: `every weekday at 7`, `daily` |
+| 0.70 | a bare weekday or day_word with no clock: `dentist thursday` |
+| 0.60 | a `tod_word` standing in for a clock: `tomorrow morning` |
+| 0.40 | a task verb with no temporal expression at all: `send sarah the migration doc` |
+
+Below 0.75 nothing is promoted; the parse becomes a one-line suggestion in review, which is what
+§3.1.3 already specifies. That places bare weekdays, vague times of day and every task-verb guess
+under the floor deliberately — those are exactly the readings most likely to be wrong, and a wrong
+suggestion costs a glance while a wrong promotion costs a calendar entry.
+
+**The task verbs are a suggestion tier, not a class.** `send call email buy ask book fix write
+review pay order check ping schedule renew cancel submit file print` at the head of a capture,
+with no temporal expression anywhere, scores 0.40. Verbs are an open class and any list is wrong
+at the edges, so this one never promotes on its own — it exists so review can offer "task?" on a
+line that plainly is one, and no further.
+
+#### What is deliberately absent
+
+No place names, no person names, no project names, no priority words, no durations in prose ("a
+couple of hours"), no fuzzy quantities ("a few weeks"). Every one of them is either a sigil
+already — `@person`, `^project`, `!p1`, `~30m` — or open-class, which means it belongs to tier 3
+or to nothing. The vocabulary stops where determinism stops.
+
 ### 3.2 Time model — instants versus floating dates
 
 Most calendar bugs come from storing one kind of time where the other belongs. There are two

@@ -325,11 +325,13 @@ name = "brain-capture"
 version = "0.1.0"
 dependencies = [
  "brain-core",
+ "brain-parse",
  "brain-store",
  "eframe",
  "jiff",
  "tracing",
  "tracing-subscriber",
+ "winit",
 ]
 
 [[package]]
@@ -375,6 +377,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "brain-parse"
+version = "0.1.0"
 
 [[package]]
 name = "brain-store"

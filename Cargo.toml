@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/brain-core",
+    "crates/brain-parse",
     "crates/brain-store",
     "apps/brain-cli",
     "apps/brain-capture",
