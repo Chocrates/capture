@@ -11,6 +11,7 @@
 //! desktop configuration and a program that quietly rewrites that on each
 //! launch is one that cannot be told to stop.
 
+mod autostart;
 mod gnome;
 mod overlay;
 mod socket;
@@ -35,10 +36,18 @@ fn main() -> ProcExit {
         "--run" => run(),
         "--show" => show(),
         "--register" => register(),
+        "--autostart" => enable_autostart(),
+        "--no-autostart" => disable_autostart(),
         "--unregister" => unregister(),
         "" | "--status" => report(),
         other => {
             eprintln!("brain-capture: unknown option {other}");
+            eprintln!();
+            eprintln!("  --run           hold the window ready (what autostart runs)");
+            eprintln!("  --show          reveal it (what the chord runs)");
+            eprintln!("  --register      bind the chord, then confirm it arrives");
+            eprintln!("  --autostart     start at login");
+            eprintln!("  --status        what is in force");
             return ProcExit::from(ExitCode::Usage as u8);
         }
     };
@@ -74,6 +83,8 @@ fn run() -> Result<()> {
 
     let ops_path = paths.ops.clone();
     let (tx, rx) = std::sync::mpsc::channel();
+    let waker = window::Waker::default();
+    let thread_waker = waker.clone();
     std::thread::spawn(move || {
         loop {
             match listener.next() {
@@ -88,6 +99,10 @@ fn run() -> Result<()> {
                     if tx.send(()).is_err() {
                         return;
                     }
+                    // Wake the loop rather than letting it discover this on a
+                    // timer. This is the whole reason the process can sleep
+                    // between presses.
+                    thread_waker.wake();
                 }
                 Err(e) => {
                     tracing::warn!(%e, "capture socket failed");
@@ -97,7 +112,7 @@ fn run() -> Result<()> {
         }
     });
 
-    window::run(paths, rx).map_err(|e| brain_store::Error::Usage(format!("overlay: {e}")))
+    window::run(paths, rx, waker).map_err(|e| brain_store::Error::Usage(format!("overlay: {e}")))
 }
 
 /// Ask the resident overlay to appear. This is what the chord runs.
@@ -114,6 +129,36 @@ fn show() -> Result<()> {
     ))
 }
 
+/// Arrange for the overlay to be running before the chord is ever pressed.
+///
+/// The desktop's own overview is the model: pressing Super reveals a surface
+/// the shell built at login rather than launching one. Instant is what being
+/// already there buys, and it cannot be bought any other way.
+fn enable_autostart() -> Result<()> {
+    let path = autostart::install()?;
+    println!("The overlay will start at login.");
+    println!("  {}", path.display());
+    println!();
+    println!("It waits with the window built and hidden, so the chord only has");
+    println!("to reveal it. About 30 MB of memory, and no measurable processor");
+    println!("time while it waits.");
+    println!();
+    println!("Start it now without logging out:");
+    println!("  brain-capture --run &");
+    Ok(())
+}
+
+fn disable_autostart() -> Result<()> {
+    if autostart::remove()? {
+        println!("It will no longer start at login.");
+        println!("The chord will do nothing until something is running —");
+        println!("`brain +` from a terminal is unaffected.");
+    } else {
+        println!("It was not set to start at login.");
+    }
+    Ok(())
+}
+
 /// Say what would happen, and what is in force.
 fn report() -> Result<()> {
     let mechanism = hotkey::select(&hotkey::Host);
@@ -125,6 +170,10 @@ fn report() -> Result<()> {
     println!(
         "overlay    {}",
         if running { "running" } else { "not running" }
+    );
+    println!(
+        "at login   {}",
+        if autostart::installed() { "yes" } else { "no" }
     );
     if mechanism == Mechanism::None {
         println!();

@@ -11,14 +11,18 @@ This one takes the text and sorts it out later, or never.
 ## Install
 
 ```sh
-./install.sh          # or: make install
+make install          # build, install to ~/.local/bin, create the store
+make install-chord    # the same, and set the global chord up too
 ```
 
-Builds, installs to `~/.local/bin`, and creates the store at `~/brain`.
+`install` prints the two commands that arrange the chord rather than running
+them — a login entry and a desktop keybinding are changes to your environment,
+and a program that makes them silently is one you cannot tell to stop.
+`install-chord` opts into both, and ends by asking you to press the chord so
+that "it was configured" and "it works" are not confused.
 
-It will not edit your shell configuration or register a global hotkey. Both are
-changes to your environment, and a program that makes them silently is one you
-cannot tell to stop — so it prints the lines to paste.
+Either way the shell snippet is printed, never appended. Your rc file is one you
+maintain by hand.
 
 The browse window needs a system webview. Without it the rest still installs:
 
@@ -50,12 +54,23 @@ revenue > costs Q3         →  no file created
 run `date` before deploy   →  nothing executed
 ```
 
-**From anywhere** — bind a global chord:
+**From anywhere** — bind a global chord. Two commands, once:
 
 ```sh
-brain-capture --register     # binds Ctrl-Super-Space, then waits for you to press it
-brain-capture --run          # keep this running; it holds the window ready
+brain-capture --autostart    # be running from login
+brain-capture --register     # bind Ctrl-Super-Space, then press it to confirm
 ```
+
+After that it works the way the desktop's own overview does. Pressing Super does
+not launch `gnome-shell`; the shell is already running and reveals a surface it
+built at login. This is the same arrangement, and it is the only one that is
+instant — a window created on a keypress pays for process start, a GPU context
+and font loading first, which is a visible pause on a gesture that has to feel
+like it already happened.
+
+While it waits it costs about 30 MB of private memory and no measurable
+processor time. `brain-capture --no-autostart` undoes it; the terminal chord is
+unaffected either way.
 
 Registering ends by asking you to press the chord, because "the setting was
 written" and "the gesture works" are different claims and only the second one

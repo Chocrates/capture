@@ -17,14 +17,14 @@ SCRATCH ?= /tmp/brain-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
-        build release install demo smoke tasks clean distclean
+        build release install install-chord demo smoke tasks clean distclean
 
 ## help: list these commands
 help:
 	@echo 'brain — make targets'
 	@echo
 	@sed -n 's/^## \([a-z-]*\): \(.*\)/  \1|\2/p' $(MAKEFILE_LIST) \
-	  | awk -F'|' '{printf "  \033[1m%-12s\033[0m %s\n", $$1, $$2}'
+	  | awk -F'|' '{printf "  \033[1m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo '  Store for demo/smoke: $(SCRATCH)'
 
@@ -178,12 +178,24 @@ release:
 
 ## install: build everything and install it for the current user
 #
-# Delegates to install.sh, which also creates the store and prints the two
-# gestures. It does not edit your shell rc or register a global chord — both
-# are changes to your environment, and a program that makes them silently is
-# one you cannot tell to stop.
+# Builds, installs to ~/.local/bin, and creates the store. It prints the two
+# gestures rather than arranging them: a login entry and a desktop keybinding
+# are changes to the user's environment, and a program that makes them silently
+# is one they cannot tell to stop.
 install:
 	@./install.sh
+
+## install-chord: the same, and set the global chord up while it is at it
+#
+# The opt-in half. Arranges to start at login, binds the chord, and then asks
+# for it to be pressed — because "the setting was written" and "the gesture
+# works" are different claims and only the second one matters.
+#
+# The shell snippet is still printed rather than appended. An rc file is one the
+# user maintains by hand, and writing into it is a different kind of liberty
+# from adding a file of our own.
+install-chord:
+	@./install.sh --with-chord
 
 # ------------------------------------------------------------------ demo ----
 

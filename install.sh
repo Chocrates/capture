@@ -9,11 +9,23 @@
 #   3. store          — created only if absent; never touched if it exists
 #   4. instructions   — the two gestures, printed rather than assumed
 #
-# It deliberately does NOT edit your shell rc file or register a global chord.
-# Both are changes to your environment, and a program that makes them silently
-# is one you cannot tell to stop. It prints the line to paste instead.
+# By default it does NOT edit your shell rc, arrange to start at login, or bind
+# a global chord. Those are changes to your environment, and a program that
+# makes them silently is one you cannot tell to stop — so it prints them.
+#
+# `--with-chord` opts into the two that can be done for you: starting at login,
+# and binding the chord. The shell snippet still has to be pasted, because
+# appending to somebody's rc file is editing a file they maintain by hand.
 
 set -eu
+
+WITH_CHORD=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-chord) WITH_CHORD=1 ;;
+        *) printf 'unknown option: %s\n' "$arg" >&2; exit 1 ;;
+    esac
+done
 
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
@@ -94,11 +106,34 @@ say "  Then type at your prompt and press Ctrl-B. The line is read before the"
 say "  shell touches it, so #tags, \$vars, quotes and backticks survive intact."
 
 step "Capturing from anywhere"
-say "  brain-capture --register     bind the chord and confirm it arrives"
-say "  brain-capture --run          keep the overlay ready (leave it running)"
-say ""
-say "  Registering edits your desktop's keybindings, so it is a separate"
-say "  command rather than something this script did to you."
+if [ "$WITH_CHORD" = 1 ]; then
+    "$BIN/brain-capture" --autostart
+
+    # Started now as well as at login, so the registration below has something
+    # to reach. Registering against nothing would report the chord as never
+    # having worked, which is true and unhelpful on a fresh install.
+    if ! "$BIN/brain-capture" --show >/dev/null 2>&1; then
+        say ""
+        say "  Starting it now..."
+        "$BIN/brain-capture" --run >/dev/null 2>&1 &
+        sleep 2
+    fi
+
+    say ""
+    "$BIN/brain-capture" --register
+else
+    say "  Two commands, once:"
+    say ""
+    say "      brain-capture --autostart    be running from login"
+    say "      brain-capture --register     bind the chord, then press it to confirm"
+    say ""
+    say "  Or re-run this with --with-chord to do both now."
+    say ""
+    say "  After that it behaves like the desktop's own overview: something that is"
+    say "  already loaded and becomes visible, rather than something that launches."
+    say "  That is what makes it instant — about 30 MB while it waits, and no"
+    say "  measurable processor time."
+fi
 
 if [ "$WANT_DESKTOP" = 1 ]; then
     step "Browsing"
