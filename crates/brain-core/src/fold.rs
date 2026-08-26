@@ -38,8 +38,9 @@ use minicbor::{Decode, Encode};
 
 use crate::{
     body::{
-        AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, PinBody, RedactBody,
-        RedactCancelBody, ResolveBody, SettingBody, TagBody, UntagBody,
+        AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, OccBody, OccEditBody, OccMoveBody,
+        PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody, SettingBody, TagBody,
+        UntagBody,
     },
     envelope::Envelope,
     event::Kind,
@@ -211,6 +212,21 @@ pub struct Note {
     /// view can show a countdown and a cancellation has something to name.
     #[n(18)]
     pub redaction_pending: Option<Pending>,
+    /// What this note was recognised as, if anything (§3.1).
+    ///
+    /// Absent means an ordinary note, which is the majority and is not a
+    /// failure — a capture nothing could parse is still fully captured,
+    /// searchable and surfaced.
+    #[n(20)]
+    pub promotion: Option<Promotion>,
+    /// Per-occurrence exceptions to this note's series, keyed by original start.
+    ///
+    /// Only ever populated for a promoted series. An exception naming an
+    /// occurrence the rule does not produce is kept rather than discarded: the
+    /// rule can be edited later, and a completion that vanished because the
+    /// schedule moved would be a completion silently lost.
+    #[n(21)]
+    pub occurrences: BTreeMap<i64, OccState>,
     /// Independent versions the fold could not order by causality.
     #[n(11)]
     pub divergences: Vec<Divergence>,
@@ -227,6 +243,74 @@ impl Note {
     /// Whether the note has been redacted.
     pub fn is_redacted(&self) -> bool {
         self.redacted_at.is_some()
+    }
+}
+
+/// A derived type, and where it came from.
+///
+/// The captured text is untouched by any of this. A promotion annotates a note;
+/// it never rewrites, consumes or relocates what was typed, which is what makes
+/// a wrong interpretation survivable rather than lossy (§3.1.3).
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct Promotion {
+    /// What it was recognised as.
+    #[n(0)]
+    pub as_: crate::body::Promoted,
+    /// Whether a person authored it.
+    #[n(1)]
+    pub pinned: bool,
+    /// The grammar version behind it, where a recognizer produced it.
+    #[n(2)]
+    pub grammar: Option<u32>,
+    /// The confidence the recognizer had, where a recognizer produced it.
+    #[n(3)]
+    pub confidence: Option<u32>,
+    /// When it was assigned. The tie-breaker among promotions of equal
+    /// authority, and deliberately not the tie-breaker across authorities.
+    #[n(4)]
+    pub at: Hlc,
+    /// The event that assigned it.
+    #[n(5)]
+    pub event: EventId,
+}
+
+/// What has happened to one occurrence of a series (§3.5).
+///
+/// Named by `(series, original_start)` — the instant the rule would have
+/// produced, before any move. Moving an occurrence changes where it is shown
+/// and never what it is called, which is what lets an exception written by
+/// another device still find it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Encode, Decode)]
+pub struct OccState {
+    /// Moved to a different time, if it has been.
+    #[n(0)]
+    pub moved_to: Option<(i64, Option<i64>)>,
+    /// Skipped. Retained but inert when the occurrence has also been moved —
+    /// see [`fold`] for why a move outranks a cancellation.
+    #[n(1)]
+    pub cancelled: bool,
+    /// Completed, for a recurring obligation (§3.6).
+    #[n(2)]
+    pub done: bool,
+    /// A different title for this occurrence only.
+    #[n(3)]
+    pub title: Option<String>,
+    /// A different location for this occurrence only.
+    #[n(4)]
+    pub location: Option<String>,
+    /// Notes on this occurrence only.
+    #[n(5)]
+    pub notes: Option<String>,
+}
+
+impl OccState {
+    /// Whether this occurrence should be drawn.
+    ///
+    /// A cancelled occurrence is hidden, not gone: the cancellation is an
+    /// ordinary event and nothing has been destroyed. A moved one is drawn at
+    /// its new time even if something also cancelled it.
+    pub fn visible(&self) -> bool {
+        self.moved_to.is_some() || !self.cancelled
     }
 }
 
@@ -402,6 +486,16 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::TAG => apply_tag(&mut proj, &mut tags, e),
             Kind::UNTAG => apply_untag(&mut proj, &mut tags, e),
             Kind::PIN => apply_pin(&mut proj, e),
+            Kind::PROMOTE => apply_promote(&mut proj, e),
+            Kind::OCC_MOVE => apply_occ_move(&mut proj, e),
+            Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
+            Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
+            Kind::OCC_DONE => apply_occ(&mut proj, e, |o| o.done = true),
+            Kind::OCC_UNDONE => apply_occ(&mut proj, e, |o| o.done = false),
+            // An intent is a plan, and a review is a record that something was
+            // resurfaced. Neither is a fact about a note's content, so neither
+            // changes one here.
+            Kind::INTENT | Kind::REVIEW => {}
             Kind::ALIAS => apply_alias(&mut proj, &mut names, e),
             Kind::UNFLAG => apply_unflag(&mut proj, e),
             Kind::RESOLVE => collect_resolve(&mut proj, &mut dismissed, e),
@@ -527,6 +621,8 @@ fn apply_capture(
             tags: BTreeSet::new(),
             tag_adds: Vec::new(),
             pinned: false,
+            promotion: None,
+            occurrences: BTreeMap::new(),
             muted_until: None,
             redacted_at: None,
             redaction_pending: None,
@@ -783,6 +879,116 @@ fn apply_unflag(proj: &mut Projection, e: &Envelope) {
         n.credential = false;
     } else {
         proj.held.insert(e.header.id(), Held::NoTarget);
+    }
+}
+
+/// Assign a derived type to a note.
+///
+/// # Authority before recency, and only here
+///
+/// Every other last-write-wins field in this fold compares timestamps and stops.
+/// This one asks who wrote it first, and it is the only rule in the system that
+/// does.
+///
+/// The reason is a specific failure. The parser will improve, and reparsing the
+/// backlog is desirable — failure mode 20b says so. Under plain last-write-wins
+/// a reparse would carry a later HLC than the correction somebody made by hand
+/// last month, and would silently revert it. A tool that quietly undoes your
+/// corrections is one you stop trusting, and §6 rates that unrecoverable
+/// against the cost of having one extra rule to remember.
+///
+/// So: a pinned promotion is never displaced by an unpinned one. Among
+/// promotions of equal authority, the later by HLC wins as everywhere else.
+fn apply_promote(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(p) = minicbor::decode::<PromoteBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    let Some(n) = proj.notes.get_mut(&tgt) else {
+        return;
+    };
+
+    let incoming = Promotion {
+        as_: p.as_,
+        pinned: p.pinned,
+        grammar: p.grammar,
+        confidence: p.confidence,
+        at: e.header.hlc,
+        event: e.header.id(),
+    };
+
+    let wins = match &n.promotion {
+        None => true,
+        Some(current) => match (current.pinned, incoming.pinned) {
+            // A human correction stands, however late the machine is.
+            (true, false) => false,
+            // A person overrules the parser whenever they say so.
+            (false, true) => true,
+            // Equal authority: ordinary last-write-wins.
+            _ => incoming.at > current.at,
+        },
+    };
+
+    if wins {
+        n.promotion = Some(incoming);
+    }
+}
+
+/// Move one occurrence, leaving the rule alone.
+fn apply_occ_move(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(m) = minicbor::decode::<OccMoveBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        let o = n.occurrences.entry(m.occ).or_default();
+        o.moved_to = Some((m.start_ms, m.end_ms));
+    }
+}
+
+/// Change one occurrence's details, leaving the rule alone.
+fn apply_occ_edit(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(ed) = minicbor::decode::<OccEditBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        let o = n.occurrences.entry(ed.occ).or_default();
+        // Absent means "unchanged", not "cleared". Two devices editing
+        // different details of one occurrence must not erase each other.
+        if ed.title.is_some() {
+            o.title = ed.title;
+        }
+        if ed.location.is_some() {
+            o.location = ed.location;
+        }
+        if ed.notes.is_some() {
+            o.notes = ed.notes;
+        }
+    }
+}
+
+/// Cancel, complete or un-complete one occurrence.
+///
+/// The three share a body shape and differ only by kind, so they share this.
+/// Completing twice is completing once — the flag is set, not counted — and an
+/// `occ_undone` clears it, because un-ticking a mistaken completion has to be
+/// possible and a pure union could not express that (§6).
+fn apply_occ(proj: &mut Projection, e: &Envelope, set: impl Fn(&mut OccState)) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(o) = minicbor::decode::<OccBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        set(n.occurrences.entry(o.occ).or_default());
     }
 }
 
@@ -1490,6 +1696,308 @@ mod tests {
         assert!(p.notes.is_empty());
     }
 
+    // -------------------------------------------------------- promotion ----
+
+    fn promote_body(pinned: bool, grammar: Option<u32>, done: bool) -> alloc::vec::Vec<u8> {
+        testing::encode(&crate::body::PromoteBody {
+            nonce: [0u8; 16],
+            as_: crate::body::Promoted::Task(crate::body::TaskFields {
+                done,
+                due: None,
+                order: None,
+            }),
+            pinned,
+            grammar,
+            confidence: None,
+        })
+    }
+
+    fn occ_body(occ: i64) -> alloc::vec::Vec<u8> {
+        testing::encode(&crate::body::OccBody {
+            nonce: [0u8; 16],
+            occ,
+        })
+    }
+
+    #[test]
+    fn a_promotion_annotates_without_touching_the_text() {
+        // The guarantee that makes a wrong interpretation survivable: a
+        // misparse is a wrong label on an intact note, never a lost note.
+        let s = testing::mixed(60, 1, 1, 0);
+        let tgt = s.notes[0];
+        let before = fold(&s.events).notes[&tgt].text.clone();
+
+        let mut set = s.events.clone();
+        set.push(testing::Origin::new(9).author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(false, Some(1), false),
+            1_700_000_100_000,
+        ));
+
+        let n = &fold(&set).notes[&tgt];
+        assert!(n.promotion.is_some(), "the promotion was not applied");
+        assert_eq!(n.text, before, "promotion rewrote the captured text");
+    }
+
+    #[test]
+    fn a_human_promotion_beats_a_later_machine_one() {
+        // The one rule in this fold that is not plain last-write-wins. A
+        // reparse carries a later HLC than a correction made by hand last
+        // month, and under LWW it would silently revert it.
+        let s = testing::mixed(61, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(true, None, true),
+            1_700_000_100_000,
+        ));
+        // The parser, improved, sweeping the backlog a month later.
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(false, Some(2), false),
+            1_800_000_000_000,
+        ));
+
+        let p = fold(&set).notes[&tgt].promotion.clone().unwrap();
+        assert!(p.pinned, "a reparse overrode a human correction");
+        assert!(
+            matches!(
+                p.as_,
+                crate::body::Promoted::Task(crate::body::TaskFields { done: true, .. })
+            ),
+            "the human's fields were replaced"
+        );
+    }
+
+    #[test]
+    fn a_person_can_still_overrule_the_parser() {
+        // The other direction has to work, or a wrong machine promotion would
+        // be permanent.
+        let s = testing::mixed(62, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(false, Some(1), false),
+            1_700_000_100_000,
+        ));
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(true, None, true),
+            1_700_000_200_000,
+        ));
+
+        assert!(fold(&set).notes[&tgt].promotion.as_ref().unwrap().pinned);
+    }
+
+    #[test]
+    fn two_machine_promotions_resolve_by_recency() {
+        // Equal authority falls back to the ordinary rule.
+        let s = testing::mixed(63, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(false, Some(1), false),
+            1_700_000_100_000,
+        ));
+        set.push(d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            promote_body(false, Some(2), true),
+            1_700_000_200_000,
+        ));
+
+        let p = fold(&set).notes[&tgt].promotion.clone().unwrap();
+        assert_eq!(p.grammar, Some(2), "the earlier parse won");
+    }
+
+    // ------------------------------------------------------- occurrences ----
+
+    #[test]
+    fn completing_an_occurrence_twice_is_completing_it_once() {
+        let s = testing::mixed(64, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        for t in [1_700_000_100_000, 1_700_000_200_000] {
+            set.push(d.author(Kind::OCC_DONE, Some(tgt), None, occ_body(42), t));
+        }
+
+        let n = &fold(&set).notes[&tgt];
+        assert_eq!(n.occurrences.len(), 1);
+        assert!(n.occurrences[&42].done);
+    }
+
+    #[test]
+    fn a_mistaken_tick_can_be_undone() {
+        // Not a pure union, deliberately — un-completing has to be possible.
+        let s = testing::mixed(65, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        set.push(d.author(
+            Kind::OCC_DONE,
+            Some(tgt),
+            None,
+            occ_body(42),
+            1_700_000_100_000,
+        ));
+        set.push(d.author(
+            Kind::OCC_UNDONE,
+            Some(tgt),
+            None,
+            occ_body(42),
+            1_700_000_200_000,
+        ));
+
+        assert!(!fold(&set).notes[&tgt].occurrences[&42].done);
+    }
+
+    #[test]
+    fn a_move_beats_a_cancel_and_the_cancel_is_kept() {
+        // A resurrected occurrence is visible and one gesture to dismiss; a
+        // wrongly cancelled one is invisible and silently missed (§6).
+        let s = testing::mixed(66, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(9);
+
+        let cancel = d.author(
+            Kind::OCC_CANCEL,
+            Some(tgt),
+            None,
+            occ_body(42),
+            1_700_000_100_000,
+        );
+        let moved = d.author(
+            Kind::OCC_MOVE,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::OccMoveBody {
+                nonce: [0u8; 16],
+                occ: 42,
+                start_ms: 99,
+                end_ms: None,
+            }),
+            1_700_000_200_000,
+        );
+
+        // Either arrival order, same answer.
+        for order in [
+            alloc::vec![cancel.clone(), moved.clone()],
+            alloc::vec![moved.clone(), cancel.clone()],
+        ] {
+            let mut set = s.events.clone();
+            set.extend(order);
+            let o = &fold(&set).notes[&tgt].occurrences[&42];
+            assert!(
+                o.cancelled,
+                "the cancellation was discarded rather than kept"
+            );
+            assert_eq!(o.moved_to, Some((99, None)));
+            assert!(o.visible(), "a moved occurrence was hidden by a cancel");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_occurrence_is_hidden_but_not_gone() {
+        let s = testing::mixed(67, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        set.push(testing::Origin::new(9).author(
+            Kind::OCC_CANCEL,
+            Some(tgt),
+            None,
+            occ_body(42),
+            1_700_000_100_000,
+        ));
+
+        let o = &fold(&set).notes[&tgt].occurrences[&42];
+        assert!(!o.visible());
+        assert!(o.cancelled, "the cancellation itself must remain recorded");
+    }
+
+    #[test]
+    fn editing_one_detail_does_not_erase_another() {
+        // Absent means unchanged, not cleared. Two devices editing different
+        // details of one occurrence must not erase each other.
+        let s = testing::mixed(68, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        let mut d = testing::Origin::new(9);
+
+        set.push(d.author(
+            Kind::OCC_EDIT,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::OccEditBody {
+                nonce: [0u8; 16],
+                occ: 42,
+                title: Some(String::from("small room")),
+                location: None,
+                notes: None,
+            }),
+            1_700_000_100_000,
+        ));
+        set.push(d.author(
+            Kind::OCC_EDIT,
+            Some(tgt),
+            None,
+            testing::encode(&crate::body::OccEditBody {
+                nonce: [1u8; 16],
+                occ: 42,
+                title: None,
+                location: Some(String::from("upstairs")),
+                notes: None,
+            }),
+            1_700_000_200_000,
+        ));
+
+        let o = &fold(&set).notes[&tgt].occurrences[&42];
+        assert_eq!(o.title.as_deref(), Some("small room"), "a title was erased");
+        assert_eq!(o.location.as_deref(), Some("upstairs"));
+    }
+
+    #[test]
+    fn an_exception_for_an_unknown_occurrence_is_kept() {
+        // The rule can be edited later, and a completion that vanished because
+        // the schedule moved would be a completion silently lost.
+        let s = testing::mixed(69, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut set = s.events.clone();
+        set.push(testing::Origin::new(9).author(
+            Kind::OCC_DONE,
+            Some(tgt),
+            None,
+            occ_body(i64::MAX),
+            1_700_000_100_000,
+        ));
+
+        assert!(fold(&set).notes[&tgt].occurrences.contains_key(&i64::MAX));
+    }
+
     /// A whole-note redaction naming one target.
     fn redact_body(tgt: EventId) -> alloc::vec::Vec<u8> {
         testing::encode(&crate::body::RedactBody {
@@ -1728,6 +2236,47 @@ mod tests {
                 base,
                 "fold must not depend on arrival order (seed {seed})"
             );
+        }
+    }
+
+    #[test]
+    fn shuffling_cannot_change_the_output_for_the_typed_kinds_either() {
+        // The flagship property is only worth what the generator produces, and
+        // `mixed` emits captures, edits and tags — none of the kinds M2 added.
+        // Promotions resolve by authority before recency, which is the one rule
+        // here that is not plain last-write-wins and therefore the one most
+        // likely to be order-dependent by accident.
+        for seed in [3u64, 11, 404] {
+            let s = testing::typed(seed);
+            let base = fold(&s.events).canonical();
+            for shuffle in [1u64, 42, 9001] {
+                assert_eq!(
+                    fold(&s.shuffled(shuffle)).canonical(),
+                    base,
+                    "the typed kinds depend on arrival order (seed {seed}, shuffle {shuffle})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_promotion_survives_every_arrival_order() {
+        // Stated on its own because a shuffle that happened to deliver the
+        // human promotion last would pass the property above for the wrong
+        // reason.
+        for shuffle in [0u64, 5, 77, 1234, 65535] {
+            let s = testing::typed(9);
+            let p = fold(&s.shuffled(shuffle));
+            for note in &s.notes {
+                let promotion = p.notes[note]
+                    .promotion
+                    .as_ref()
+                    .expect("every note in this scenario is promoted");
+                assert!(
+                    promotion.pinned,
+                    "a machine promotion displaced a human one (shuffle {shuffle})"
+                );
+            }
         }
     }
 

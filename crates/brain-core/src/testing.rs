@@ -358,6 +358,104 @@ pub fn mixed(seed: u64, origins: usize, notes: usize, ops: usize) -> Scenario {
     }
 }
 
+/// A scenario carrying the M2 kinds: promotions and occurrence exceptions.
+///
+/// Separate from [`mixed`] rather than folded into it, so that every existing
+/// test keeps the event counts it was written against. What this exists for is
+/// the two properties that matter across kinds — that arrival order does not
+/// change the fold, and that an incremental fold matches a full rebuild — and
+/// neither means anything for a kind the generator never produces.
+///
+/// It deliberately generates the awkward combinations: two promotions of
+/// differing authority on one note, a cancel and a move naming the same
+/// occurrence, and a completion followed by an un-completion.
+pub fn typed(seed: u64) -> Scenario {
+    let mut rng = Rng::new(seed);
+    let mut devs: Vec<Origin> = (0..2).map(|i| Origin::new(i as u8)).collect();
+    let mut events = Vec::new();
+    let mut roots = Vec::new();
+    let mut now = 1_700_000_000_000u64;
+
+    for n in 0..3u8 {
+        now += 1 + rng.below(50) as u64;
+        let d = rng.below(2);
+        let e = devs[d].author(
+            Kind::CAPTURE,
+            None,
+            None,
+            capture_body(n, "a synthetic capture with a time in it"),
+            now,
+        );
+        roots.push(e.header.id());
+        events.push(e);
+    }
+
+    // Everything below is authored after seeing everything above, so these are
+    // sequential rather than concurrent — divergence is `concurrent_edit`'s job.
+    let observe = |devs: &mut Vec<Origin>, events: &Vec<Envelope>, d: usize, now: u64| {
+        let seen = events.clone();
+        for e in &seen {
+            if e.header.dev != devs[d].dev {
+                devs[d].observe(e, now);
+            }
+        }
+    };
+
+    for (i, root) in roots.clone().into_iter().enumerate() {
+        // A machine promotion, then a human one over the top of it.
+        for (k, pinned) in [(0u8, false), (1u8, true)] {
+            now += 1 + rng.below(200) as u64;
+            let d = rng.below(2);
+            observe(&mut devs, &events, d, now);
+            let body = encode(&crate::body::PromoteBody {
+                nonce: [k + i as u8; 16],
+                as_: crate::body::Promoted::Task(crate::body::TaskFields {
+                    done: pinned,
+                    due: None,
+                    order: None,
+                }),
+                pinned,
+                grammar: if pinned { None } else { Some(1) },
+                confidence: if pinned { None } else { Some(85) },
+            });
+            events.push(devs[d].author(Kind::PROMOTE, Some(root), None, body, now));
+        }
+
+        // One occurrence completed, un-completed, cancelled and moved.
+        let occ = 1_755_781_200_000i64 + i as i64 * 86_400_000;
+        for kind in [
+            Kind::OCC_DONE,
+            Kind::OCC_UNDONE,
+            Kind::OCC_CANCEL,
+            Kind::OCC_MOVE,
+        ] {
+            now += 1 + rng.below(200) as u64;
+            let d = rng.below(2);
+            observe(&mut devs, &events, d, now);
+            let body = if kind == Kind::OCC_MOVE {
+                encode(&crate::body::OccMoveBody {
+                    nonce: [7u8; 16],
+                    occ,
+                    start_ms: occ + 3_600_000,
+                    end_ms: None,
+                })
+            } else {
+                encode(&crate::body::OccBody {
+                    nonce: [8u8; 16],
+                    occ,
+                })
+            };
+            events.push(devs[d].author(kind, Some(root), None, body, now));
+        }
+    }
+
+    Scenario {
+        events,
+        keys: devs.iter().map(|d| (d.dev(), d.pubkey())).collect(),
+        notes: roots,
+    }
+}
+
 /// Two devices edit one note without seeing each other. Exactly one divergence.
 pub fn concurrent_edit(seed: u64) -> Scenario {
     let _ = seed;

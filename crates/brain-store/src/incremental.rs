@@ -197,6 +197,43 @@ mod tests {
     }
 
     #[test]
+    fn the_typed_kinds_do_not_disturb_an_incremental_fold() {
+        // Deliberately named for what it checks rather than what would be
+        // useful. `snapshot` compares slug, text, divergence count and links —
+        // the projection has no columns for promotions or occurrences yet, so
+        // this cannot compare them and does not claim to.
+        //
+        // What it does establish is that folding the M2 kinds incrementally
+        // leaves everything the store *does* hold identical to a full rebuild:
+        // they do not disturb text, links or divergence, and they do not panic
+        // a partial fold. The real equivalence for promotions arrives with the
+        // projection columns in task 6.2, and this test grows then.
+        for seed in [2u64, 13, 77] {
+            let b = base(&format!("equiv-typed-{seed}"));
+            let s = testing::typed(seed);
+
+            let full_path = generation_path(&b, 1);
+            let mut full = Store::open(&full_path).unwrap();
+            full.write(&fold::fold(&s.events)).unwrap();
+
+            let incr_path = generation_path(&b, 2);
+            let mut incr = Store::open(&incr_path).unwrap();
+            let mut seen: Vec<Envelope> = Vec::new();
+            for chunk in s.events.chunks(2) {
+                seen.extend(chunk.iter().cloned());
+                apply(&mut incr, &seen, chunk).unwrap();
+            }
+
+            assert_eq!(
+                snapshot(&full, &s.notes),
+                snapshot(&incr, &s.notes),
+                "seed {seed}: incremental fold disagreed with a full rebuild"
+            );
+            clean(&b);
+        }
+    }
+
+    #[test]
     fn a_link_survives_an_incremental_fold() {
         // The case the generated scenarios do not reach, because none of them
         // write links. An incremental fold sees only the touched note's events,

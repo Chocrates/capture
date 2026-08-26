@@ -17,12 +17,12 @@
 
 ## 3. Fold and conflict rules — property-tested, not example-tested
 
-- [ ] 3.1 Fold `promote` into the note: derived type, fields, and the regenerated one-line descriptor. The captured text is never touched (§3.1.3).
-- [ ] 3.2 Implement promotion conflict resolution: LWW by HLC **among equal authority only**, and a human `promote` (`pinned: true`) beating a parser-authored one regardless of HLC. **Property-tested** — this is the one rule in the system that is not plain LWW, and the failure it prevents is a reparse silently reverting a correction.
-- [ ] 3.3 Fold the occurrence exceptions, keyed by `(tgt, occ)`. `occ_done` idempotent; `occ_undone` able to supersede it.
-- [ ] 3.4 Implement `occ_move` beating `occ_cancel` on the same occurrence, with the cancel retained and inert. A resurrected occurrence is visible and one gesture away; a wrongly cancelled one is invisible and silently missed.
-- [ ] 3.5 Extend the convergence property test to every new kind: shuffle any event set, fold it, and the result must be identical.
-- [ ] 3.6 Extend the incremental-equals-full-rebuild property test to cover promotions and occurrence exceptions.
+- [x] 3.1 Fold `promote` into the note: derived type, fields, and the regenerated one-line descriptor. The captured text is never touched (§3.1.3).
+- [x] 3.2 Implement promotion conflict resolution: LWW by HLC **among equal authority only**, and a human `promote` (`pinned: true`) beating a parser-authored one regardless of HLC. **Property-tested** — this is the one rule in the system that is not plain LWW, and the failure it prevents is a reparse silently reverting a correction.
+- [x] 3.3 Fold the occurrence exceptions, keyed by `(tgt, occ)`. `occ_done` idempotent; `occ_undone` able to supersede it.
+- [x] 3.4 Implement `occ_move` beating `occ_cancel` on the same occurrence, with the cancel retained and inert. A resurrected occurrence is visible and one gesture away; a wrongly cancelled one is invisible and silently missed.
+- [x] 3.5 Extend the convergence property test to every new kind: shuffle any event set, fold it, and the result must be identical.
+- [~] 3.6 Extend the incremental-equals-full-rebuild property test to cover promotions and occurrence exceptions. **Partial**: the typed scenario now runs through an incremental fold and matches a full rebuild on everything the projection stores — but the projection stores no promotion or occurrence state yet, so the comparison is silent about exactly the kinds this task names. Completed by 6.2.
 
 ## 4. The recognizer — a parser over the tables that already exist
 
@@ -52,7 +52,7 @@
 
 - [ ] 6.1 Expand occurrences into `state.db` over the rolling horizon of −1 year / +1 year (§3.4), extended in the background and on view access.
 - [ ] 6.1a Measure what the horizon actually costs — rows and rebuild time for a dozen unbounded daily series. It is a performance choice, not a correctness one (failure mode 23), and it was kept rather than re-guessed, so it should be measured once rather than argued about again.
-- [ ] 6.2 Store promoted fields and descriptors so agenda and calendar queries never parse text at read time.
+- [ ] 6.2 Store promoted fields and descriptors so agenda and calendar queries never parse text at read time. **Also finishes 3.6**: until the projection has columns for promotions and occurrences, the incremental-equals-full-rebuild comparison cannot see them — its snapshot covers slug, text, divergence and links. Widen `snapshot` here, or the equivalence stays silent about the one rule that is not last-write-wins.
 - [ ] 6.3 Implement the series split for "this and future": bound with `UNTIL`, new series, `split_from`, and exceptions binding to whichever series covers their `original_start`.
 - [ ] 6.4 Widen the due-work queue to carry review and intent deadlines beside redaction deadlines, processed by the same startup-is-the-floor mechanism.
 - [ ] 6.4a Drain the due queue from the resident overlay on a timer. It runs all day for the chord and is already the elected writer (§8.8), but it never opens a `Session` — so today a machine with the overlay running and nothing else touching the store leaves due work undone until some command happens to run. Startup stays the floor; this is what makes a deadline land near its time without adding a process that can be silently not running.
