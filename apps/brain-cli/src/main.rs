@@ -87,6 +87,7 @@ fn run(command: Command) -> Result<()> {
         Command::Intents { json } => read::intents(&paths()?, json),
         Command::During { name, json } => read::during(&paths()?, &name, json),
         Command::Read { text } => read::explain(&text),
+        Command::CarriesForward { name } => write::carries_forward(paths()?, &name),
         Command::Reviewed { name, outcome } => write::reviewed(paths()?, &name, &outcome),
         Command::Occurrence { name, occ, done } => write::occurrence(paths()?, &name, occ, done),
         Command::Search { query, json } => read::search(&paths()?, &query, json),

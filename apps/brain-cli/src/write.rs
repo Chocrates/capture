@@ -223,6 +223,42 @@ pub fn reviewed(paths: StorePaths, name: &str, outcome: &str) -> Result<()> {
     Ok(())
 }
 
+/// Say that missing an instance of a series leaves something owed.
+///
+/// Only ever set by a person. §3.6 is explicit that the recognizer must not
+/// infer this: "walk the dog daily" and "take the pill daily" are the same
+/// sentence to a parser and opposite answers to somebody living with the
+/// consequences, and guessing wrong in the direction of a manufactured backlog
+/// is the todo-app failure the default exists to avoid.
+///
+/// Pinned, like every correction, so no later reparse takes it back off.
+pub fn carries_forward(paths: StorePaths, name: &str) -> Result<()> {
+    use brain_core::body::Promoted;
+
+    let current = {
+        let store = crate::read::open(&paths)?;
+        let row = crate::read::find(&store, name)?;
+        store
+            .promotion_of(&row.tgt)?
+            .map(|p| p.as_)
+            .ok_or_else(|| {
+                brain_store::Error::Usage(format!("'{name}' has not been recognised as anything"))
+            })?
+    };
+
+    let Promoted::Series(mut fields) = current else {
+        return Err(brain_store::Error::Usage(format!(
+            "'{name}' is not a recurring series, so nothing about it can be owed"
+        )));
+    };
+
+    fields.carries_forward = true;
+    brain_store::promote::correct(&paths, name, Promoted::Series(fields))?;
+
+    say!("Noted. Missed instances of {name} will stay until they are dealt with.");
+    Ok(())
+}
+
 /// Make an if-then plan.
 ///
 /// Two cue shapes today, and only two, because a device may only offer what it

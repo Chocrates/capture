@@ -106,6 +106,18 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         rows.push((slug, o, text));
     }
 
+    // What is still owed, from series that carry forward. Shown on today only:
+    // a debt is a thing about now, not something to redraw on every past day
+    // somebody scrolls back through.
+    let mut owed = Vec::new();
+    if date == brain_time::civil_date(now_ms(), zone) {
+        for (tgt, o) in store.outstanding(from)? {
+            let slug = store.slug_of(&tgt)?.unwrap_or_default();
+            let text = store.text_of(&tgt)?;
+            owed.push((slug, o, text));
+        }
+    }
+
     if json {
         let items: Vec<String> = rows
             .iter()
@@ -139,6 +151,19 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     for (slug, o, text) in rows.iter().filter(|(_, o, _)| !o.all_day) {
         let (h, m) = brain_time::civil_clock(o.start_ms, zone);
         say!("  {h:02}:{m:02}     {}  {}", slug, line(text.as_deref(), o));
+    }
+
+    if !owed.is_empty() {
+        say!();
+        say!("Still owed");
+        for (slug, o, text) in &owed {
+            let d = brain_time::civil_date(o.start_ms, zone);
+            say!(
+                "  from {d}  {}  {}",
+                slug,
+                text.as_deref().map(first_line).unwrap_or_default()
+            );
+        }
     }
     Ok(())
 }
@@ -226,6 +251,16 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     let now = now_ms();
     let items = brain_store::review::session(&s, now)?;
 
+    // One prompt, not an inference. §3.6: a series that has lapsed repeatedly
+    // might be one that genuinely accumulates — a dose rather than a walk — and
+    // the recognizer must never decide that from phrasing. Asking once is the
+    // difference between noticing and guessing.
+    let nagging = if json {
+        Vec::new()
+    } else {
+        s.state.repeatedly_lapsed(now, 3)?
+    };
+
     if json {
         let out: Vec<String> = items
             .iter()
@@ -271,6 +306,15 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
         }
         say!("brain engaged <name>   did something with it");
         say!("brain deferred <name>  push it away (twice and it stops being offered)");
+    }
+
+    for tgt in &nagging {
+        let slug = s.state.slug_of(tgt)?.unwrap_or_default();
+        say!();
+        say!("  {slug} has lapsed several times.");
+        say!("  If missing it leaves something owed — a dose, an invoice — say so:");
+        say!("    brain carries-forward {slug}");
+        say!("  Otherwise there is nothing to do. A missed day costs almost nothing.");
     }
 
     // Being offered is itself the outcome `shown`. Recorded after the items are
@@ -465,7 +509,7 @@ fn now_ms() -> i64 {
 }
 
 /// Find a note by name, or say so.
-fn find(store: &Store, name: &str) -> Result<NoteRow> {
+pub(crate) fn find(store: &Store, name: &str) -> Result<NoteRow> {
     let Some(tgt) = store.resolve(name)? else {
         return Err(Error::NotFound(name.to_string()));
     };

@@ -987,6 +987,78 @@ impl Store {
         Ok(out)
     }
 
+    /// Instances that have been and gone without being completed.
+    ///
+    /// "Lapsed" and "owed" are different things and §3.6 keeps them apart. By
+    /// default a missed instance lapses and nothing accumulates: miss Tuesday's
+    /// walk and there is no debt on Wednesday, because the habit literature is
+    /// explicit that a single missed day costs almost nothing, and a system
+    /// that manufactures a backlog is representing something that is not true.
+    ///
+    /// The exception is real and had to exist. A missed dose, an unpaid
+    /// invoice, a prescription refill — for those, Wednesday carries a genuine
+    /// debt, and silently dropping it is worse than the todo-app failure the
+    /// rule was written to fix. Those series set `carries_forward`, and
+    /// [`Store::outstanding`] is what still owes.
+    pub fn lapsed(&self, series: &EventId, before: i64) -> Result<Vec<OccurrenceRow>> {
+        Ok(self
+            .occurrences_of(series)?
+            .into_iter()
+            .filter(|o| o.start_ms < before && !o.done && !o.cancelled)
+            .collect())
+    }
+
+    /// Everything still owed, across every series that carries forward.
+    ///
+    /// Only those. A series without the flag has no outstanding anything — its
+    /// missed instances lapsed, which is a fact recorded and not a task pending.
+    pub fn outstanding(&self, before: i64) -> Result<Vec<(EventId, OccurrenceRow)>> {
+        let mut out = Vec::new();
+        for (tgt, _) in self.promoted("series", 500)? {
+            let carries = match self.promotion_of(&tgt)? {
+                Some(p) => match p.as_ {
+                    brain_core::body::Promoted::Series(s) => s.carries_forward,
+                    _ => false,
+                },
+                None => false,
+            };
+            if !carries {
+                continue;
+            }
+            for o in self.lapsed(&tgt, before)? {
+                out.push((tgt, o));
+            }
+        }
+        out.sort_by_key(|(_, o)| o.start_ms);
+        Ok(out)
+    }
+
+    /// Series that keep lapsing and do not carry forward.
+    ///
+    /// §3.6 asks for one prompt, in review, rather than an inference: a series
+    /// that has lapsed repeatedly *might* be one that genuinely accumulates,
+    /// and the recognizer must not decide that from phrasing. Asking once is
+    /// the difference between noticing and guessing.
+    pub fn repeatedly_lapsed(&self, before: i64, threshold: usize) -> Result<Vec<EventId>> {
+        let mut out = Vec::new();
+        for (tgt, _) in self.promoted("series", 500)? {
+            let carries = match self.promotion_of(&tgt)? {
+                Some(p) => match p.as_ {
+                    brain_core::body::Promoted::Series(s) => s.carries_forward,
+                    _ => false,
+                },
+                None => false,
+            };
+            if carries {
+                continue;
+            }
+            if self.lapsed(&tgt, before)?.len() >= threshold {
+                out.push(tgt);
+            }
+        }
+        Ok(out)
+    }
+
     /// Notes captured while a series was happening.
     ///
     /// The whole of activation on one device (§3.9). A recurring meeting is a

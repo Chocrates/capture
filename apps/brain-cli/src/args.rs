@@ -59,6 +59,8 @@ pub enum Command {
     During { name: String, json: bool },
     /// Show what the recognizer makes of some text, without storing anything.
     Read { text: String },
+    /// Say that missing an instance of a series leaves something owed.
+    CarriesForward { name: String },
     /// Record what became of a resurfaced note.
     Reviewed { name: String, outcome: String },
     /// Mark one occurrence of a recurring series complete, or not.
@@ -264,6 +266,13 @@ where
                 }),
             }
         }
+        "carries-forward" => match &args[1..] {
+            [name] => Ok(Command::CarriesForward { name: name.clone() }),
+            _ => Err(Bad::UnknownFlag {
+                command: "carries-forward".into(),
+                flag: "expected one series".into(),
+            }),
+        },
         "read" => {
             let text = args[1..].join(" ");
             if text.is_empty() {
