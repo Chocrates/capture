@@ -87,9 +87,9 @@
 
 ## 10. Activation
 
-- [ ] 10.1 Implement a context surfacing the notes captured against it, using the recurrence machinery and one event kind.
-- [ ] 10.2 Implement external calendar import as read-only into a shadow namespace: visible in calendar and agenda, available as ambient context, never authored into the log, never written back.
-- [ ] 10.3 Confirm notes survive their external calendar disappearing, with captured context intact, and that stale shadow entries are marked stale rather than silently dropped.
+- [x] 10.1 Implement a context surfacing the notes captured against it, using the recurrence machinery and one event kind. **No event kind was needed.** The capture already carries when it happened and the series already says when it was on, so the association is derived by overlap rather than filed. That is worth preferring: an association somebody has to maintain is one that goes stale, and there is no way to forget to file a note against a meeting when nothing files anything.
+- [ ] 10.2 Implement external calendar import as read-only into a shadow namespace: visible in calendar and agenda, available as ambient context, never authored into the log, never written back. **Not started, and deliberately.** There is no calendar source, no importer, and nothing to test an ICS or CalDAV reader against. §3.9 is a boundary statement — the value in it is the *refusal* to write back, which nothing yet needs. Building a parser against an imaginary feed would be the most speculative code in this milestone.
+- [ ] 10.3 Confirm notes survive their external calendar disappearing, with captured context intact, and that stale shadow entries are marked stale rather than silently dropped. **Blocked on 10.2**, and worth noting the property already half holds: activation derives its association from timestamps rather than from a foreign id, so a calendar going away cannot orphan anything that was captured during it.
 
 ## 11. Acceptance
 

@@ -282,6 +282,44 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Notes captured while a recurring thing was happening.
+///
+/// Activation (§3.9): a meeting surfacing what was said at previous ones. The
+/// association is derived from when things happened rather than filed by hand —
+/// the capture carries its own time and the series says when it was on, so
+/// nothing has to be maintained and nothing can go stale.
+pub fn during(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let row = find(&store, name)?;
+    let notes = store.captured_during(&row.tgt, now_ms(), 200)?;
+
+    if json {
+        say!(
+            "[{}]",
+            notes.iter().map(note_json).collect::<Vec<_>>().join(",")
+        );
+        return Ok(());
+    }
+
+    if notes.is_empty() {
+        say!("Nothing was captured while that was on.");
+        say!();
+        say!("Either it has not happened yet, or nothing was written down during it.");
+        return Ok(());
+    }
+
+    say!("Captured while this was happening:");
+    say!();
+    for n in &notes {
+        say!(
+            "  {:<30}  {}",
+            n.slug,
+            n.text.as_deref().map(first_line).unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 /// Every if-then plan still standing.
 pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
     let store = open(paths)?;

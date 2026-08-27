@@ -55,6 +55,8 @@ pub enum Command {
     },
     /// Every plan still standing.
     Intents { json: bool },
+    /// Notes captured while a recurring thing was happening.
+    During { name: String, json: bool },
     /// Record what became of a resurfaced note.
     Reviewed { name: String, outcome: String },
     /// Mark one occurrence of a recurring series complete, or not.
@@ -260,6 +262,10 @@ where
                 }),
             }
         }
+        "during" => one_name(&args[1..], "during", |name, json| Command::During {
+            name,
+            json,
+        }),
         "intents" => {
             let rest = &args[1..];
             let json = has_json(rest);

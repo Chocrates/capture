@@ -987,6 +987,72 @@ impl Store {
         Ok(out)
     }
 
+    /// Notes captured while a series was happening.
+    ///
+    /// The whole of activation on one device (§3.9). A recurring meeting is a
+    /// set of windows in time, and the notes taken during previous instances of
+    /// it are the ones worth having in front of you at the next one — which is
+    /// §0's argument from the other end: when encoding is the weak link, you
+    /// frequently cannot recall the note but can recall the situation.
+    ///
+    /// Derived by overlap rather than by association. Nothing asks the user to
+    /// file a note against a meeting, and no event records that it belongs to
+    /// one: the capture already carries when it happened, the series already
+    /// says when it was on, and the answer falls out of the two. §3.9 allows
+    /// for one event kind here and none turned out to be needed, which is worth
+    /// preferring — an association somebody has to maintain is one that goes
+    /// stale.
+    ///
+    /// `before` bounds it to instances that have already happened; a meeting
+    /// activates on what was said at previous ones, not on what has not
+    /// occurred yet.
+    pub fn captured_during(
+        &self,
+        series: &EventId,
+        before: i64,
+        limit: usize,
+    ) -> Result<Vec<NoteRow>> {
+        // A window per occurrence. An occurrence with no end lasts an hour,
+        // which is what a meeting means when nobody said otherwise — and
+        // guessing longer would sweep in notes from after it broke up.
+        const ASSUMED_MS: i64 = 60 * 60 * 1000;
+
+        let windows: Vec<(i64, i64)> = self
+            .occurrences_of(series)?
+            .into_iter()
+            .filter(|o| !o.cancelled && o.start_ms < before)
+            .map(|o| (o.start_ms, o.end_ms.unwrap_or(o.start_ms + ASSUMED_MS)))
+            .collect();
+
+        if windows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let clauses: Vec<String> = windows
+            .iter()
+            .map(|(a, b)| format!("(n.created_wall >= {a} AND n.created_wall < {b})"))
+            .collect();
+
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             WHERE n.text IS NOT NULL
+               AND n.tgt != ?1
+               AND ({})
+             ORDER BY n.created_wall DESC
+             LIMIT ?2",
+            clauses.join(" OR ")
+        );
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![series.0.to_vec(), limit as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Notes that need reading, or reading again.
     ///
     /// Either nothing has ever parsed them, or what did was an older grammar. A
