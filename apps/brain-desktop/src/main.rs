@@ -29,6 +29,7 @@ fn main() {
             ipc::note,
             ipc::search,
             ipc::names,
+            ipc::mentioning,
             ipc::ambient,
             ipc::filter_by_context,
             ipc::health,

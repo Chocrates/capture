@@ -165,7 +165,12 @@ fn a_forward_marker_is_offered_before_anything_else() {
     for i in 0..4 {
         capture(&p, &format!("an ordinary note {i}"));
     }
-    let forward = capture(&p, "dentist thursday 2pm");
+    // An offset, not a weekday. A weekday resolves to a day this week, so
+    // "dentist thursday 2pm" is only in the future for part of Thursday — this
+    // test passed all morning and failed after two in the afternoon, and only
+    // stopped hiding that when the sweep began reading notes against their own
+    // capture time instead of an injected June clock.
+    let forward = capture(&p, "dentist in 3 weeks");
 
     // Promote it, which is what makes the forward date visible to selection.
     let mut s = Session::open_for_capture(p.clone()).unwrap();

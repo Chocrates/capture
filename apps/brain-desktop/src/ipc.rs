@@ -131,6 +131,14 @@ pub struct Piece {
     pub target: Option<String>,
     /// A link, rather than a run of text.
     pub link: bool,
+    /// A mention — `@sarah`, `^acme` — which navigates to that name's page.
+    ///
+    /// Carried on the same pieces as links because they are the same thing to a
+    /// reader: something in the text you can follow. They are kept apart
+    /// underneath because they resolve differently — a link points at one note
+    /// and can break, a mention is a query that always has an answer, even if
+    /// the answer is one note.
+    pub mention: Option<char>,
     /// What became of the name. Three outcomes, not two — the first version had
     /// only "broken or not" and rendered a name matching nothing as an ordinary
     /// followable link, which went nowhere when clicked.
@@ -343,13 +351,12 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             .map(brain_core::link::segments)
             .unwrap_or_default()
             .into_iter()
-            .map(|p| match p {
-                brain_core::link::Piece::Text(t) => Piece {
-                    text: t,
-                    target: None,
-                    link: false,
-                    state: "ok",
-                },
+            .flat_map(|p| match p {
+                // A run of plain text is split again on the mentions in it, so
+                // `@sarah` is followable in the middle of a sentence. Two
+                // scanners, but over different syntaxes owned by different
+                // crates: links are the fold's, sigils are the recognizer's.
+                brain_core::link::Piece::Text(t) => split_mentions(&t),
                 brain_core::link::Piece::Link(name) => {
                     let row = links_now.get(nth);
                     nth += 1;
@@ -365,12 +372,13 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
                         // neither is a lie about what the note says.
                         _ => "unresolved",
                     };
-                    Piece {
+                    vec![Piece {
                         text: name,
                         target,
                         link: true,
+                        mention: None,
                         state,
-                    }
+                    }]
                 }
             })
             .collect();
@@ -404,6 +412,85 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             promotion,
             suggestion,
         })
+    })())
+}
+
+/// Split a run of text so its `@person` and `^project` are followable.
+///
+/// The sigil stays in the rendered text. It is what somebody typed, it is how
+/// they will search for it, and hiding it would make the page a paraphrase of
+/// the note rather than the note.
+fn split_mentions(text: &str) -> Vec<Piece> {
+    let found = brain_parse::mentions(text);
+    if found.is_empty() {
+        return vec![Piece {
+            text: text.to_string(),
+            target: None,
+            link: false,
+            mention: None,
+            state: "ok",
+        }];
+    }
+
+    let mut out = Vec::new();
+    let mut rest = text;
+    for (sigil, value) in found {
+        let whole = format!("{sigil}{value}");
+        // Searched for rather than sliced by index, because the tokenizer's
+        // spans are its own and this text has already been cut once by the link
+        // scanner. A mention that cannot be found again is left as text, which
+        // is the safe direction: the reader sees exactly what was written.
+        let Some(at) = rest.find(&whole) else {
+            continue;
+        };
+        if at > 0 {
+            out.push(Piece {
+                text: rest[..at].to_string(),
+                target: None,
+                link: false,
+                mention: None,
+                state: "ok",
+            });
+        }
+        out.push(Piece {
+            text: value,
+            target: None,
+            link: false,
+            mention: Some(sigil),
+            state: "ok",
+        });
+        rest = &rest[at + whole.len()..];
+    }
+    if !rest.is_empty() {
+        out.push(Piece {
+            text: rest.to_string(),
+            target: None,
+            link: false,
+            mention: None,
+            state: "ok",
+        });
+    }
+    out
+}
+
+/// Every note naming a person or a project.
+///
+/// §4.3's entity page, which is a filtered timeline and nothing more. There is
+/// no record to create: a page exists for every name the moment it is written,
+/// which is what makes the layer usable on day one instead of after months of
+/// curation.
+#[tauri::command]
+pub fn mentioning(sigil: String, value: String) -> std::result::Result<Vec<Note>, String> {
+    wire((|| {
+        let c = sigil
+            .chars()
+            .next()
+            .ok_or_else(|| Error::Usage("a mention needs its sigil".into()))?;
+        let s = read_only()?;
+        Ok(s.mentioning(c, &value, now_ms())?
+            .into_iter()
+            .map(Note::from)
+            .collect())
     })())
 }
 

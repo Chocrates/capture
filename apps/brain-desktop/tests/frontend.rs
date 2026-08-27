@@ -417,6 +417,36 @@ fn the_completion_list_owns_enter_while_it_is_open() {
 }
 
 #[test]
+fn a_mention_is_followable_where_it_was_written() {
+    // §4.3: entity links carry the load, because they exist without anyone
+    // linking anything. A `@sarah` that is not clickable is a string.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("function showMentions"),
+        "there is no entity page"
+    );
+    assert!(
+        code.contains("p.mention"),
+        "mentions in a note's text are not followable"
+    );
+}
+
+#[test]
+fn nothing_creates_an_entity() {
+    // A page exists for every name the moment it is written, which is what
+    // makes the layer usable on the first day rather than after months of
+    // curation. A "new entity" control would be exactly the filing step §3.7
+    // exists to remove — and would let a page exist that nothing mentions.
+    let code = ui_code("app.js");
+    for creating in ["new entity", "createEntity", "addPerson", "newProject"] {
+        assert!(
+            !code.contains(creating),
+            "the interface can create an entity ({creating:?}), which is filing"
+        );
+    }
+}
+
+#[test]
 fn review_keeps_no_score_of_any_kind() {
     // The surface where a graded record would do the most harm: recurring,
     // permanently recorded, delivered on a schedule the user did not set, to

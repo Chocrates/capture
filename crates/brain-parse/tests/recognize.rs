@@ -511,3 +511,30 @@ fn a_verb_does_not_turn_a_series_into_a_task() {
         other => panic!("a series became {other:?}"),
     }
 }
+
+#[test]
+fn a_capture_reports_who_and_what_it_names() {
+    // The entity layer's whole input. A sigil is written by hand and never
+    // inferred, so this is exact where the rest of the recognizer is a reading.
+    let m = brain_parse::mentions("kickoff with @sarah on ^acme-migration #client");
+    assert_eq!(
+        m,
+        [
+            ('@', "sarah".to_string()),
+            ('^', "acme-migration".to_string())
+        ],
+        "tags belong to their own event kind and table, not to mentions"
+    );
+}
+
+#[test]
+fn a_bare_sigil_names_nobody() {
+    assert!(brain_parse::mentions("an @ sign and a ^ caret").is_empty());
+}
+
+#[test]
+fn an_email_address_is_not_a_person() {
+    // `@` in the middle of a word is not a sigil — a sigil starts a token.
+    // Otherwise every address in a capture invents a person page.
+    assert!(brain_parse::mentions("mail sarah@example.com about it").is_empty());
+}

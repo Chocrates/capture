@@ -504,6 +504,31 @@ pub const BANDS: &[(&str, &str)] = &[
 /// grammar in the module docs.
 pub const SHAPES: &[&str] = &["friday 2pm", "every weekday at 7", "aug 1-14", "in 3 weeks"];
 
+/// The people and projects a capture names.
+///
+/// `@sarah`, `^acme-migration` — the sigils that denote something with a page
+/// of its own (§4.3), returned as `(sigil, value)` in the order written.
+///
+/// Separate from [`recognize`] on purpose. That answers "when is this", needs a
+/// clock and a zone to do it, and returns a reading that may be wrong. This
+/// answers "what does it mention", which is exact: a sigil is written by hand
+/// and is never inferred, so there is nothing here to be unsure about and no
+/// reason to make a caller supply a clock to find out.
+///
+/// Tags are deliberately absent. They have their own event kind and their own
+/// table, because a tag can be added and retracted after the fact — a mention
+/// is part of the text and changes only when the text does.
+pub fn mentions(text: &str) -> alloc::vec::Vec<(char, alloc::string::String)> {
+    use alloc::string::ToString;
+    tokenize(text)
+        .into_iter()
+        .filter_map(|t| match t.class {
+            Class::Sigil(c) if c == '@' || c == '^' => t.sigil_value().map(|v| (c, v.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

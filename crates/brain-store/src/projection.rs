@@ -37,7 +37,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{Result, db};
 
 /// Bumped when the shape below changes. A mismatch triggers a rebuild.
-pub const PROJECTION_SCHEMA: u32 = 2;
+///
+/// A rebuild rather than a migration: the projection is derived data, and
+/// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
+/// which needs every existing note re-read for the sigils in its text — a
+/// migration could not have filled it in at all.
+pub const PROJECTION_SCHEMA: u32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -121,6 +126,24 @@ CREATE TABLE IF NOT EXISTS ambient (
 
 CREATE INDEX IF NOT EXISTS ambient_repo   ON ambient(repo);
 CREATE INDEX IF NOT EXISTS ambient_branch ON ambient(branch);
+
+-- Who and what a note names: `@sarah`, `^acme-migration` (§4.3).
+--
+-- Derived from the note's current text, like the full-text index and unlike
+-- tags — a tag is added and retracted by its own events, where a mention is
+-- part of what the note says and changes only when the text does. A redacted
+-- note has no text and so names nobody, which is what keeps a destroyed note's
+-- mentions off every entity page.
+CREATE TABLE IF NOT EXISTS mentions (
+  tgt   BLOB NOT NULL,
+  sigil TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (tgt, sigil, value)
+) STRICT;
+
+-- An entity page is this query and nothing else, so it is the one that has to
+-- be fast.
+CREATE INDEX IF NOT EXISTS mentions_value ON mentions(sigil, value);
 
 CREATE TABLE IF NOT EXISTS tags (
   tgt BLOB NOT NULL,
@@ -580,7 +603,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
-             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
+             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
              DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;",
         )?;
@@ -604,6 +627,7 @@ impl Store {
             tx.execute("DELETE FROM divergences WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
@@ -1352,6 +1376,35 @@ impl Store {
             )
             .optional()?;
         Ok(row.and_then(id_from))
+    }
+
+    /// Every note naming a person or a project.
+    ///
+    /// The whole of an entity page (§4.3): a filtered timeline of everything
+    /// mentioning it. There is no entity record to create and nothing to
+    /// maintain — a page exists for every name the moment it is written, which
+    /// is what makes this usable on day one rather than after months of
+    /// curation.
+    ///
+    /// Muted notes are excluded, for the same reason they are excluded from
+    /// search: §2.6 makes muting the cheap way to stop something resurfacing,
+    /// and a page that kept showing it would defeat that.
+    pub fn mentioning(&self, sigil: char, value: &str, now: u64) -> Result<Vec<NoteRow>> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n JOIN mentions m ON m.tgt = n.tgt
+             WHERE m.sigil = ?1 AND m.value = ?2
+               AND (n.muted_until IS NULL
+                    OR (n.muted_until != 0 AND n.muted_until <= ?3))
+             ORDER BY n.created_wall DESC"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![sigil.to_string(), value, now as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Names beginning with a prefix, for completing a link as it is typed.
@@ -2245,6 +2298,19 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 "INSERT OR IGNORE INTO tags (tgt, tag) VALUES (?1, ?2)",
                 params![t, tag],
             )?;
+        }
+
+        // Mentions come from the text a reader can see. `text_for_purge` is
+        // deliberately not used here: a note whose content is withheld or
+        // destroyed must not go on naming people, or an entity page becomes a
+        // way to read what redaction was supposed to have removed.
+        if let Some(text) = n.text.as_deref() {
+            for (sigil, value) in brain_parse::mentions(text) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO mentions (tgt, sigil, value) VALUES (?1,?2,?3)",
+                    params![t, sigil.to_string(), value],
+                )?;
+            }
         }
 
         let a = &n.ambient;

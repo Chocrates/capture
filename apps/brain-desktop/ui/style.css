@@ -167,6 +167,15 @@ h2:first-child { margin-top: 0; }
  * already dealt with is how a bounded session shows itself ending. */
 .note.done { opacity: .55; }
 
+/* A person or a project, followable where it was written. Distinct from a note
+ * link because it goes somewhere different: a link points at one note, a
+ * mention opens everything that names it. */
+.text .mention {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--warn); cursor: pointer; border-bottom: 1px solid transparent;
+}
+.text .mention:hover { border-bottom-color: var(--warn); }
+
 /* Editing happens where the text is, not in a dialog over it. The note stays
  * where it was on the page, and Escape puts it back untouched. */
 .editor {

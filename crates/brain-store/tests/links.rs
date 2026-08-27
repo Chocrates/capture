@@ -119,3 +119,82 @@ fn a_destroyed_note_is_not_offered_to_link_to() {
         "a destroyed note was offered as a link target"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Entity pages. §4.3: a page exists for every person and project immediately,
+// which is what makes the layer usable on day one rather than after curation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_page_exists_for_a_name_the_moment_it_is_written() {
+    // Nothing is created and nothing is maintained. The note names somebody and
+    // the page is the query.
+    let sc = Scratch::new("mention");
+    let p = sc.paths();
+    capture(&p, "kickoff with @sarah on ^acme-migration");
+    capture(&p, "@sarah is away next week");
+    capture(&p, "nothing to do with anyone");
+
+    let s = Session::open(p.clone()).unwrap();
+    assert_eq!(s.state.mentioning('@', "sarah", u64::MAX).unwrap().len(), 2);
+    assert_eq!(
+        s.state
+            .mentioning('^', "acme-migration", u64::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        s.state
+            .mentioning('@', "nobody", u64::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_edit_moves_a_note_between_pages() {
+    // A mention is part of what the note says, unlike a tag, which is added and
+    // retracted by its own events. Editing the text out has to take the note
+    // off the page — otherwise the page reports something the note no longer
+    // says, which is the shape of lying this system exists to avoid.
+    let sc = Scratch::new("mention-edit");
+    let p = sc.paths();
+    let slug = capture(&p, "lunch with @sarah");
+
+    let s = Session::open(p.clone()).unwrap();
+    assert_eq!(s.state.mentioning('@', "sarah", u64::MAX).unwrap().len(), 1);
+    drop(s);
+
+    brain_store::mutate::edit(&p, &slug, "lunch with @sam").unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(
+        s.state
+            .mentioning('@', "sarah", u64::MAX)
+            .unwrap()
+            .is_empty(),
+        "a page still names a note whose text no longer names it"
+    );
+    assert_eq!(s.state.mentioning('@', "sam", u64::MAX).unwrap().len(), 1);
+}
+
+#[test]
+fn a_muted_note_stays_off_the_page() {
+    // §2.6 makes muting the cheap way to stop something resurfacing, and a page
+    // that kept showing it would defeat exactly that.
+    let sc = Scratch::new("mention-muted");
+    let p = sc.paths();
+    let slug = capture(&p, "the thing with @sarah I do not want to see");
+
+    brain_store::mutate::mute_note(&p, &slug).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(
+        s.state
+            .mentioning('@', "sarah", 1_700_000_000_000)
+            .unwrap()
+            .is_empty(),
+        "a muted note appeared on an entity page"
+    );
+}

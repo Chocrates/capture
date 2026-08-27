@@ -620,7 +620,14 @@ async function showNote(name) {
     // contain anything at all, so a link's name is set with textContent like
     // everything else and never as markup.
     for (const p of page.body) {
-      if (!p.link) {
+      if (p.mention) {
+        // Followable in the middle of a sentence, with its sigil kept: it is
+        // what somebody typed and how they will look for it, and hiding it
+        // would make the page a paraphrase of the note rather than the note.
+        const m = el("button", "mention", `${p.mention}${p.text}`);
+        m.addEventListener("click", () => showMentions(p.mention, p.text));
+        text.append(m);
+      } else if (!p.link) {
         text.append(document.createTextNode(p.text));
       } else if (p.state === "ok") {
         const a = el("button", "link", p.text);
@@ -1026,6 +1033,42 @@ async function renderPending() {
       update();
     }, 1000);
   }
+}
+
+/// Everything naming a person or a project.
+///
+/// §4.3's entity page: a filtered timeline, and nothing to create or maintain.
+/// A page exists for every name the moment it is written, which is what makes
+/// this usable on the first day rather than after months of curation — and it
+/// is why there is no "new entity" anywhere in the interface.
+async function showMentions(sigil, value) {
+  const mine = beginRender();
+  current = "mentions";
+  view.replaceChildren();
+
+  const bar = el("div", "row");
+  const back = el("button", "act", "← timeline");
+  back.addEventListener("click", showTimeline);
+  bar.append(back);
+  view.append(bar);
+
+  view.append(el("h2", null, `${sigil}${value}`));
+
+  const notes = await call("mentioning", { sigil, value });
+  if (stale(mine)) return;
+
+  if (!notes.length) {
+    // Reachable: a page can be opened from a note whose text is then edited,
+    // or from one that has since been muted. Saying so is better than an empty
+    // page that reads as a fault.
+    view.append(el("p", "empty", "Nothing names this now."));
+    return;
+  }
+
+  view.append(
+    el("p", "hint", `${notes.length} note${notes.length === 1 ? "" : "s"}`),
+  );
+  for (const n of notes) view.append(noteRow(n, openNote));
 }
 
 // ----------------------------------------------------------------- review ---
