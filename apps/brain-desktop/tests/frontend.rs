@@ -235,6 +235,28 @@ fn the_grid_does_not_invent_an_end_time() {
 }
 
 #[test]
+fn the_page_draws_an_unwritten_end_as_wide_as_the_packer_reserves() {
+    // Two numbers that have to agree, in two languages. The packer reserves
+    // fifteen minutes for an occurrence with no written end so that two
+    // meetings at nine collide rather than being stacked into one column. Draw
+    // them taller than that and occurrences the packer called separate are
+    // drawn touching — which is exactly what happened on a real day, at 13:43
+    // and 14:00, seventeen minutes apart and overlapping on screen.
+    let rust = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ipc.rs"),
+    )
+    .expect("ipc.rs is readable");
+    assert!(
+        rust.contains("const UNWRITTEN: i64 = 15 * 60 * 1000;"),
+        "the packer's reservation changed; the page still assumes fifteen minutes"
+    );
+    assert!(
+        ui_code("app.js").contains("const UNWRITTEN_MINUTES = 15;"),
+        "the page no longer draws an unwritten end at the width the packer reserves"
+    );
+}
+
+#[test]
 fn the_page_does_not_decide_where_columns_go() {
     // Packing lives in `agenda`, so the command line and this page resolve a
     // day the same way and a change to the rule cannot reach one and miss the

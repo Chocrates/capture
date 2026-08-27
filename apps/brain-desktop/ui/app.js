@@ -261,15 +261,23 @@ function grid(rows) {
 
 /// How tall a minute is. One place, because the hour lines and the blocks have
 /// to agree or an occurrence is drawn against the wrong hour.
-const PIXELS_PER_MINUTE = 0.9;
+const PIXELS_PER_MINUTE = 1.4;
 
-/// How long a block with no written end is drawn as.
+/// The room an occurrence with no written end takes.
 ///
-/// It is drawn as a mark rather than as a length. The promoter refuses to
-/// invent §3.3's "30m default" — a wrong end time is harder to notice than a
-/// missing one — and a block claiming half an hour would put that invention
-/// back on the screen, where it looks like something somebody wrote.
-const NO_END_HEIGHT = 20;
+/// This is `UNWRITTEN` in ipc.rs and the two have to be the same number. The
+/// packer reserves fifteen minutes for an end-less occurrence so that two
+/// meetings at nine collide instead of being stacked into one column; if the
+/// page then draws them taller than that, occurrences the packer called
+/// separate are drawn touching — which is what happened at 13:43 and 14:00 on
+/// a real day, seventeen minutes apart and overlapping on screen.
+///
+/// It is still a mark rather than a length. The promoter refuses to invent
+/// §3.3's "30m default", because a wrong end time is harder to notice than a
+/// missing one, and a block claiming half an hour would put that invention back
+/// on the screen looking like something somebody wrote.
+const UNWRITTEN_MINUTES = 15;
+const NO_END_HEIGHT = UNWRITTEN_MINUTES * PIXELS_PER_MINUTE;
 
 function block(r, firstHour) {
   const b = el("div", `block${r.done ? " done" : ""}${r.end_ms ? "" : " open"}`);
