@@ -332,6 +332,55 @@ fn following_a_link_can_be_undone() {
 }
 
 #[test]
+fn history_records_entity_pages_too() {
+    // The first version recorded notes alone, which broke the one path entity
+    // pages exist to create: timeline → `@sarah` → one of her notes left no way
+    // back to `@sarah`, because the page in the middle was never written down.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("function openMentions"),
+        "an entity page is not a place you can come back from"
+    );
+    assert!(
+        code.contains(r#"view === "mentions""#),
+        "the history cannot describe an entity page"
+    );
+}
+
+#[test]
+fn the_history_controls_are_not_view_buttons() {
+    // They share the navbar with Timeline, Agenda, Review and Health. Wired by
+    // the same selector, clicking back would clear the highlight and fall
+    // through to the timeline — so the history control would navigate to
+    // something other than history.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains(r#"nav button[data-view]"#),
+        "the view wiring is not scoped, so it also grabs back and forward"
+    );
+}
+
+#[test]
+fn a_control_that_cannot_be_used_is_still_visible() {
+    // Disabled rather than hidden. A button that vanishes takes its meaning
+    // with it and moves the row under the cursor, and this pair is unavailable
+    // most of the time — which is exactly when somebody is learning what it is.
+    let html = ui("index.html");
+    assert!(
+        html.contains(r#"id="back""#) && html.contains(r#"id="forward""#),
+        "the history controls are not in the navbar"
+    );
+    assert!(
+        html.contains("disabled"),
+        "the controls start enabled, with nothing to go back to"
+    );
+    assert!(
+        ui_code("app.js").contains("b.disabled = history.back.length === 0"),
+        "nothing keeps the controls in step with the history"
+    );
+}
+
+#[test]
 fn redrawing_a_note_does_not_count_as_going_somewhere() {
     // `showNote` is the drawing entry point and `openNote` the navigating one.
     // If an edit or a tag redrew through `openNote`, "back" would walk through
@@ -439,7 +488,7 @@ fn all_three_sigils_go_to_a_page() {
     // OR-Set tag and a sigil in the text is not theirs to keep track of.
     let code = ui_code("app.js");
     assert!(
-        code.contains(r##"showMentions("#""##),
+        code.contains(r##"openMentions("#""##),
         "a tag does not navigate anywhere"
     );
     assert!(

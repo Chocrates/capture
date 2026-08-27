@@ -176,6 +176,15 @@ h2:first-child { margin-top: 0; }
  * already dealt with is how a bounded session shows itself ending. */
 .note.done { opacity: .55; }
 
+/* The history pair. Quieter than the view buttons beside them: they are
+ * navigation, not a place, and one of them is usually unavailable. */
+nav .hist {
+  padding: .3rem .5rem; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+nav .hist:disabled { opacity: .3; cursor: default; }
+nav .hist:not(:disabled):hover { color: var(--text); }
+
 /* A person or a project, followable where it was written. Distinct from a note
  * link because it goes somewhere different: a link points at one note, a
  * mention opens everything that names it. */

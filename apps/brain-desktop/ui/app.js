@@ -63,6 +63,7 @@ window.addEventListener("unhandledrejection", (e) => {
 let current = "timeline";
 let agendaDay = null;
 let currentNote = null;
+let currentMention = null;
 
 // Where you have been, and where you were before you went back.
 //
@@ -77,17 +78,57 @@ let currentNote = null;
 // shows what the note says now, and a snapshot would show what it said then.
 const history = { back: [], forward: [] };
 
+/// Where we are, as something that can be gone back to.
+///
+/// Any browsable view, not only notes. The first version recorded notes alone,
+/// which broke the path the entity pages exist to create: timeline → `@sarah` →
+/// one of her notes left no way back to `@sarah`, because the page in the
+/// middle was never written down.
+function here() {
+  if (current === "note" && currentNote) return { view: "note", name: currentNote };
+  if (current === "mentions" && currentMention) return { view: "mentions", ...currentMention };
+  return null;
+}
+
+function same(a, b) {
+  return a && b && JSON.stringify(a) === JSON.stringify(b);
+}
+
+/// Go to a recorded place.
+function go(entry) {
+  if (entry.view === "note") return showNote(entry.name);
+  if (entry.view === "mentions") return showMentions(entry.sigil, entry.value);
+}
+
 /// Record where we are before going somewhere else.
 ///
 /// Called by navigation, never by a redraw. `showNote` refreshing itself after
 /// an edit must not push a second copy of the same note, or "back" walks
 /// through the same page once per change made to it.
 function visit(entry) {
-    const here = current === "note" ? { view: "note", name: currentNote } : null;
-    if (here && here.name !== entry.name) history.back.push(here);
-    // A new destination ends the forward branch, exactly as it does in a
-    // browser: the path you came back from is no longer the path you are on.
-    history.forward.length = 0;
+  const from = here();
+  if (from && !same(from, entry)) history.back.push(from);
+  // A new destination ends the forward branch, exactly as it does in a
+  // browser: the path you came back from is no longer the path you are on.
+  history.forward.length = 0;
+  drawHistory();
+}
+
+/// The two buttons, in the navbar rather than on a page.
+///
+/// They were on the note page, which is the one place they are least needed —
+/// a note already offers its links, its backlinks and the timeline. Somewhere
+/// three clicks deep is exactly where you cannot see them, and a control that
+/// appears and disappears as you move is one nobody learns.
+///
+/// Disabled rather than hidden, for the same reason: a button that vanishes
+/// takes its meaning with it, and the layout moves under the cursor.
+function drawHistory() {
+  const b = document.getElementById("back");
+  const f = document.getElementById("forward");
+  if (!b || !f) return;
+  b.disabled = history.back.length === 0;
+  f.disabled = history.forward.length === 0;
 }
 
 // The session on offer, held rather than re-fetched.
@@ -478,7 +519,7 @@ function noteRow(note, onOpen) {
       // The row beneath is itself clickable, and a tag is not a way to open the
       // note it happens to sit on.
       e.stopPropagation();
-      showMentions("#", t);
+      openMentions("#", t);
     });
     head.append(b);
   }
@@ -588,35 +629,16 @@ async function showNote(name) {
   const mine = beginRender();
   current = "note";
   currentNote = name;
+  drawHistory();
   const page = await call("note", { name });
   if (stale(mine)) return;
   const n = page.note;
   view.replaceChildren();
 
   const bar = el("div", "row nav");
-
   const back = el("button", "act", "← timeline");
   back.addEventListener("click", showTimeline);
   bar.append(back);
-
-  if (history.back.length) {
-    const b = el("button", "act", "◀ back");
-    b.addEventListener("click", () => {
-      const to = history.back.pop();
-      history.forward.push({ view: "note", name: currentNote });
-      showNote(to.name);
-    });
-    bar.append(b);
-  }
-  if (history.forward.length) {
-    const f = el("button", "act", "forward ▶");
-    f.addEventListener("click", () => {
-      const to = history.forward.pop();
-      history.back.push({ view: "note", name: currentNote });
-      showNote(to.name);
-    });
-    bar.append(f);
-  }
   view.append(bar);
 
   const title = el("h2", null, n.alias ? `${n.alias}  ·  ${n.slug}` : n.slug);
@@ -634,7 +656,7 @@ async function showNote(name) {
         // what somebody typed and how they will look for it, and hiding it
         // would make the page a paraphrase of the note rather than the note.
         const m = el("button", "mention", `${p.mention}${p.text}`);
-        m.addEventListener("click", () => showMentions(p.mention, p.text));
+        m.addEventListener("click", () => openMentions(p.mention, p.text));
         text.append(m);
       } else if (!p.link) {
         text.append(document.createTextNode(p.text));
@@ -677,7 +699,7 @@ async function showNote(name) {
     const box = el("div", "tagline");
     for (const t of n.tags) {
       const b = el("button", "tag", `#${t}`);
-      b.addEventListener("click", () => showMentions("#", t));
+      b.addEventListener("click", () => openMentions("#", t));
       box.append(b);
     }
     view.append(box);
@@ -1063,9 +1085,17 @@ async function renderPending() {
 /// A page exists for every name the moment it is written, which is what makes
 /// this usable on the first day rather than after months of curation — and it
 /// is why there is no "new entity" anywhere in the interface.
+/// Open an entity page, remembering where you came from.
+function openMentions(sigil, value) {
+  visit({ view: "mentions", sigil, value });
+  return showMentions(sigil, value);
+}
+
 async function showMentions(sigil, value) {
   const mine = beginRender();
   current = "mentions";
+  currentMention = { sigil, value };
+  drawHistory();
   view.replaceChildren();
 
   const bar = el("div", "row");
@@ -1329,15 +1359,35 @@ function condition(c) {
 
 // ------------------------------------------------------------------- wiring ---
 
-document.querySelectorAll("nav button").forEach((b) => {
+// Only the buttons that name a view. Back and forward live in the same row and
+// are not places — wiring them here would clear the highlight and then fall
+// through to the timeline, so the history controls would navigate to something
+// other than history.
+document.querySelectorAll("nav button[data-view]").forEach((b) => {
   b.addEventListener("click", () => {
-    document.querySelectorAll("nav button").forEach((o) => o.classList.remove("on"));
+    document.querySelectorAll("nav button[data-view]").forEach((o) => o.classList.remove("on"));
     b.classList.add("on");
     if (b.dataset.view === "health") showHealth();
     else if (b.dataset.view === "agenda") showAgenda(today());
     else if (b.dataset.view === "review") showReview();
     else showTimeline();
   });
+});
+
+document.getElementById("back").addEventListener("click", () => {
+  const to = history.back.pop();
+  if (!to) return;
+  const from = here();
+  if (from) history.forward.push(from);
+  go(to);
+});
+
+document.getElementById("forward").addEventListener("click", () => {
+  const to = history.forward.pop();
+  if (!to) return;
+  const from = here();
+  if (from) history.back.push(from);
+  go(to);
 });
 
 const q = document.getElementById("q");

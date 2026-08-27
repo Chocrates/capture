@@ -17,6 +17,15 @@
 -->
 
 <nav>
+  <!--
+    Back and forward live here rather than on the note page, which is the one
+    place they are least needed: a note already offers its links, its backlinks
+    and the way to the timeline. They are disabled rather than hidden when
+    there is nowhere to go, so the row does not move under the cursor and the
+    control keeps its meaning while it is unavailable.
+  -->
+  <button id="back" class="hist" disabled title="back">◀</button>
+  <button id="forward" class="hist" disabled title="forward">▶</button>
   <button data-view="timeline" class="on">Timeline</button>
   <button data-view="agenda">Agenda</button>
   <button data-view="review">Review</button>
