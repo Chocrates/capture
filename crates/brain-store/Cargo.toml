@@ -24,6 +24,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Only to write a projection the way an older build would have, so a test can
+# prove such a thing still opens.
+rusqlite = { workspace = true }
 brain-parse = { path = "../brain-parse" }
 brain-time = { path = "../brain-time" }
 brain-core = { path = "../brain-core", features = ["std", "testing"] }

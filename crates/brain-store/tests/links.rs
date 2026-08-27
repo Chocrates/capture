@@ -414,3 +414,60 @@ fn every_note_query_reads_the_columns_it_selected() {
     s.state.mentioning('@', "nobody", u64::MAX).unwrap();
     s.state.tagged("nothing", u64::MAX).unwrap();
 }
+
+#[test]
+fn a_projection_from_an_older_build_can_still_be_opened() {
+    // The rule this pins: **the schema may add tables, never columns.**
+    //
+    // Rebuild-not-migrate (§1.3) depends on an old projection being openable
+    // long enough to be found stale — opening is how a rebuild starts. Adding
+    // `parent` as a column on `notes` broke exactly that: `CREATE TABLE IF NOT
+    // EXISTS notes` does nothing to a table already there, so the column never
+    // appeared and the index over it failed, and every write path on every
+    // existing store failed with it. The fix that would have healed them could
+    // not run, because running it required opening the thing that would not
+    // open.
+    //
+    // Simulated the only honest way: a database holding the `notes` table as an
+    // earlier build wrote it, and nothing else.
+    let dir = std::env::temp_dir().join(format!("brain-oldschema-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("state.0.db");
+
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
+             INSERT INTO meta (k, v) VALUES ('schema', '1');
+             CREATE TABLE notes (
+               tgt             BLOB PRIMARY KEY,
+               slug            TEXT NOT NULL UNIQUE,
+               alias           TEXT UNIQUE,
+               alias_wall      INTEGER,
+               alias_counter   INTEGER,
+               text            TEXT,
+               head            BLOB NOT NULL,
+               created_wall    INTEGER NOT NULL,
+               created_counter INTEGER NOT NULL,
+               updated_wall    INTEGER NOT NULL,
+               updated_counter INTEGER NOT NULL,
+               tz              TEXT,
+               pinned          INTEGER NOT NULL DEFAULT 0,
+               muted_until     INTEGER,
+               redacted_at     INTEGER,
+               credential      INTEGER NOT NULL DEFAULT 0
+             ) STRICT;",
+        )
+        .unwrap();
+    }
+
+    let store = brain_store::projection::Store::open(&path)
+        .expect("an older projection must still open, or it can never be rebuilt");
+    assert!(
+        store.is_stale().unwrap(),
+        "it opened but did not report itself stale, so nothing would rebuild it"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

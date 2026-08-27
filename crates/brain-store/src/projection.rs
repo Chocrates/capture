@@ -69,15 +69,34 @@ CREATE TABLE IF NOT EXISTS notes (
   -- Set at capture by a predicate that deliberately over-flags. Keeps the note
   -- out of exports until someone clears it, because an export directory is
   -- copied offsite where redaction can never reach.
-  credential      INTEGER NOT NULL DEFAULT 0,
-  -- The page this one sits under in the wiki (§3.7's one exception, and it is
-  -- an exception). Read by the sidebar and by nothing else, so a page under
-  -- the wrong parent is misfiled in one list and is still in the timeline, in
-  -- search, on every entity page naming it and behind every link to it.
-  parent          BLOB
+  credential      INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS notes_parent ON notes(parent);
+-- The page a note sits under in the wiki (§3.7's one exception, and it is an
+-- exception). Read by the sidebar and by nothing else, so a page under the
+-- wrong parent is misfiled in one list and is still in the timeline, in search,
+-- on every entity page naming it and behind every link to it.
+--
+-- # Why this is a table and not a column on `notes`
+--
+-- It was a column, and that broke every store that already existed. This schema
+-- is applied to a projection before its version is checked — it has to be, or
+-- there would be nothing to read the version *from* — and `CREATE TABLE IF NOT
+-- EXISTS notes` does nothing to a table that is already there. So the column
+-- never appeared, the index over it failed, and opening the projection failed
+-- with it: which meant the rebuild that would have fixed everything could never
+-- run, because opening is how a rebuild starts.
+--
+-- The rule that follows, and it is a rule: **the schema may add tables, never
+-- columns.** Rebuild-not-migrate (§1.3) depends on an old projection still
+-- being openable long enough to be found stale, and altering a table it already
+-- has takes that away.
+CREATE TABLE IF NOT EXISTS parents (
+  tgt    BLOB PRIMARY KEY,
+  parent BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
 
 CREATE INDEX IF NOT EXISTS notes_updated ON notes(updated_wall DESC, updated_counter DESC);
 CREATE INDEX IF NOT EXISTS notes_created ON notes(created_wall DESC, created_counter DESC);
@@ -398,11 +417,22 @@ pub struct OccurrenceRow {
 }
 
 /// The columns a `NoteRow` is read from, aliased to `n`.
-const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
+const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias,
+     -- Withheld while a redaction is queued against it. §1.1 makes the window
+     -- cancellable, and until it elapses the content is *already* unreadable —
+     -- ordering the destruction is what withholds it, not the destruction.
+     --
+     -- Here rather than at each call site: it was written out in two of them
+     -- and absent from the rest, so every query that used this constant could
+     -- read a note somebody had already asked to destroy.
+     CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
+                       WHERE q2.tgt = n.tgt AND q2.cancelled = 0)
+          THEN NULL ELSE n.text END,
+     n.created_wall, n.created_counter,
      n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
      n.redacted_at, n.credential,
      EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0),
-     n.parent";
+     (SELECT p.parent FROM parents p WHERE p.tgt = n.tgt)";
 
 /// What every review tier excludes, and why.
 ///
@@ -625,7 +655,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
-             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM held;
+             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
              DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;",
         )?;
@@ -650,6 +680,7 @@ impl Store {
             tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM parents WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
@@ -1362,15 +1393,7 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT tgt, slug, alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
-                                          WHERE q2.tgt = notes.tgt AND q2.cancelled = 0)
-                             THEN NULL ELSE text END, created_wall,
-                        created_counter, updated_wall, updated_counter, tz,
-                        pinned, muted_until, redacted_at, credential,
-                        EXISTS (SELECT 1 FROM redact_queue q
-                                WHERE q.tgt = notes.tgt AND q.cancelled = 0),
-                        parent
-                 FROM notes WHERE tgt = ?1",
+                &format!("SELECT {NOTE_COLUMNS} FROM notes n WHERE n.tgt = ?1"),
                 params![tgt.0.to_vec()],
                 note_row,
             )
@@ -1466,9 +1489,10 @@ impl Store {
     /// The pages sitting directly under one.
     pub fn children_of(&self, tgt: &EventId) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare(
-            "SELECT COALESCE(alias, slug), slug FROM notes
-             WHERE parent = ?1 AND redacted_at IS NULL
-             ORDER BY COALESCE(alias, slug)",
+            "SELECT COALESCE(n.alias, n.slug), n.slug FROM notes n
+             JOIN parents p ON p.tgt = n.tgt
+             WHERE p.parent = ?1 AND n.redacted_at IS NULL
+             ORDER BY COALESCE(n.alias, n.slug)",
         )?;
         let rows = st.query_map(params![tgt.0.to_vec()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -1488,8 +1512,9 @@ impl Store {
     /// sidebar listing all of them would be the timeline with worse ordering.
     pub fn named(&self) -> Result<Vec<Named>> {
         let mut st = self.conn.prepare(
-            "SELECT n.alias, n.slug, p.slug FROM notes n
-             LEFT JOIN notes p ON p.tgt = n.parent
+            "SELECT n.alias, n.slug, up.slug FROM notes n
+             LEFT JOIN parents pa ON pa.tgt = n.tgt
+             LEFT JOIN notes up ON up.tgt = pa.parent
              WHERE n.alias IS NOT NULL AND n.redacted_at IS NULL
              ORDER BY n.alias",
         )?;
@@ -1598,19 +1623,13 @@ impl Store {
     /// a timeline findable — and the design leans on that memory rather than on
     /// the user remembering where they filed things.
     pub fn timeline(&self, limit: usize) -> Result<Vec<NoteRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT tgt, slug, alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
-                                          WHERE q2.tgt = notes.tgt AND q2.cancelled = 0)
-                             THEN NULL ELSE text END, created_wall,
-                    created_counter, updated_wall, updated_counter, tz,
-                    pinned, muted_until, redacted_at, credential,
-                    EXISTS (SELECT 1 FROM redact_queue q
-                            WHERE q.tgt = notes.tgt AND q.cancelled = 0),
-                    parent
-             FROM notes
-             ORDER BY created_wall DESC, created_counter DESC
-             LIMIT ?1",
-        )?;
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             ORDER BY n.created_wall DESC, n.created_counter DESC
+             LIMIT ?1"
+        );
+        let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map(params![limit as i64], note_row)?;
         let mut out = Vec::new();
         for r in rows {
@@ -1777,14 +1796,7 @@ impl Store {
         };
 
         let sql = format!(
-            "SELECT n.tgt, n.slug, n.alias, CASE WHEN EXISTS (SELECT 1 FROM redact_queue q2
-                                      WHERE q2.tgt = n.tgt AND q2.cancelled = 0)
-                         THEN NULL ELSE n.text END, n.created_wall,
-                    n.created_counter, n.updated_wall, n.updated_counter, n.tz,
-                    n.pinned, n.muted_until, n.redacted_at, n.credential,
-                    EXISTS (SELECT 1 FROM redact_queue q
-                            WHERE q.tgt = n.tgt AND q.cancelled = 0),
-                    n.parent
+            "SELECT {NOTE_COLUMNS}
              FROM notes n JOIN ambient a ON a.tgt = n.tgt
              WHERE a.{column} = ?1
              ORDER BY n.created_wall DESC"
@@ -2383,8 +2395,8 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             "INSERT INTO notes
                (tgt, slug, alias, alias_wall, alias_counter, text, head,
                 created_wall, created_counter, updated_wall, updated_counter,
-                tz, pinned, muted_until, redacted_at, credential, parent)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                tz, pinned, muted_until, redacted_at, credential)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 t,
                 n.slug,
@@ -2402,7 +2414,6 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 n.muted_until.map(|v| v as i64),
                 n.redacted_at.map(|h| h.wall as i64),
                 n.credential as i64,
-                n.parent.map(|p| p.0.to_vec()),
             ],
         )?;
 
@@ -2434,6 +2445,13 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             tx.execute(
                 "INSERT OR REPLACE INTO links (src, ord, name, resolved) VALUES (?1,?2,?3,?4)",
                 params![t, i as i64, l.name, l.resolved.map(|x| x.0.to_vec())],
+            )?;
+        }
+
+        if let Some(parent) = n.parent {
+            tx.execute(
+                "INSERT OR REPLACE INTO parents (tgt, parent) VALUES (?1, ?2)",
+                params![t, parent.0.to_vec()],
             )?;
         }
 
