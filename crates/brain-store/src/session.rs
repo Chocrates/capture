@@ -64,7 +64,24 @@ impl Session {
     /// until that exists, saying plainly who has it is better than blocking on
     /// something that may be a long-running overlay rather than a passing
     /// command.
+    /// Open a store for writing a capture, and nothing else.
+    ///
+    /// Identical to [`Session::open`] except that it does not read anything.
+    ///
+    /// The distinction is the whole of §3.1's promise. Parsing is a sweep over
+    /// what is already stored, and a sweep can touch two hundred notes; putting
+    /// it on the path a capture takes would mean every `brain +` waited for it,
+    /// which is the one thing the design will not spend. A capture is the one
+    /// operation that gets a store to itself.
+    pub fn open_for_capture(paths: StorePaths) -> Result<Session> {
+        Session::start(paths, false)
+    }
+
     pub fn open(paths: StorePaths) -> Result<Session> {
+        Session::start(paths, true)
+    }
+
+    fn start(paths: StorePaths, catch_up: bool) -> Result<Session> {
         let identity = store::open(&paths)?;
         let lock_path = paths.root.join("writer.lock");
         let Some(writer) = Writer::acquire(&lock_path, "cli")? else {
@@ -128,6 +145,19 @@ impl Session {
             Ok(0) => {}
             Ok(n) => tracing::warn!(n, "finished purges interrupted by an earlier run"),
             Err(e) => tracing::error!(%e, "could not finish an interrupted purge"),
+        }
+
+        // Read anything nothing has read yet, or that an older grammar read.
+        //
+        // Every startup except a capture's. §3.1 puts parsing after the commit
+        // and the gesture must never wait for it, so the one path that must stay
+        // fast opts out and every other one catches the store up.
+        if catch_up {
+            match crate::promote::sweep(&mut s, now_ms() as i64) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(promoted = n, "notes read at startup"),
+                Err(e) => tracing::warn!(%e, "notes could not be read"),
+            }
         }
 
         // Deadlines that have arrived. Every process startup is the floor: no
@@ -543,7 +573,7 @@ pub enum Committed {
 pub fn capture(paths: &StorePaths, text: &str) -> Result<Committed> {
     let body = capture_body(text)?;
 
-    match Session::open(paths.clone()).and_then(|mut s| s.capture(&body)) {
+    match Session::open_for_capture(paths.clone()).and_then(|mut s| s.capture(&body)) {
         Ok(c) => Ok(Committed::Stored(c.slug)),
         Err(store_failed) => {
             spool::push(&paths.spool, &body).map_err(|spool_failed| {

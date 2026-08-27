@@ -37,15 +37,25 @@ impl Drop for Scratch {
 }
 
 fn capture(paths: &StorePaths, text: &str) -> String {
-    let mut s = Session::open(paths.clone()).unwrap();
+    // The path a real capture takes, which deliberately does not read anything.
+    let mut s = Session::open_for_capture(paths.clone()).unwrap();
     let body = brain_store::session::capture_body(text).unwrap();
     s.capture(&body).unwrap().slug
 }
 
+/// Read the log without opening a session.
+///
+/// Deliberately not through `Session::open`: that catches the store up, so the
+/// act of checking what happened would change it. Reads go direct (§8.8).
+fn events(paths: &StorePaths) -> Vec<brain_core::envelope::Envelope> {
+    brain_store::log::Log::open_read(&paths.events)
+        .unwrap()
+        .all()
+        .unwrap()
+}
+
 fn note_of(paths: &StorePaths, slug: &str) -> brain_core::fold::Note {
-    let s = Session::open(paths.clone()).unwrap();
-    let all = s.log.all().unwrap();
-    brain_core::fold::fold(&all)
+    brain_core::fold::fold(&events(paths))
         .notes
         .into_values()
         .find(|n| n.slug == slug)
@@ -61,7 +71,7 @@ fn a_sweep_promotes_what_clears_the_floor_and_leaves_the_rest() {
     let unsure = capture(&p, "dentist thursday");
     let prose = capture(&p, "the march timeline slipped");
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     let written = promote::sweep(&mut s, NOW).unwrap();
     drop(s);
 
@@ -82,7 +92,7 @@ fn promotion_never_touches_the_captured_text() {
     let text = "dentist thursday 2pm #health";
     let slug = capture(&p, text);
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     promote::sweep(&mut s, NOW).unwrap();
     drop(s);
 
@@ -99,7 +109,7 @@ fn sweeping_twice_writes_nothing_the_second_time() {
     let p = sc.paths();
     capture(&p, "dentist thursday 2pm");
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     assert_eq!(promote::sweep(&mut s, NOW).unwrap(), 1);
     assert_eq!(promote::sweep(&mut s, NOW).unwrap(), 0, "it promoted again");
 }
@@ -111,13 +121,13 @@ fn a_correction_survives_every_later_sweep() {
     let p = sc.paths();
     let slug = capture(&p, "dentist thursday 2pm");
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     promote::sweep(&mut s, NOW).unwrap();
     drop(s);
 
     promote::correct(&p, &slug, promote::task(false, Some("2026-08-14"))).unwrap();
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     let written = promote::sweep(&mut s, NOW).unwrap();
     drop(s);
     assert_eq!(written, 0, "a sweep reparsed a corrected note");
@@ -141,8 +151,7 @@ fn a_capture_does_not_wait_for_any_of_this() {
     let p = sc.paths();
     capture(&p, "dentist thursday 2pm");
 
-    let s = Session::open(p.clone()).unwrap();
-    let kinds: Vec<Kind> = s.log.all().unwrap().iter().map(|e| e.header.kind).collect();
+    let kinds: Vec<Kind> = events(&p).iter().map(|e| e.header.kind).collect();
     assert!(
         !kinds.contains(&Kind::PROMOTE),
         "capturing wrote a promotion on the capture path"
@@ -158,7 +167,7 @@ fn a_note_with_no_zone_is_read_in_utc_rather_than_locally() {
     let p = sc.paths();
     let slug = capture(&p, "vacation aug 1-14");
 
-    let mut s = Session::open(p.clone()).unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
     promote::sweep(&mut s, NOW).unwrap();
     drop(s);
 

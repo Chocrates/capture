@@ -153,20 +153,17 @@ pub fn sweep(s: &mut Session, now: i64) -> Result<usize> {
     let grammar = brain_parse::GRAMMAR_VERSION;
     let mut written = 0;
 
-    // Folded rather than queried, because the projection has no columns for a
-    // promotion yet — that arrives with task 6.2, and this becomes an indexed
-    // lookup then. Stated rather than hidden: a full fold per sweep is fine
-    // while a store holds hundreds of notes and is not fine forever.
-    let notes: Vec<Note> = {
-        let all = s.log.all()?;
-        brain_core::fold::fold(&all)
-            .notes
-            .into_values()
-            .filter(|n| needs_parse(n, grammar))
-            .collect()
-    };
+    // An indexed query rather than a fold. This folded the whole log until the
+    // projection learned to store a promotion; it was honest and temporary and
+    // is now neither.
+    //
+    // Bounded, because a sweep is not the only thing this process has to do. A
+    // grammar change over a large store is spread across several startups
+    // rather than making one of them slow — nothing is lost by taking two runs
+    // to finish, and the alternative is a capture that waits behind a reparse.
+    const PER_SWEEP: usize = 200;
 
-    for note in notes {
+    for note in s.state.needing_parse(grammar, PER_SWEEP)? {
         let Some(text) = note.text.as_deref() else {
             continue;
         };

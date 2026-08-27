@@ -47,6 +47,190 @@ pub fn open(paths: &StorePaths) -> Result<Store> {
     Store::open_read(&projection::generation_path(&paths.state, generation))
 }
 
+// ----------------------------------------------------------------- agenda ---
+
+/// What occurs and what is due, for one day.
+///
+/// Answered from expanded occurrences and stored promotion fields, never by
+/// reading anybody's text. Two bands, because §4.4 makes the split a
+/// consequence of the time model rather than a style choice: all-day entries are
+/// floating dates and have no position on an hour axis.
+pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let zone = brain_time::Zone::new(&local_zone()).unwrap_or_else(utc);
+
+    let date = match day {
+        Some(d) => brain_time::FloatingDate::parse(d)
+            .ok_or_else(|| Error::Usage(format!("'{d}' is not a date; use YYYY-MM-DD")))?,
+        None => brain_time::civil_date(now_ms(), zone),
+    };
+
+    let from = brain_time::at_local(date, 0, 0, zone)
+        .ok_or_else(|| Error::Usage("that day does not exist in this zone".into()))?;
+    let to = from + 24 * 60 * 60 * 1000;
+
+    let mut rows = Vec::new();
+
+    // All-day entries first. They are floating dates with no instant to
+    // compare, so they are found by date rather than by window (§3.2).
+    for tgt in store.all_day_on(&format!("{date}"))? {
+        let slug = store.slug_of(&tgt)?.unwrap_or_default();
+        let text = store.text_of(&tgt)?;
+        rows.push((
+            slug,
+            projection::OccurrenceRow {
+                occ: from,
+                start_ms: from,
+                end_ms: None,
+                all_day: true,
+                shift: None,
+                cancelled: false,
+                done: false,
+                title: None,
+                location: None,
+                notes: None,
+            },
+            text,
+        ));
+    }
+
+    for (tgt, o) in store.happening_between(from, to)? {
+        // Cancelled occurrences are not drawn. They are not gone either: the
+        // cancellation is an ordinary event and nothing was destroyed (§4.4).
+        // One that was also moved *is* drawn — a move outranks a cancel.
+        if o.cancelled && o.end_ms.is_none() && o.start_ms == o.occ {
+            continue;
+        }
+        let slug = store.slug_of(&tgt)?.unwrap_or_default();
+        let text = store.text_of(&tgt)?;
+        rows.push((slug, o, text));
+    }
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|(slug, o, text)| {
+                format!(
+                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"text\":{}}}",
+                    quote(slug),
+                    o.start_ms,
+                    o.all_day,
+                    o.done,
+                    o.shift.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+                    text.as_deref().map(quote).unwrap_or_else(|| "null".into())
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    say!("{date}");
+    if rows.is_empty() {
+        say!("  nothing");
+        return Ok(());
+    }
+
+    // All-day first, in their own band. They have no hour to sort by, and
+    // mixing them into the timed list would imply one.
+    for (slug, o, text) in rows.iter().filter(|(_, o, _)| o.all_day) {
+        say!("  all day   {}  {}", slug, line(text.as_deref(), o));
+    }
+    for (slug, o, text) in rows.iter().filter(|(_, o, _)| !o.all_day) {
+        let (h, m) = brain_time::civil_clock(o.start_ms, zone);
+        say!("  {h:02}:{m:02}     {}  {}", slug, line(text.as_deref(), o));
+    }
+    Ok(())
+}
+
+/// One agenda line's text, with whatever the occurrence says about itself.
+fn line(text: Option<&str>, o: &projection::OccurrenceRow) -> String {
+    let body = o
+        .title
+        .clone()
+        .or_else(|| text.map(first_line))
+        .unwrap_or_else(|| "(no readable text)".into());
+
+    let mut s = body;
+    if o.done {
+        s.push_str("  ✓");
+    }
+    // A shifted occurrence says so. §4.4: a time that moved on its own with no
+    // explanation is what makes somebody stop trusting the whole system.
+    match o.shift.as_deref() {
+        Some("gap") => s.push_str("  (moved by a daylight-saving gap)"),
+        Some("ambiguous") => s.push_str("  (the clock struck this hour twice)"),
+        _ => {}
+    }
+    if o.cancelled {
+        s.push_str("  (cancelled, and moved)");
+    }
+    s
+}
+
+/// Notes promoted to tasks.
+pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let rows = store.promoted("task", 500)?;
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .filter_map(|(tgt, descriptor)| {
+                let slug = store.slug_of(tgt).ok().flatten()?;
+                Some(format!(
+                    "{{\"slug\":{},\"descriptor\":{}}}",
+                    quote(&slug),
+                    quote(descriptor)
+                ))
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        say!("No tasks.");
+        say!();
+        say!("Nothing here recognises one on its own — a task verb alone is a");
+        say!("suggestion, not a type. Assign one with: brain task <name>");
+        return Ok(());
+    }
+    for (tgt, descriptor) in rows {
+        let slug = store.slug_of(&tgt)?.unwrap_or_default();
+        let text = store.text_of(&tgt)?;
+        say!(
+            "  {:<28}  {:<22}  {}",
+            slug,
+            descriptor,
+            text.as_deref().map(first_line).unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn utc() -> brain_time::Zone {
+    brain_time::Zone::new("UTC").expect("UTC is always present")
+}
+
+fn local_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                p.to_str()
+                    .and_then(|s| s.split("zoneinfo/").nth(1))
+                    .map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "UTC".into())
+}
+
+fn now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond().max(0)
+}
+
 /// Find a note by name, or say so.
 fn find(store: &Store, name: &str) -> Result<NoteRow> {
     let Some(tgt) = store.resolve(name)? else {

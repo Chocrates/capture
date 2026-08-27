@@ -740,6 +740,107 @@ impl Store {
         Ok(out)
     }
 
+    /// Everything happening in a window, recurring or not.
+    ///
+    /// The query an agenda or a calendar runs. Two sources, because a one-off
+    /// event and an instance of a series are different things in the log and
+    /// the same thing to somebody looking at a day: occurrences come from the
+    /// expansion, and one-off promotions come from their own stored fields.
+    ///
+    /// A one-off is reported as an occurrence naming itself, which is true —
+    /// there is exactly one, and it is where the rule that produced it put it.
+    pub fn happening_between(&self, from: i64, to: i64) -> Result<Vec<(EventId, OccurrenceRow)>> {
+        let mut out = self.occurring_between(from, to)?;
+
+        let mut st = self.conn.prepare(
+            "SELECT tgt, start_ms, end_ms FROM promotions
+             WHERE kind = 'event' AND start_ms IS NOT NULL
+               AND start_ms >= ?1 AND start_ms < ?2",
+        )?;
+        let timed = st.query_map(params![from, to], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        for r in timed {
+            let (id, start, end) = r?;
+            if let Some(id) = id_from(id) {
+                out.push((
+                    id,
+                    OccurrenceRow {
+                        occ: start,
+                        start_ms: start,
+                        end_ms: end,
+                        all_day: false,
+                        shift: None,
+                        cancelled: false,
+                        done: false,
+                        title: None,
+                        location: None,
+                        notes: None,
+                    },
+                ));
+            }
+        }
+
+        out.sort_by_key(|(_, o)| o.start_ms);
+        Ok(out)
+    }
+
+    /// All-day entries covering a date.
+    ///
+    /// Separate from the timed query because they are floating dates: they have
+    /// no instant to compare and no position on an hour axis (§3.2, §4.4).
+    /// Comparing them as text is exact, because `YYYY-MM-DD` sorts as it reads.
+    pub fn all_day_on(&self, date: &str) -> Result<Vec<EventId>> {
+        let mut st = self.conn.prepare(
+            "SELECT tgt FROM promotions
+             WHERE kind = 'event' AND start_date IS NOT NULL
+               AND start_date <= ?1 AND end_date >= ?1",
+        )?;
+        let rows = st.query_map(params![date], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(id) = id_from(r?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Notes that need reading, or reading again.
+    ///
+    /// Either nothing has ever parsed them, or what did was an older grammar. A
+    /// pinned promotion is never returned: it is somebody's correction, and the
+    /// point of the pin is that no later parse displaces it.
+    ///
+    /// An indexed query rather than a fold. The sweep folded the whole log to
+    /// answer this until the projection learned to store a promotion, which was
+    /// fine for hundreds of notes and would not have stayed fine.
+    pub fn needing_parse(&self, grammar: u32, limit: usize) -> Result<Vec<NoteRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
+                    n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
+                    n.redacted_at, n.credential,
+                    EXISTS (SELECT 1 FROM redact_queue q
+                            WHERE q.tgt = n.tgt AND q.cancelled = 0)
+             FROM notes n
+             LEFT JOIN promotions p ON p.tgt = n.tgt
+             WHERE n.text IS NOT NULL
+               AND (p.tgt IS NULL OR (p.pinned = 0 AND p.grammar IS NOT NULL AND p.grammar < ?1))
+             ORDER BY n.created_wall DESC
+             LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![grammar as i64, limit as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// A note's name.
     pub fn slug_of(&self, tgt: &EventId) -> Result<Option<String>> {
         Ok(self

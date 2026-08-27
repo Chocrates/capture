@@ -486,6 +486,7 @@ version = "0.1.0"
 dependencies = [
  "brain-core",
  "brain-store",
+ "brain-time",
  "clap",
  "ed25519-dalek",
  "jiff",

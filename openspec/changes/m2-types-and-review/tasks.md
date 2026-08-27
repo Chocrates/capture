@@ -41,7 +41,7 @@
 - [x] 5.1 Author `promote` from a recognition at or above the 0.75 floor. Enforce the floor in one place.
 - [~] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing. **Partial**: nothing is applied, which is the half that matters and is tested. A suggestion is derived data rather than a decision, so it must not become an event — it is computed when review asks, which is section 8.
 - [x] 5.3 Implement the reparse path on text edit, respecting pins.
-- [~] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep. **Partial**: the version is recorded and `promote::sweep` reparses on it, tested end to end. Calling it from startup waits for 6.4a, which is where the due-queue wiring lives.
+- [x] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep. **Done**: every startup except a capture's. `Session::open_for_capture` opts the one path that must stay fast out of it, because a sweep can touch two hundred notes and §3.1 will not spend that on the gesture. The sweep is an indexed query now rather than a fold of the whole log.
 - [x] 5.4 Implement the human correction path, authoring `pinned: true`.
 - [~] 5.5 Implement tasks: state, optional floating due date, list membership as tags with a display order, optional ordering. **Partial**: the fields exist and the correction path writes them. Nothing *recognises* a task as a type — a task verb scores 0.40 and is deliberately under the floor, so today a task is only ever created by hand. Reading state and ordering back needs the projection (6.2).
 - [ ] 5.6 Implement recurring obligations, with uncompleted instances recorded as lapsed and **not** rolling over, stacking or accumulating. **Blocked on 6.1**: "lapsed" is a statement about an occurrence that was expanded and not completed, and nothing expands occurrences into the projection yet.
@@ -65,7 +65,7 @@
 - [ ] 7.3 Calendar: all-day events in a band above the timed grid, timed occurrences column-packed, DST-shifted occurrences marked, cancelled ones hidden but recoverable.
 - [ ] 7.4 Agenda: what is due and what occurs, drawn from the same substrate — a meeting and the notes taken during it are one record, not two.
 - [ ] 7.5 Occurrence completion in the GUI, including un-completing a mistaken tick.
-- [ ] 7.6 CLI equivalents: agenda, tasks, occurrence completion, and the pinned correction path. Every one takes `--json`.
+- [x] 7.6 CLI equivalents: agenda, tasks, occurrence completion, and the pinned correction path. Every one takes `--json`.
 
 ## 8. Review — the component with the best evidence
 

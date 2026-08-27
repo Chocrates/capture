@@ -162,6 +162,38 @@ pub fn pin(paths: StorePaths, name: &str, pinned: bool) -> Result<()> {
     Ok(())
 }
 
+/// Mark one occurrence of a recurring series complete, or not.
+///
+/// Named by its original start, which is what an occurrence *is* (§3.5) — the
+/// instant the rule would have produced, before any move. A moved occurrence
+/// keeps the name, so completing one that somebody rescheduled still finds it.
+///
+/// Un-completing is a separate kind rather than a toggle, because it has to be
+/// possible to undo a mistaken tick and a pure union could not express that.
+pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result<()> {
+    let mut s = Session::open(paths)?;
+    let tgt = find(&s, name)?;
+    let kind = if done {
+        Kind::OCC_DONE
+    } else {
+        Kind::OCC_UNDONE
+    };
+
+    s.append(kind, Some(tgt), None, |nonce| {
+        encode(&brain_core::body::OccBody { nonce, occ })
+    })?;
+
+    say!(
+        "{name} {} for that occurrence",
+        if done {
+            "complete"
+        } else {
+            "no longer complete"
+        }
+    );
+    Ok(())
+}
+
 /// Suppress a note from surfacing, without destroying it.
 ///
 /// Muting exists so that making something go away is *cheaper* than destroying

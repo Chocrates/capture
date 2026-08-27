@@ -41,6 +41,19 @@ pub enum Command {
     Timeline { limit: Option<usize>, json: bool },
     /// One note in full.
     Show { name: String, json: bool },
+    /// What occurs and what is due, for a day.
+    Agenda { day: Option<String>, json: bool },
+    /// Notes promoted to tasks.
+    Tasks { json: bool },
+    /// Mark one occurrence of a recurring series complete, or not.
+    Occurrence {
+        /// The series.
+        name: String,
+        /// Which occurrence, as its original start in milliseconds.
+        occ: i64,
+        /// Whether it is complete.
+        done: bool,
+    },
     /// Notes matching a query.
     Search { query: String, json: bool },
     /// What a note points at, and what points at it.
@@ -204,6 +217,54 @@ where
                 }
             }
             Ok(Command::Timeline { limit, json })
+        }
+        "agenda" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            let days: Vec<&String> = rest.iter().filter(|a| *a != "--json").collect();
+            match days.as_slice() {
+                [] => Ok(Command::Agenda { day: None, json }),
+                [d] => Ok(Command::Agenda {
+                    day: Some((*d).clone()),
+                    json,
+                }),
+                [_, extra, ..] => Err(Bad::UnknownFlag {
+                    command: "agenda".into(),
+                    flag: (*extra).clone(),
+                }),
+            }
+        }
+        "tasks" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            match rest.iter().find(|a| *a != "--json") {
+                Some(extra) => Err(Bad::UnknownFlag {
+                    command: "tasks".into(),
+                    flag: extra.clone(),
+                }),
+                None => Ok(Command::Tasks { json }),
+            }
+        }
+        "done" | "undone" => {
+            let done = args[0] == "done";
+            let rest = &args[1..];
+            match rest {
+                [name, occ] => occ
+                    .parse::<i64>()
+                    .map(|occ| Command::Occurrence {
+                        name: name.clone(),
+                        occ,
+                        done,
+                    })
+                    .map_err(|_| Bad::UnknownFlag {
+                        command: args[0].clone(),
+                        flag: occ.clone(),
+                    }),
+                _ => Err(Bad::UnknownFlag {
+                    command: args[0].clone(),
+                    flag: "expected a series and an occurrence".into(),
+                }),
+            }
         }
         "show" => one_name(&args[1..], "show", |name, json| Command::Show {
             name,
