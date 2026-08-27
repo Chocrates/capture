@@ -223,6 +223,61 @@ pub fn reviewed(paths: StorePaths, name: &str, outcome: &str) -> Result<()> {
     Ok(())
 }
 
+/// Make an if-then plan.
+///
+/// Two cue shapes today, and only two, because a device may only offer what it
+/// can actually watch for. §2.4.1: an intent whose cue this machine cannot
+/// observe would be registered, reported as working, and permanently silent.
+pub fn intent(paths: StorePaths, cue: &str, arg: &str, then: &str) -> Result<()> {
+    use brain_core::body::Cue;
+
+    let cue = match cue {
+        "at" => {
+            let ms = brain_time::FloatingDate::parse(arg)
+                .and_then(|d| brain_time::at_local(d, 9, 0, local_zone()))
+                .or_else(|| parse_at(arg))
+                .ok_or_else(|| {
+                    brain_store::Error::Usage(format!(
+                        "'{arg}' is not a time; use YYYY-MM-DD or YYYY-MM-DDTHH:MM"
+                    ))
+                })?;
+            Cue::Time(ms)
+        }
+        "branch" => Cue::GitBranch(arg.to_string()),
+        other => {
+            return Err(brain_store::Error::Usage(format!(
+                "'{other}' is not a cue this device can watch for; use 'at' or 'branch'"
+            )));
+        }
+    };
+
+    brain_store::mutate::add_intent(&paths, cue, then)?;
+    say!("Noted. It fires once, here.");
+    Ok(())
+}
+
+/// `YYYY-MM-DDTHH:MM`, in this machine's zone.
+fn parse_at(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once('T')?;
+    let d = brain_time::FloatingDate::parse(date)?;
+    let (h, m) = time.split_once(':')?;
+    brain_time::at_local(d, h.parse().ok()?, m.parse().ok()?, local_zone())
+}
+
+fn local_zone() -> brain_time::Zone {
+    std::env::var("TZ")
+        .ok()
+        .and_then(|t| brain_time::Zone::new(&t))
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                p.to_str()
+                    .and_then(|s| s.split("zoneinfo/").nth(1))
+                    .and_then(brain_time::Zone::new)
+            })
+        })
+        .unwrap_or_else(|| brain_time::Zone::new("UTC").expect("UTC is always present"))
+}
+
 /// Suppress a note from surfacing, without destroying it.
 ///
 /// Muting exists so that making something go away is *cheaper* than destroying

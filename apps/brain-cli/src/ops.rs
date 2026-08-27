@@ -188,6 +188,18 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     let chord = brain_store::hotkey::DEFAULT_CHORD.human();
     say!("chord       {chord} via {}", mechanism.name());
 
+    // A default is a rule; a setting is a decision. §8.9 keeps them apart, and
+    // this is the line where the difference becomes visible: a machine-chosen
+    // notifier reported as "set by you" is a preference nobody made that can
+    // never be centrally improved.
+    match brain_store::notifier::chosen(&state)? {
+        Some(who) => say!("notifier    {who} — your choice"),
+        None => say!(
+            "notifier    {} — a default, not a setting",
+            brain_store::notifier::default_rule()
+        ),
+    }
+
     // ---- tier one: things that want a decision -----------------------------
     let mut attention: Vec<String> = Vec::new();
 

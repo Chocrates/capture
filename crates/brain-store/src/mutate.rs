@@ -286,6 +286,52 @@ pub fn cancel_redactions_since(paths: &StorePaths, since: u64) -> Result<usize> 
     Ok(n)
 }
 
+/// Make an if-then plan.
+///
+/// Refuses a cue this device cannot observe. Accepting one would produce an
+/// intent that is registered, reported as working, and permanently silent —
+/// the same failure shape as a chord that is bound and never fires, and the
+/// one §2.4.1 is careful about.
+pub fn add_intent(paths: &StorePaths, cue: brain_core::body::Cue, then: &str) -> Result<EventId> {
+    let cue_type = match &cue {
+        brain_core::body::Cue::Time(_) => "time",
+        brain_core::body::Cue::Recurring(_) => "recurring",
+        brain_core::body::Cue::Location { .. } => "location",
+        brain_core::body::Cue::AppFocus(_) => "app_focus",
+        brain_core::body::Cue::CalendarStart(_) => "calendar_start",
+        brain_core::body::Cue::DeviceWake => "device_wake",
+        brain_core::body::Cue::GitBranch(_) => "git_branch",
+    };
+
+    if !crate::notifier::observable(cue_type) {
+        return Err(Error::Usage(format!(
+            "nothing here can watch for '{cue_type}'.\n\
+             \n  This device cannot observe it, and an intent it cannot see is one\n\
+             that would look registered and never fire."
+        )));
+    }
+
+    let mut s = Session::open(paths.clone())?;
+    s.append(Kind::INTENT, None, None, |nonce| {
+        encode(&brain_core::body::IntentBody {
+            nonce,
+            cue: cue.clone(),
+            then: then.to_string(),
+        })
+    })
+}
+
+/// Abandon one.
+///
+/// Retracted rather than removed: a plan somebody gave up on is a fact about
+/// what they tried, and §2.4 rates being easy to walk away from as part of the
+/// case for having intents at all.
+pub fn retract_intent(paths: &StorePaths, id: &EventId) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    s.append(Kind::TOMBSTONE, Some(*id), None, |_nonce| Vec::new())?;
+    Ok(())
+}
+
 /// Record a preference.
 pub fn set_setting(paths: &StorePaths, key: &str, value: Option<&str>) -> Result<()> {
     let mut s = Session::open(paths.clone())?;

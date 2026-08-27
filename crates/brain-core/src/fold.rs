@@ -282,6 +282,31 @@ pub struct Promotion {
     pub event: EventId,
 }
 
+/// An if-then plan.
+///
+/// Cheap to make and cheap to abandon, which is most of the honest case for
+/// having them at all: §2.4 is explicit that the effect is small and the
+/// mechanism is easy to walk away from if it does no good.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct Intent {
+    /// What has to be true.
+    #[n(0)]
+    pub cue: crate::body::Cue,
+    /// What to do about it.
+    #[n(1)]
+    pub then: String,
+    /// When it was made.
+    #[n(2)]
+    pub at: Hlc,
+    /// Whether it has been abandoned.
+    ///
+    /// Retained rather than removed. A plan somebody gave up on is a fact about
+    /// what they tried, and the log does not forget things merely because they
+    /// stopped applying.
+    #[n(3)]
+    pub retracted: bool,
+}
+
 /// What review has done with a note.
 ///
 /// Deliberately not a score. These are inputs to scheduling — §2.8 tunes
@@ -380,6 +405,13 @@ pub struct Projection {
     /// the distinction this map exists to preserve.
     #[n(2)]
     pub settings: BTreeMap<String, Setting>,
+    /// If-then plans, keyed by the event that created each one (§2.4).
+    ///
+    /// Not attached to a note. An intent is a plan about a situation rather
+    /// than a fact about a capture, and hanging it off a note would make
+    /// abandoning the note abandon the plan.
+    #[n(3)]
+    pub intents: BTreeMap<EventId, Intent>,
 }
 
 impl Projection {
@@ -531,9 +563,7 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
             Kind::OCC_DONE => apply_occ(&mut proj, e, |o| o.done = true),
             Kind::OCC_UNDONE => apply_occ(&mut proj, e, |o| o.done = false),
-            // An intent is a plan rather than a fact about any note's content,
-            // so it changes nothing here.
-            Kind::INTENT => {}
+            Kind::INTENT => apply_intent(&mut proj, e),
             Kind::ALIAS => apply_alias(&mut proj, &mut names, e),
             Kind::UNFLAG => apply_unflag(&mut proj, e),
             Kind::RESOLVE => collect_resolve(&mut proj, &mut dismissed, e),
@@ -975,6 +1005,24 @@ fn apply_promote(proj: &mut Projection, e: &Envelope) {
     }
 }
 
+/// Record an if-then plan.
+fn apply_intent(proj: &mut Projection, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(i) = minicbor::decode::<crate::body::IntentBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    proj.intents.insert(
+        e.header.id(),
+        Intent {
+            cue: i.cue,
+            then: i.then,
+            at: e.header.hlc,
+            retracted: false,
+        },
+    );
+}
+
 /// Record that a note was resurfaced, and what became of it.
 ///
 /// Three outcomes and no fourth. `recalled / missed / snoozed` was withdrawn in
@@ -1233,6 +1281,15 @@ fn civil_from_days(z: i64) -> alloc::string::String {
 
 fn apply_tombstone(proj: &mut Projection, e: &Envelope) {
     let Some(tgt) = e.header.tgt else { return };
+
+    // Abandoning a plan, which is a different thing from deleting a note and
+    // is allowed to simply work. §2.4 rates being easy to walk away from as
+    // part of the case for having intents at all.
+    if let Some(intent) = proj.intents.get_mut(&tgt) {
+        intent.retracted = true;
+        return;
+    }
+
     let Some(note) = proj.notes.get_mut(&tgt) else {
         proj.held.insert(e.header.id(), Held::NoTarget);
         return;

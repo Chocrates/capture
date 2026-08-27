@@ -400,6 +400,21 @@ impl Ops {
         Ok(self.get(GESTURE_FIRED)?.and_then(|v| v.parse().ok()))
     }
 
+    /// Whether an intent has already been delivered here.
+    ///
+    /// Local state, keyed by the event that made the intent. Which device
+    /// managed to deliver a notification and when is operational chatter rather
+    /// than a fact about the archive (§2.5.2), and keeping it here means two
+    /// devices can each fire their own local cues without arguing about it.
+    pub fn intent_fired(&self, id: &[u8]) -> Result<bool> {
+        Ok(self.get(&intent_key(id))?.is_some())
+    }
+
+    /// Remember that one was delivered.
+    pub fn mark_intent_fired(&self, id: &[u8], at: u64) -> Result<()> {
+        self.set(&intent_key(id), &at.to_string())
+    }
+
     /// Note that the user did something. Anything.
     ///
     /// The comparison the dead-gesture check needs. A chord that has not fired
@@ -524,6 +539,12 @@ impl Ops {
             .query_row("SELECT COUNT(*) FROM rejected", [], |r| r.get::<_, i64>(0))?
             as u64)
     }
+}
+
+/// The local-state key recording that one intent has fired.
+fn intent_key(id: &[u8]) -> String {
+    let hex: String = id.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("intent_fired.{hex}")
 }
 
 #[cfg(test)]

@@ -282,6 +282,53 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Every if-then plan still standing.
+pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let rows = store.intents()?;
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|i| {
+                format!(
+                    "{{\"cue\":{},\"match\":{},\"at\":{},\"then\":{}}}",
+                    quote(&i.cue_type),
+                    i.cue_match
+                        .as_deref()
+                        .map(quote)
+                        .unwrap_or_else(|| "null".into()),
+                    i.cue_at
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "null".into()),
+                    quote(&i.then_do)
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        say!("No plans.");
+        say!();
+        say!("  brain intent at 2026-09-01T09:00  ring the dentist");
+        say!("  brain intent branch main          run the migration check");
+        return Ok(());
+    }
+
+    for i in &rows {
+        let when = match (i.cue_type.as_str(), &i.cue_match, i.cue_at) {
+            ("time", _, Some(at)) => format!("at {}", stamp(at as u64, None)),
+            ("git_branch", Some(b), _) => format!("on branch {b}"),
+            (t, Some(m), _) => format!("{t} {m}"),
+            (t, None, _) => t.to_string(),
+        };
+        say!("  {:<34}  {}", when, i.then_do);
+    }
+    Ok(())
+}
+
 fn utc() -> brain_time::Zone {
     brain_time::Zone::new("UTC").expect("UTC is always present")
 }

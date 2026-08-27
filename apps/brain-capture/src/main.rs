@@ -14,6 +14,7 @@
 mod autostart;
 mod due;
 mod gnome;
+mod intents;
 mod overlay;
 mod portal;
 mod socket;

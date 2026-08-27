@@ -47,6 +47,14 @@ pub enum Command {
     Tasks { json: bool },
     /// A bounded review session.
     Review { json: bool },
+    /// Make an if-then plan.
+    Intent {
+        cue: String,
+        arg: String,
+        then: String,
+    },
+    /// Every plan still standing.
+    Intents { json: bool },
     /// Record what became of a resurfaced note.
     Reviewed { name: String, outcome: String },
     /// Mark one occurrence of a recurring series complete, or not.
@@ -236,6 +244,31 @@ where
                     command: "agenda".into(),
                     flag: (*extra).clone(),
                 }),
+            }
+        }
+        "intent" => {
+            let rest = &args[1..];
+            match rest {
+                [cue, arg, then @ ..] if !then.is_empty() => Ok(Command::Intent {
+                    cue: cue.clone(),
+                    arg: arg.clone(),
+                    then: then.join(" "),
+                }),
+                _ => Err(Bad::UnknownFlag {
+                    command: "intent".into(),
+                    flag: "expected: brain intent <at|branch> <value> <what to do>".into(),
+                }),
+            }
+        }
+        "intents" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            match rest.iter().find(|a| *a != "--json") {
+                Some(extra) => Err(Bad::UnknownFlag {
+                    command: "intents".into(),
+                    flag: extra.clone(),
+                }),
+                None => Ok(Command::Intents { json }),
             }
         }
         "review" => {

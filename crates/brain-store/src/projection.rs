@@ -296,6 +296,26 @@ CREATE TABLE IF NOT EXISTS review (
   deferred   INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
+-- If-then plans (§2.4).
+--
+-- Retracted ones are kept. A plan somebody gave up on is a fact about what they
+-- tried, and the log does not forget things merely because they stopped
+-- applying.
+CREATE TABLE IF NOT EXISTS intents (
+  id        BLOB PRIMARY KEY,
+  cue_type  TEXT NOT NULL,
+  -- What the cue matches on: an instant for `time`, a branch name for
+  -- `git_branch`, an application for `app_focus`. Null where the cue needs no
+  -- argument, as `device_wake` does not.
+  cue_match TEXT,
+  cue_at    INTEGER,
+  then_do   TEXT NOT NULL,
+  made_at   INTEGER NOT NULL,
+  retracted INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS intents_type ON intents(cue_type, retracted);
+
 CREATE TABLE IF NOT EXISTS mutes (
   scope TEXT NOT NULL,
   value TEXT NOT NULL,
@@ -371,6 +391,21 @@ const REVIEW_ELIGIBLE: &str = "n.text IS NOT NULL
 
 fn utc() -> brain_time::Zone {
     brain_time::Zone::new("UTC").expect("UTC is always present")
+}
+
+/// An if-then plan, as the projection stores it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IntentRow {
+    /// The event that created it.
+    pub id: Vec<u8>,
+    /// `time`, `recurring`, `app_focus`, `git_branch`, `device_wake`, …
+    pub cue_type: String,
+    /// What it matches on, where the cue takes an argument.
+    pub cue_match: Option<String>,
+    /// When it fires, for a time cue.
+    pub cue_at: Option<i64>,
+    /// What to do about it.
+    pub then_do: String,
 }
 
 /// A promotion, as the projection stores it.
@@ -547,7 +582,7 @@ impl Store {
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
-             DELETE FROM occurrences; DELETE FROM review;",
+             DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;",
         )?;
         write_into(&tx, p, now)?;
         tx.commit()?;
@@ -923,6 +958,28 @@ impl Store {
     fn review_query(&self, sql: &str, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
         let mut st = self.conn.prepare(sql)?;
         let rows = st.query_map(params![now, limit as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Every if-then plan still standing.
+    pub fn intents(&self) -> Result<Vec<IntentRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, cue_type, cue_match, cue_at, then_do FROM intents
+             WHERE retracted = 0 ORDER BY made_at",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(IntentRow {
+                id: r.get::<_, Vec<u8>>(0)?,
+                cue_type: r.get(1)?,
+                cue_match: r.get(2)?,
+                cue_at: r.get(3)?,
+                then_do: r.get(4)?,
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1329,6 +1386,20 @@ impl Store {
     /// A key that is absent has never been chosen. That absence is the whole
     /// point: it is what lets status say "default" rather than reporting a
     /// value with no indication of where it came from.
+    /// One setting's value, if it has ever been chosen.
+    ///
+    /// `None` means nobody has decided, which is a different fact from a value
+    /// that happens to be empty — and it is the difference §8.9 exists to keep.
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT v FROM settings WHERE k = ?1", params![key], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
     pub fn settings(&self) -> Result<Vec<(String, Option<String>, String)>> {
         let mut st = self
             .conn
@@ -1782,7 +1853,48 @@ fn to_rule(r: &brain_core::body::RuleSpec) -> brain_time::Rule {
     rule
 }
 
+/// Store an if-then plan.
+fn write_intent(
+    tx: &rusqlite::Transaction<'_>,
+    id: &EventId,
+    i: &brain_core::fold::Intent,
+) -> Result<()> {
+    use brain_core::body::Cue;
+
+    let (cue_type, cue_match, cue_at) = match &i.cue {
+        Cue::Time(ms) => ("time", None, Some(*ms)),
+        Cue::Recurring(_) => ("recurring", None, None),
+        Cue::Location { lat_e6, lon_e6, .. } => {
+            ("location", Some(format!("{lat_e6},{lon_e6}")), None)
+        }
+        Cue::AppFocus(app) => ("app_focus", Some(app.clone()), None),
+        Cue::CalendarStart(_) => ("calendar_start", None, None),
+        Cue::DeviceWake => ("device_wake", None, None),
+        Cue::GitBranch(b) => ("git_branch", Some(b.clone()), None),
+    };
+
+    tx.execute(
+        "INSERT OR REPLACE INTO intents
+           (id, cue_type, cue_match, cue_at, then_do, made_at, retracted)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            id.0.to_vec(),
+            cue_type,
+            cue_match,
+            cue_at,
+            i.then,
+            i.at.wall as i64,
+            i.retracted as i64,
+        ],
+    )?;
+    Ok(())
+}
+
 fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Result<()> {
+    for (id, i) in &p.intents {
+        write_intent(tx, id, i)?;
+    }
+
     for (k, v) in &p.settings {
         tx.execute(
             "INSERT OR REPLACE INTO settings (k, v, set_by, hlc_wall, hlc_counter)

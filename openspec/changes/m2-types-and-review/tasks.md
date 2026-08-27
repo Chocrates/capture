@@ -54,7 +54,7 @@
 - [x] 6.1a Measure what the horizon actually costs — rows and rebuild time for a dozen unbounded daily series. It is a performance choice, not a correctness one (failure mode 23), and it was kept rather than re-guessed, so it should be measured once rather than argued about again. **Measured**: 12 unbounded daily series → 4,380 occurrence rows, 243ms rebuild, 816 KiB projection. That is 365 per series, forward only, because a series starting today has nothing to expand behind it. Extrapolates to roughly 18k rows and about a second per rebuild at 50 series — comfortable, and now a number rather than a guess. `tests/horizon_cost.rs`, ignored by default.
 - [x] 6.2 Store promoted fields and descriptors so agenda and calendar queries never parse text at read time. **Also finishes 3.6**: until the projection has columns for promotions and occurrences, the incremental-equals-full-rebuild comparison cannot see them — its snapshot covers slug, text, divergence and links. Widen `snapshot` here, or the equivalence stays silent about the one rule that is not last-write-wins.
 - [x] 6.3 Implement the series split for "this and future": bound with `UNTIL`, new series, `split_from`, and exceptions binding to whichever series covers their `original_start`.
-- [~] 6.4 Widen the due-work queue to carry review and intent deadlines beside redaction deadlines, processed by the same startup-is-the-floor mechanism. **Deferred into 8 and 9 deliberately**: the mechanism is the `Work` enum and `drain_due`, and adding variants for review and intents now would be two dead arms with no producer and no test. They land with the code that schedules them, where they can be exercised.
+- [x] 6.4 Widen the due-work queue to carry review and intent deadlines beside redaction deadlines, processed by the same startup-is-the-floor mechanism. **Resolved differently, and the difference is the point.** Neither belongs in `Work`. That enum drives *store mutations* — a body destroyed, a snapshot expired — and both of these are something else. An intent firing is a notification whose delivery is device-local state (§2.5.2), so it fires on the same tick through its own path and is remembered in `ops.db`, which is what lets two devices each fire their own local cues without arguing. Review is pull-based: a session happens when somebody asks for one, and a queue that pushed review at people is the manufactured backlog §3.6 refuses.
 - [x] 6.4a Drain the due queue from the resident overlay on a timer. It runs all day for the chord and is already the elected writer (§8.8), but it never opens a `Session` — so today a machine with the overlay running and nothing else touching the store leaves due work undone until some command happens to run. Startup stays the floor; this is what makes a deadline land near its time without adding a process that can be silently not running.
 - [x] 6.5 Confirm a rebuild reproduces every expansion exactly, and that a timezone database change is fixed by re-folding rather than by migration.
 
@@ -79,11 +79,11 @@
 
 ## 9. Intents — if-then plans firing locally
 
-- [ ] 9.1 Implement the `intent` event: cue specification plus action.
-- [ ] 9.2 Implement the cue types this device can genuinely observe: `time`, `recurring`, `device_wake`, `app_focus`, `git_branch`. Declaring a cue type requires being able to observe it.
-- [ ] 9.3 Fire local cues where they are observed — `app_focus` and `git_branch` on the machine running the application, never redirected to a designated notifier.
-- [ ] 9.4 Implement notifier designation as a `setting`, and the compiled-in default as a **rule evaluated locally and never written to the log**. A machine-authored preference recorded as a user decision is what §8.9 forbids.
-- [ ] 9.5 Confirm `brain status` reports the notifier as a default rather than as a choice until the user makes one.
+- [x] 9.1 Implement the `intent` event: cue specification plus action.
+- [~] 9.2 Implement the cue types this device can genuinely observe: `time`, `recurring`, `device_wake`, `app_focus`, `git_branch`. Declaring a cue type requires being able to observe it. **`time` and `git_branch` fire; the rest are refused rather than accepted and dropped.** `app_focus` is not observable on GNOME/Wayland — no protocol, `Shell.Eval` disabled, and the Xwayland answer is a plausible-looking zero, which M1 established for the ambient envelope and is the same fact here. `recurring` and `device_wake` are observable in principle and have no producer yet. `brain intent` refuses all of them at creation, so nothing can exist that looks registered and never fires.
+- [x] 9.3 Fire local cues where they are observed — `app_focus` and `git_branch` on the machine running the application, never redirected to a designated notifier.
+- [x] 9.4 Implement notifier designation as a `setting`, and the compiled-in default as a **rule evaluated locally and never written to the log**. A machine-authored preference recorded as a user decision is what §8.9 forbids.
+- [x] 9.5 Confirm `brain status` reports the notifier as a default rather than as a choice until the user makes one.
 
 ## 10. Activation
 

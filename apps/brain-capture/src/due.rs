@@ -35,6 +35,14 @@ use std::time::Duration;
 use brain_store::StorePaths;
 use brain_store::session::Session;
 
+/// The wall clock, for deciding whether a deadline has arrived.
+///
+/// Read here, at the boundary, and passed inward as a value — the same rule
+/// everything below this layer follows.
+fn now() -> i64 {
+    jiff::Timestamp::now().as_millisecond().max(0)
+}
+
 /// How often to look.
 ///
 /// A minute is chosen against the two deadlines this actually serves. A
@@ -66,6 +74,11 @@ pub fn tick(paths: StorePaths) -> ! {
     let every = interval();
     loop {
         std::thread::sleep(every);
+
+        // Cues that may have come true. Before the lock, because watching for
+        // one needs only a read — and a cue that fires should not wait behind
+        // whatever else is writing.
+        crate::intents::check(&paths, now());
 
         // A failure to open is somebody else writing. They took the lock, which
         // means they started, which means they drained — so there is nothing to
