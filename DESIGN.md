@@ -1921,6 +1921,7 @@ fixed rather than tuned per-shape so a misfire is diagnosable:
 | 0.90 | a complete date or datetime behind a marker: `on aug 14`, `at 2pm`, `by friday 9am` |
 | 0.85 | two vocabulary items adjacent and unambiguous: `thursday 2pm`, `aug 1-14`, `in 3 weeks` |
 | 0.80 | a recurrence head with a body: `every weekday at 7`, `daily` |
+| 0.80 | a task verb and a bare day: `call the dentist tomorrow`, `email sarah on friday` |
 | 0.70 | a bare weekday or day_word with no clock: `dentist thursday` |
 | 0.60 | a `tod_word` standing in for a clock: `tomorrow morning` |
 | 0.40 | a task verb with no temporal expression at all: `send sarah the migration doc` |
@@ -1935,6 +1936,30 @@ review pay order check ping schedule renew cancel submit file print` at the head
 with no temporal expression anywhere, scores 0.40. Verbs are an open class and any list is wrong
 at the edges, so this one never promotes on its own — it exists so review can offer "task?" on a
 line that plainly is one, and no further.
+
+**A verb and a day compose, and that is the one place the tiers meet.** Written after a parser
+existed and the first draft of this section did not survive contact with it: a task verb in front
+of a bare day was read as the day alone, and the verb was thrown away. "Call the dentist
+tomorrow" became an all-day event on Thursday. That is wrong by §3.6's own table — an event
+occupies time and has no state, a task has state and occupies none, and calling the dentist does
+not occupy Thursday.
+
+So a task verb at the head plus a **bare day** is a task with a floating due date, at 0.80. Two
+conditions, both load-bearing:
+
+- **Only a bare day composes.** A clock means something that occupies time whatever verb
+  introduced it: `call sarah at 3pm` is a call you are on at three, and stays an event. A range
+  or a recurrence is already a shape of its own.
+- **The day stays floating.** "Due Friday" is not 00:00 UTC on Friday (§3.6), and storing an
+  instant would put a midnight on the calendar nobody wrote.
+
+0.80 is above the floor, which is a decision rather than a nudge, and the argument is the cost
+asymmetry this section already rests on. §3.1.3 prices a false positive as a wrongly created
+*calendar entry* — something with a time, a position on a grid, and a notifier that can fire it.
+A wrongly created task has none of those: it is a line in a list with a date on it, removed by an
+ordinary correction. It is kept below 0.85 all the same, because two adjacent vocabulary items
+are a stronger claim about what was *written* than a verb plus a day, which is a claim about what
+was *meant*.
 
 #### What is deliberately absent
 

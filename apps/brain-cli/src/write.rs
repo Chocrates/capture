@@ -223,6 +223,31 @@ pub fn reviewed(paths: StorePaths, name: &str, outcome: &str) -> Result<()> {
     Ok(())
 }
 
+/// Assign the task type by hand.
+///
+/// The recognizer promotes a task only where a verb and a day agree (§3.1.5),
+/// which leaves every other task to be said out loud. Pinned, like every
+/// correction, so no later reparse takes it back off.
+pub fn task(paths: StorePaths, name: &str, due: Option<&str>) -> Result<()> {
+    brain_store::promote::as_task(&paths, name, due)?;
+    match due {
+        Some(d) => say!("A task, due {d}."),
+        None => say!("A task, with no due date."),
+    }
+    Ok(())
+}
+
+/// Mark a task done, or open again.
+pub fn task_done(paths: StorePaths, name: &str, done: bool) -> Result<()> {
+    brain_store::promote::set_done(&paths, name, done)?;
+    if done {
+        say!("Done.");
+    } else {
+        say!("Open again.");
+    }
+    Ok(())
+}
+
 /// Say that missing an instance of a series leaves something owed.
 ///
 /// Only ever set by a person. §3.6 is explicit that the recognizer must not

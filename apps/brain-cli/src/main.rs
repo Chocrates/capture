@@ -82,6 +82,8 @@ fn run(command: Command) -> Result<()> {
         Command::Show { name, json } => read::show(&paths()?, &name, json),
         Command::Agenda { day, json } => read::agenda(&paths()?, day.as_deref(), json),
         Command::Tasks { json } => read::tasks(&paths()?, json),
+        Command::Task { name, due } => write::task(paths()?, &name, due.as_deref()),
+        Command::TaskDone { name, done } => write::task_done(paths()?, &name, done),
         Command::Review { json } => read::review(&paths()?, json),
         Command::Intent { cue, arg, then } => write::intent(paths()?, &cue, &arg, &then),
         Command::Intents { json } => read::intents(&paths()?, json),

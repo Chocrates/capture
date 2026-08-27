@@ -75,8 +75,19 @@ pub enum When {
 pub enum Shape {
     /// Nothing temporal, and no reason to think it is a task.
     Nothing,
-    /// A task verb at the head, and no temporal expression anywhere.
-    Task,
+    /// A task verb at the head: something to do, which occupies no time.
+    ///
+    /// §3.6's table is the discriminator, and it is about time rather than
+    /// wording: an event *occupies* time and has no state, a task has state and
+    /// occupies none. So a clock makes an event however the sentence starts —
+    /// "call sarah at 3pm" is a call you are on at three — and a bare day
+    /// behind a task verb makes a task that is *due* that day. "Due Friday" is
+    /// deliberately a floating date and never an instant, because 00:00 UTC on
+    /// Friday is a different claim (§3.6).
+    Task {
+        /// The day it is due, where one was written.
+        due: Option<FloatingDate>,
+    },
     /// One point in time.
     Point(When),
     /// A span of days.
@@ -150,6 +161,26 @@ mod band {
     pub const BARE_DAY: u32 = 70;
     /// A time-of-day word standing in for a clock.
     pub const VAGUE: u32 = 60;
+    /// A task verb and a bare day: `call the dentist tomorrow`.
+    ///
+    /// A new band rather than a moved one. Nothing scored this shape before,
+    /// because the shapes did not compose: a task verb in front of a date was
+    /// read as a bare date and the verb was thrown away, so `call the dentist
+    /// tomorrow` became an all-day event and `finish the deck by friday` became
+    /// one too. Both are things to do, and neither occupies a Friday.
+    ///
+    /// Above the floor, which is a decision and argued rather than nudged.
+    /// §3.1.3 prices a false positive as a wrongly created *calendar entry* —
+    /// something with a time, on a grid, that a notifier can fire. A wrongly
+    /// created task has none of those: no time, no grid position, nothing that
+    /// fires, and `brain done` or an ordinary correction removes it. The
+    /// evidence is also two independent signals agreeing rather than one — a
+    /// verb at the head and a day — where the 0.70 band is a day alone.
+    ///
+    /// Kept below 0.85 all the same: two adjacent vocabulary items are a
+    /// stronger claim about *what was written* than a verb plus a day, which is
+    /// a claim about what was meant by it.
+    pub const TASK_DUE: u32 = 80;
     /// A task verb and no temporal expression.
     pub const TASK_VERB: u32 = 40;
 }
@@ -175,7 +206,16 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         };
     }
 
-    if let Some((shape, confidence)) = temporal(&tokens, now, zone) {
+    // A task verb at the head is a hint about what the sentence is *for*.
+    // Verbs are an open class and any list of them is wrong at the edges, so it
+    // is never the whole reading — but it does decide between two readings of
+    // the same day, and that is what the composition below is.
+    let head_is_verb = tokens
+        .iter()
+        .find(|t| t.class != Class::Break)
+        .is_some_and(|t| t.class == Class::TaskVerb);
+
+    if let Some((shape, confidence)) = temporal(&tokens, now, zone, head_is_verb) {
         return Recognition {
             shape,
             confidence,
@@ -184,17 +224,12 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         };
     }
 
-    // No temporal expression anywhere. A task verb at the head is a hint and
-    // nothing more — verbs are an open class, any list is wrong at the edges,
-    // and this scores below the floor so it never promotes on its own.
-    let head_is_verb = tokens
-        .iter()
-        .find(|t| t.class != Class::Break)
-        .is_some_and(|t| t.class == Class::TaskVerb);
-
+    // No temporal expression anywhere. The verb alone stays below the floor, so
+    // it never promotes on its own — it exists so a surface can offer "task?"
+    // as a suggestion and apply nothing.
     Recognition {
         shape: if head_is_verb {
-            Shape::Task
+            Shape::Task { due: None }
         } else {
             Shape::Nothing
         },
@@ -242,7 +277,12 @@ fn duration(v: &str) -> Option<u32> {
 }
 
 /// Tier 2, over the productions of §3.1.5.
-fn temporal(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
+fn temporal(
+    tokens: &[Token<'_>],
+    now: i64,
+    zone: Zone,
+    head_is_verb: bool,
+) -> Option<(Shape, u32)> {
     // Recurrence first: `every weekday at 7` also contains a weekday, and the
     // longer reading is the one meant.
     if let Some(r) = recurrence(tokens) {
@@ -251,7 +291,11 @@ fn temporal(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> 
     if let Some(r) = range(tokens, now, zone) {
         return Some(r);
     }
-    point(tokens, now, zone)
+    // `head_is_verb` reaches only `point`, because it can only change one
+    // reading: a day into a due date. A range is a span of days and a
+    // recurrence is a rule, and neither becomes a task by being introduced by a
+    // verb — "review the docs every friday" is still a recurring obligation.
+    point(tokens, now, zone, head_is_verb)
 }
 
 /// `every weekday at 7`, `each tuesday`, `daily`.
@@ -435,7 +479,7 @@ fn month_number(word: &str) -> Option<u8> {
 }
 
 /// `dentist thursday 2pm`, `on aug 14`, `in 3 weeks`, `tomorrow morning`.
-fn point(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
+fn point(tokens: &[Token<'_>], now: i64, zone: Zone, head_is_verb: bool) -> Option<(Shape, u32)> {
     for (i, t) in tokens.iter().enumerate() {
         if !guarded(tokens, t) {
             continue;
@@ -554,6 +598,35 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
             Some(m) => When::Moment(instant(anchor, m, zone)?),
             None => When::Date(anchor),
         };
+
+        // A day behind a task verb is a due date rather than an all-day event.
+        // The one place the two tiers compose, decided here because this is
+        // where the anchor kind is known — and the kind is what settles it.
+        //
+        // Three conditions, and every one of them was forced by a case that got
+        // it wrong:
+        //
+        // - **A day, not a moment.** §3.6's table is about time, not wording: an
+        //   event occupies time and has no state, a task has state and occupies
+        //   none. "Call sarah at 3pm" is a call you are on at three.
+        // - **A calendar day, not an offset.** "Check back in 3 weeks" is a
+        //   forward nudge, not something you are overdue on come the 23rd — and
+        //   §3.1's own worked example reads "revisit in Q2" as a note with a
+        //   review prompt rather than a task. Caught by the existing band test,
+        //   which is the only reason the distinction is here.
+        // - **A verb at the head.** "Dentist thursday" is an appointment nobody
+        //   phrased as a task, and it keeps its own band.
+        if head_is_verb
+            && matches!(kind, Anchor::Day | Anchor::CompleteDate)
+            && let When::Date(d) = when
+        {
+            // Deliberately the composed band even where the date alone scored
+            // higher. Confidence is in the whole reading, and the weakest claim
+            // in it is that this is a task at all — a certain date does not make
+            // that certain.
+            return Some((Shape::Task { due: Some(d) }, band::TASK_DUE));
+        }
+
         return Some((Shape::Point(when), confidence));
     }
     None

@@ -60,7 +60,21 @@ pub fn promoted_from(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> 
     }
 
     match &r.shape {
-        Shape::Nothing | Shape::Task => None,
+        Shape::Nothing => None,
+
+        // A verb with nothing else stays a suggestion. It is below the floor
+        // and `clears_floor` has already refused it; the arm is here so that
+        // adding a band later cannot promote one by accident.
+        Shape::Task { due: None } => None,
+
+        // Something to do, due on a day. A floating date and never an instant:
+        // "due Friday" is not 00:00 UTC on Friday, and §3.6 makes that the
+        // difference between a due date and an appointment nobody made.
+        Shape::Task { due: Some(d) } => Some(Promoted::Task(TaskFields {
+            done: false,
+            due: Some(format!("{d}")),
+            order: None,
+        })),
 
         Shape::Point(When::Date(d)) => Some(Promoted::Event(EventFields {
             when: BodyWhen::AllDay {
@@ -218,6 +232,76 @@ pub fn correct(paths: &StorePaths, name: &str, as_: Promoted) -> Result<()> {
         })
     })?;
     Ok(())
+}
+
+/// Assign a task by hand, with an optional due date.
+///
+/// The hand-correction path for the type the recognizer is most cautious
+/// about. A verb alone stays a suggestion forever — verbs are an open class and
+/// any list is wrong at the edges — so there has to be a way to say "yes, this
+/// one" without editing the text to trick the parser into agreeing.
+///
+/// The due date is a floating date and is parsed as one, so a malformed date is
+/// refused here rather than stored and discovered later by a query that
+/// silently matches nothing.
+pub fn as_task(paths: &StorePaths, name: &str, due: Option<&str>) -> Result<()> {
+    let due = match due {
+        None => None,
+        Some(d) => {
+            let parsed = brain_time::FloatingDate::parse(d).ok_or_else(|| {
+                crate::Error::Usage(format!("'{d}' is not a date; use YYYY-MM-DD"))
+            })?;
+            // Normalised rather than echoed, so `2026-6-1` and `2026-06-01` are
+            // one value in the projection and a query for one finds the other.
+            Some(alloc_string(parsed))
+        }
+    };
+
+    correct(
+        paths,
+        name,
+        Promoted::Task(TaskFields {
+            done: false,
+            due,
+            order: None,
+        }),
+    )
+}
+
+fn alloc_string(d: brain_time::FloatingDate) -> String {
+    format!("{d}")
+}
+
+/// Mark a task done, or open again.
+///
+/// Reads the current fields rather than replacing them, because a completion
+/// must not silently discard a due date somebody set. Undoing is the same
+/// operation with the flag the other way — §6 rates a state that cannot be
+/// reversed from any device as the failure worth avoiding, and a mistaken tick
+/// is the ordinary case rather than the exotic one.
+pub fn set_done(paths: &StorePaths, name: &str, done: bool) -> Result<()> {
+    let current = {
+        let store = crate::projection::Store::open_read(&crate::projection::generation_path(
+            &paths.state,
+            crate::ops::Ops::open_read(&paths.ops)?.generation()?,
+        ))?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        store
+            .promotion_of(&tgt)?
+            .map(|p| p.as_)
+            .ok_or_else(|| crate::Error::Usage(format!("'{name}' is not a task")))?
+    };
+
+    let Promoted::Task(mut fields) = current else {
+        return Err(crate::Error::Usage(format!(
+            "'{name}' is not a task; a series occurrence is completed with its own date"
+        )));
+    };
+
+    fields.done = done;
+    correct(paths, name, Promoted::Task(fields))
 }
 
 /// Say that missing an instance of a series leaves something owed.

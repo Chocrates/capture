@@ -86,7 +86,13 @@ pub use token::{Class, Token, tokenize};
 /// could not express: a bare clock meaning today ("meeting at 14:00"), and
 /// offsets shorter than a day ("in 10 minutes"). Both were found by pointing
 /// the recognizer at an actual store rather than at its own examples.
-pub const GRAMMAR_VERSION: u32 = 2;
+///
+/// Version 3 made the two tiers compose. A task verb in front of a day was
+/// read as the day alone and the verb was discarded, so "call the dentist
+/// tomorrow" became an all-day event on Thursday and "finish the deck by
+/// friday" became one on Friday — neither of which occupies the day it names
+/// (§3.6). It is now a task with a floating due date, at a band of its own.
+pub const GRAMMAR_VERSION: u32 = 3;
 
 /// A word the recognizer knows, and what it is worth.
 ///
@@ -471,6 +477,10 @@ pub const BANDS: &[(&str, &str)] = &[
     (
         "0.60",
         "a tod_word standing in for a clock: tomorrow morning",
+    ),
+    (
+        "0.80",
+        "a task verb and a bare day: call the dentist tomorrow",
     ),
     (
         "0.40",

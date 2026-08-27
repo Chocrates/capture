@@ -159,6 +159,16 @@ pub struct Occurrence {
     /// `gap` or `ambiguous`, when a daylight-saving transition moved it.
     pub shift: Option<String>,
     pub text: Option<String>,
+    /// A task due on this day rather than something that occurs on it.
+    ///
+    /// The two are drawn together because §4.4's agenda is "what is due and
+    /// what occurs" and somebody looking at a day wants one answer. They are
+    /// still distinguished, because completing them is not the same operation:
+    /// an occurrence takes `occ_done` against its start, and a task is a
+    /// `promote` carrying its state.
+    pub due: bool,
+    /// Where a due task's date has already passed, the day it was due.
+    pub was_due: Option<String>,
 }
 
 /// One note offered in a review session.
@@ -325,7 +335,8 @@ fn suggestion_for(text: &str, tz: Option<&str>) -> Option<String> {
     }
 
     let what = match &r.shape {
-        brain_parse::Shape::Task => String::from("a task"),
+        brain_parse::Shape::Task { due: None } => String::from("a task"),
+        brain_parse::Shape::Task { due: Some(d) } => format!("a task due {d}"),
         brain_parse::Shape::Point(brain_parse::When::Date(d)) => format!("something on {d}"),
         brain_parse::Shape::Point(brain_parse::When::Moment(ms)) => {
             let (h, m) = brain_time::civil_clock(*ms, zone);
@@ -370,6 +381,8 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 done: false,
                 shift: None,
                 text: s.text_of(&tgt)?,
+                due: false,
+                was_due: None,
             });
         }
 
@@ -387,11 +400,66 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 done: o.done,
                 shift: o.shift,
                 text: o.title.clone().or(s.text_of(&tgt)?),
+                due: false,
+                was_due: None,
             });
+        }
+
+        // What is due, beside what occurs. Until this existed the window drew
+        // only the second half: a task due today was listed by `brain tasks`
+        // and invisible on the day it mattered, which is the same failure shape
+        // as an intent that is registered and never fires.
+        for (tgt, done) in s.tasks_due_on(&day)? {
+            out.push(Occurrence {
+                slug: s.slug_of(&tgt)?.unwrap_or_default(),
+                occ: from,
+                start_ms: from,
+                all_day: true,
+                done,
+                shift: None,
+                text: s.text_of(&tgt)?,
+                due: true,
+                was_due: None,
+            });
+        }
+
+        // Overdue tasks, on today only. Still open rather than lapsed — §3.6
+        // makes a task the one thing here that genuinely carries forward, and
+        // saying so once is not a backlog.
+        let today = format!("{}", brain_time::civil_date(now_ms() as i64, zone));
+        if day == today {
+            for tgt in s.tasks_overdue(&today)? {
+                let was = s.promotion_of(&tgt)?.and_then(|p| match p.as_ {
+                    brain_core::body::Promoted::Task(t) => t.due,
+                    _ => None,
+                });
+                out.push(Occurrence {
+                    slug: s.slug_of(&tgt)?.unwrap_or_default(),
+                    occ: from,
+                    start_ms: from,
+                    all_day: true,
+                    done: false,
+                    shift: None,
+                    text: s.text_of(&tgt)?,
+                    due: true,
+                    was_due: was,
+                });
+            }
         }
 
         Ok(out)
     })())
+}
+
+/// Mark a task done, or open again.
+///
+/// Not `set_occurrence`, and the difference is §3.6's: a task has state of its
+/// own, where a series has state per instance and nothing accumulates between
+/// them. Sending one through the other would either lose the due date or
+/// invent an occurrence that no rule produced.
+#[tauri::command]
+pub fn set_task_done(name: String, done: bool) -> std::result::Result<(), String> {
+    wire((|| brain_store::promote::set_done(&paths()?, &name, done))())
 }
 
 /// Mark one occurrence complete, or not.

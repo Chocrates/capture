@@ -426,3 +426,170 @@ fn nothing_but_a_series_can_owe_you_anything() {
         "unhelpful refusal: {e}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tasks. §3.6's table is the whole of this: a task has state and occupies no
+// time, where an event occupies time and has none.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_task_is_due_on_a_day_rather_than_occurring_on_it() {
+    // The agenda is "what is due and what occurs" (§4.4). Until `tasks_due_on`
+    // existed it answered only the second half, so a task due today was listed
+    // by `brain tasks` and invisible on the day it mattered — the same failure
+    // shape as an intent that is registered and never fires.
+    let scratch = Scratch::new("task-due");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("call the dentist").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    promote::as_task(&paths, &slug, Some("2026-06-05")).unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+    let due = s.state.tasks_due_on("2026-06-05").unwrap();
+    assert_eq!(due.len(), 1, "the task is not due on the day it says");
+    assert!(!due[0].1, "a new task is not finished");
+    assert!(
+        s.state.tasks_due_on("2026-06-04").unwrap().is_empty(),
+        "a due date must not spill onto neighbouring days"
+    );
+
+    // It does not occur. Nothing was expanded, because a task occupies no time.
+    let from = brain_time::at_local(
+        brain_time::FloatingDate::parse("2026-06-05").unwrap(),
+        0,
+        0,
+        brain_time::Zone::new("UTC").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        s.state
+            .happening_between(from, from + 86_400_000)
+            .unwrap()
+            .is_empty(),
+        "a task appeared on the hour axis, which is what §3.6 says it has none of"
+    );
+}
+
+#[test]
+fn a_finished_task_stops_being_due() {
+    let scratch = Scratch::new("task-done");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("pay the invoice").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    promote::as_task(&paths, &slug, Some("2026-06-05")).unwrap();
+    promote::set_done(&paths, &slug, true).unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+
+    // Still listed on its own day, and flagged. Not because a finished thing is
+    // still due — it is not, and `tasks_overdue` refuses it below — but because
+    // a task that vanished the instant it was ticked would leave a mistaken
+    // tick reversible only by hunting for the note, where an occurrence stays
+    // put with a mark against it and un-ticks in one gesture.
+    match s.state.tasks_due_on("2026-06-05").unwrap().as_slice() {
+        [(_, done)] => assert!(*done, "a finished task is not reported as finished"),
+        other => panic!("expected the finished task on its own day, got {other:?}"),
+    }
+
+    // And the due date survived the completion. Reading the fields and writing
+    // them back is what makes that true; replacing them would have dropped it.
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    match s.state.promotion_of(&tgt).unwrap().map(|p| p.as_) {
+        Some(Promoted::Task(t)) => {
+            assert!(t.done);
+            assert_eq!(t.due.as_deref(), Some("2026-06-05"));
+        }
+        other => panic!("expected a finished task, got {other:?}"),
+    }
+    drop(s);
+
+    // Reversible from anywhere, because a mistaken tick is the ordinary case.
+    promote::set_done(&paths, &slug, false).unwrap();
+    let s = Session::open(paths.clone()).unwrap();
+    match s.state.tasks_due_on("2026-06-05").unwrap().as_slice() {
+        [(_, done)] => assert!(!*done, "un-ticking did not reopen it"),
+        other => panic!("expected one open task, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_open_task_whose_day_has_passed_is_overdue_rather_than_lapsed() {
+    // §3.6 draws the line: a task is the one thing here that genuinely carries
+    // forward — it is not finished — where a missed occurrence of a series
+    // lapses and nothing accumulates.
+    let scratch = Scratch::new("task-overdue");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("renew the domain").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    promote::as_task(&paths, &slug, Some("2026-05-30")).unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+    assert_eq!(
+        s.state.tasks_overdue("2026-06-01").unwrap().len(),
+        1,
+        "an open task past its day is not reported"
+    );
+    assert!(
+        s.state.tasks_due_on("2026-06-01").unwrap().is_empty(),
+        "an overdue task must not also be reported as due today"
+    );
+    assert!(
+        s.state.tasks_overdue("2026-05-29").unwrap().is_empty(),
+        "a task became overdue before its own due date"
+    );
+}
+
+#[test]
+fn a_due_date_that_is_not_a_date_is_refused() {
+    // Refused where it is written rather than stored and discovered later by a
+    // query that silently matches nothing.
+    let scratch = Scratch::new("task-baddate");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("book the flights").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    let e = promote::as_task(&paths, &slug, Some("tuesday")).unwrap_err();
+    assert!(
+        e.to_string().contains("not a date"),
+        "unhelpful refusal: {e}"
+    );
+}
+
+#[test]
+fn a_finished_task_does_not_follow_you_to_tomorrow() {
+    // The other half of keeping it visible. It stays on its own day so a
+    // mistaken tick is one gesture from being undone; it does not accumulate
+    // onto every day after, which is the manufactured backlog §3.6 refuses.
+    let scratch = Scratch::new("task-not-forward");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("file the return").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    promote::as_task(&paths, &slug, Some("2026-06-05")).unwrap();
+    promote::set_done(&paths, &slug, true).unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+    assert!(s.state.tasks_due_on("2026-06-06").unwrap().is_empty());
+    assert!(
+        s.state.tasks_overdue("2026-06-30").unwrap().is_empty(),
+        "a finished task became overdue"
+    );
+}

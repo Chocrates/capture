@@ -131,9 +131,21 @@ async function showAgenda(day) {
     return;
   }
 
-  const allDay = rows.filter((r) => r.all_day);
-  const timed = rows.filter((r) => !r.all_day);
+  // Three bands, and the first is not a subdivision of the second. "All day"
+  // is a claim about an event's extent — it occupies the whole of the day — and
+  // a task due today occupies none of it. Filing one under the other said
+  // something false about every task in the list, and said it most loudly about
+  // an overdue one, which is not on this day at all.
+  const due = rows.filter((r) => r.due);
+  const allDay = rows.filter((r) => !r.due && r.all_day);
+  const timed = rows.filter((r) => !r.due && !r.all_day);
 
+  if (due.length) {
+    const band = el("div", "all-day");
+    band.append(el("div", "band-label", "due"));
+    for (const r of due) band.append(agendaRow(r));
+    view.append(band);
+  }
   if (allDay.length) {
     const band = el("div", "all-day");
     band.append(el("div", "band-label", "all day"));
@@ -146,7 +158,11 @@ async function showAgenda(day) {
 function agendaRow(r) {
   const row = el("div", `agenda-row${r.done ? " done" : ""}`);
 
-  row.append(el("span", "when", r.all_day ? "" : clockOf(r.start_ms)));
+  // What is due and what occurs, in one list and still told apart. A due date
+  // has no hour — putting one on it would invent a deadline nobody wrote — so
+  // the column that would hold a clock says what the row is instead.
+  const when = r.due ? (r.was_due ? `was due ${r.was_due}` : "due") : r.all_day ? "" : clockOf(r.start_ms);
+  row.append(el("span", r.due ? "when due" : "when", when));
 
   const body = el("span", "what", r.text || "(no readable text)");
   row.append(body);
@@ -162,7 +178,18 @@ function agendaRow(r) {
   // Completion is per occurrence, not per series. Ticking Tuesday says nothing
   // about Wednesday, and un-ticking has to be possible because a mistaken tick
   // is a thing that happens.
-  if (!r.all_day) {
+  if (r.due) {
+    // A task's own state, not an occurrence's. §3.6 keeps them apart: a task
+    // has state, a series has state per instance and nothing accumulates
+    // between them — and sending one through the other would either lose the
+    // due date or invent an occurrence no rule produced.
+    const tick = el("button", "act", r.done ? "✓ done" : "mark done");
+    tick.addEventListener("click", async () => {
+      await call("set_task_done", { name: r.slug, done: !r.done });
+      showAgenda(agendaDay);
+    });
+    row.append(tick);
+  } else if (!r.all_day) {
     const tick = el("button", "act", r.done ? "✓ done" : "mark done");
     tick.addEventListener("click", async () => {
       await call("set_occurrence", {

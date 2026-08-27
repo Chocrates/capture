@@ -111,6 +111,10 @@ h2:first-child { margin-top: 0; }
         background: var(--panel); border: 1px solid var(--line);
         border-radius: 8px; padding: .8rem; }
 
+/* A due date is not a time. It reads as what it is rather than sitting in an
+ * empty clock column pretending to have an hour. */
+.when.due { color: var(--warn); font-variant-numeric: normal; }
+
 /* Review. A card is not a row: it is a thing being offered, with answers on it,
  * so it does not pretend to be clickable the way a timeline row does. */
 .note.review, .note.nagging { cursor: default; }

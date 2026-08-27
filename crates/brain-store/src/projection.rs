@@ -888,6 +888,67 @@ impl Store {
         Ok(out)
     }
 
+    /// Tasks due on a day, still open.
+    ///
+    /// The agenda is "what is due and what occurs" (§4.4), and until this
+    /// existed it was only the second half: a task due today existed, was
+    /// listed by `brain tasks`, and was invisible on the day it mattered. That
+    /// is the same failure shape as an intent that is registered and never
+    /// fires — the system holds the fact and never says it.
+    ///
+    /// Due dates are floating and compared as text, which is exactly right for
+    /// them: "due Friday" is Friday wherever you are, and converting it to an
+    /// instant to compare would reintroduce the midnight §3.6 refuses.
+    ///
+    /// Finished ones come back too, flagged, and only on their own day. A
+    /// surface that made a task vanish the instant it was ticked would leave no
+    /// way to undo a mistaken tick except by hunting for the note — where an
+    /// occurrence stays put with a mark against it and un-ticks in one gesture.
+    /// §6 rates a state that cannot be reversed as the failure worth avoiding,
+    /// and a mistaken tick is the ordinary case rather than the exotic one.
+    /// They do not follow you forward: tomorrow's agenda has no reason to
+    /// mention what was finished today.
+    pub fn tasks_due_on(&self, date: &str) -> Result<Vec<(EventId, bool)>> {
+        let mut st = self.conn.prepare(
+            "SELECT tgt, COALESCE(done, 0) FROM promotions
+             WHERE kind = 'task' AND due = ?1
+             ORDER BY COALESCE(done, 0) ASC",
+        )?;
+        let rows = st.query_map(params![date], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? != 0))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, done) = r?;
+            if let Some(id) = id_from(id) {
+                out.push((id, done));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Open tasks whose due date has passed.
+    ///
+    /// Overdue rather than lapsed, and the difference is §3.6's: a task carries
+    /// forward by its nature — it is still open — where a missed occurrence of
+    /// a series lapses and nothing accumulates.
+    pub fn tasks_overdue(&self, today: &str) -> Result<Vec<EventId>> {
+        let mut st = self.conn.prepare(
+            "SELECT tgt FROM promotions
+             WHERE kind = 'task' AND due IS NOT NULL AND due < ?1
+               AND COALESCE(done, 0) = 0
+             ORDER BY due ASC",
+        )?;
+        let rows = st.query_map(params![today], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(id) = id_from(r?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
     // ------------------------------------------------------------ review ----
     //
     // The three selection tiers of §2.8, in its order. Each excludes the same

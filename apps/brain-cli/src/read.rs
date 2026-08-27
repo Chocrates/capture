@@ -106,6 +106,38 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         rows.push((slug, o, text));
     }
 
+    // Tasks due on this day. §4.4's agenda is "what is due and what occurs",
+    // and until this existed it was only the second half — a task due today was
+    // in `brain tasks`, and invisible on the day it mattered.
+    //
+    // In the all-day band, because a due date has no hour and putting one on it
+    // would invent a deadline nobody wrote.
+    let mut due = Vec::new();
+    for (tgt, done) in store.tasks_due_on(&format!("{date}"))? {
+        let slug = store.slug_of(&tgt)?.unwrap_or_default();
+        let text = store.text_of(&tgt)?;
+        due.push((slug, text, done));
+    }
+
+    // Overdue tasks, on today only. Still open rather than lapsed: §3.6 draws
+    // that line, and a task is the one thing here that genuinely carries
+    // forward — it is not finished, and saying so once is not a backlog.
+    let mut overdue = Vec::new();
+    if date == brain_time::civil_date(now_ms(), zone) {
+        for tgt in store.tasks_overdue(&format!("{date}"))? {
+            let slug = store.slug_of(&tgt)?.unwrap_or_default();
+            let text = store.text_of(&tgt)?;
+            let d = store
+                .promotion_of(&tgt)?
+                .and_then(|p| match p.as_ {
+                    brain_core::body::Promoted::Task(t) => t.due,
+                    _ => None,
+                })
+                .unwrap_or_default();
+            overdue.push((slug, text, d));
+        }
+    }
+
     // What is still owed, from series that carry forward. Shown on today only:
     // a debt is a thing about now, not something to redraw on every past day
     // somebody scrolls back through.
@@ -119,11 +151,11 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     }
 
     if json {
-        let items: Vec<String> = rows
+        let mut items: Vec<String> = rows
             .iter()
             .map(|(slug, o, text)| {
                 format!(
-                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"text\":{}}}",
+                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"due\":false,\"text\":{}}}",
                     quote(slug),
                     o.start_ms,
                     o.all_day,
@@ -133,14 +165,36 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
                 )
             })
             .collect();
+        // Tasks carry `due: true` rather than being a separate array, because a
+        // caller asking "what is this day" wants one list — and one that
+        // silently omitted what is due would be answering a narrower question
+        // than it was asked.
+        for (slug, text, done) in &due {
+            items.push(format!(
+                "{{\"slug\":{},\"start_ms\":{},\"all_day\":true,\"done\":{},\"shift\":null,\"due\":true,\"text\":{}}}",
+                quote(slug),
+                from,
+                done,
+                text.as_deref().map(quote).unwrap_or_else(|| "null".into())
+            ));
+        }
         say!("[{}]", items.join(","));
         return Ok(());
     }
 
     say!("{date}");
-    if rows.is_empty() {
+    if rows.is_empty() && due.is_empty() && overdue.is_empty() && owed.is_empty() {
         say!("  nothing");
         return Ok(());
+    }
+
+    for (slug, text, done) in &due {
+        say!(
+            "  {}  {}  {}",
+            if *done { "done    " } else { "due     " },
+            slug,
+            text.as_deref().map(first_line).unwrap_or_default()
+        );
     }
 
     // All-day first, in their own band. They have no hour to sort by, and
@@ -151,6 +205,18 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     for (slug, o, text) in rows.iter().filter(|(_, o, _)| !o.all_day) {
         let (h, m) = brain_time::civil_clock(o.start_ms, zone);
         say!("  {h:02}:{m:02}     {}  {}", slug, line(text.as_deref(), o));
+    }
+
+    if !overdue.is_empty() {
+        say!();
+        say!("Still open");
+        for (slug, text, d) in &overdue {
+            say!(
+                "  was due {d}  {}  {}",
+                slug,
+                text.as_deref().map(first_line).unwrap_or_default()
+            );
+        }
     }
 
     if !owed.is_empty() {
@@ -217,8 +283,9 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     if rows.is_empty() {
         say!("No tasks.");
         say!();
-        say!("Nothing here recognises one on its own — a task verb alone is a");
-        say!("suggestion, not a type. Assign one with: brain task <name>");
+        say!("A capture becomes one on its own where a verb and a day agree —");
+        say!("\"call the dentist tomorrow\". A verb with no day is a suggestion");
+        say!("and nothing more, so say it yourself with: brain task <name> [due]");
         return Ok(());
     }
     for (tgt, descriptor) in rows {
@@ -341,7 +408,8 @@ pub fn explain(text: &str) -> Result<()> {
 
     let shape = match &r.shape {
         brain_parse::Shape::Nothing => "nothing temporal".to_string(),
-        brain_parse::Shape::Task => "a task, by its verb".to_string(),
+        brain_parse::Shape::Task { due: None } => "a task, by its verb".to_string(),
+        brain_parse::Shape::Task { due: Some(d) } => format!("a task, due {d}"),
         brain_parse::Shape::Point(brain_parse::When::Date(d)) => format!("a day: {d}"),
         brain_parse::Shape::Point(brain_parse::When::Moment(ms)) => {
             let (h, m) = brain_time::civil_clock(*ms, zone);

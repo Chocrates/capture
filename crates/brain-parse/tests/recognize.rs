@@ -95,7 +95,7 @@ fn the_five_worked_examples_parse_as_the_document_says() {
     }
 
     let r = read("send sarah the migration doc");
-    assert_eq!(r.shape, Shape::Task);
+    assert_eq!(r.shape, Shape::Task { due: None });
     assert!(
         !promotes("send sarah the migration doc"),
         "a task verb must not promote on its own"
@@ -305,7 +305,7 @@ fn every_task_verb_is_seen_at_the_head() {
         let text = alloc_format(w.word, "the thing");
         assert_eq!(
             read(&text).shape,
-            Shape::Task,
+            Shape::Task { due: None },
             "{:?} is in TASK_VERBS and was not recognised at the head",
             w.word
         );
@@ -392,4 +392,122 @@ fn the_grammar_version_moved_with_the_grammar() {
     // a production without bumping it would leave every existing note parsed by
     // the old rules for ever, which is the whole failure the version prevents.
     const { assert!(brain_parse::GRAMMAR_VERSION >= 2) };
+}
+
+// ---------------------------------------------------------------------------
+// A verb and a day compose. The captures that forced the band, pinned per
+// §3.1.5's rule that a band moves only when a real capture demands it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_task_verb_in_front_of_a_day_is_a_due_date() {
+    // The defect this fixes: the two tiers did not compose, so the day was read
+    // alone and the verb was discarded. "Call the dentist tomorrow" became an
+    // all-day event on Tuesday — and by §3.6's table that is wrong, because an
+    // event occupies time and calling the dentist does not occupy a Tuesday.
+    let r = read("call the dentist tomorrow");
+    match r.shape {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}"), "2026-06-02"),
+        other => panic!("expected a task due tomorrow, got {other:?}"),
+    }
+    assert!(promotes("call the dentist tomorrow"));
+}
+
+#[test]
+fn the_day_may_sit_behind_a_marker() {
+    let r = read("email sarah about the invoice on friday");
+    match r.shape {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}"), "2026-06-05"),
+        other => panic!("expected a task due friday, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_clock_makes_an_event_whatever_verb_introduced_it() {
+    // The discriminator is time rather than wording (§3.6). A call you are on
+    // at three occupies three o'clock, so it is an event — and reading it as a
+    // task due today would lose the only part of it that has to be kept.
+    match read("call sarah at 3pm").shape {
+        Shape::Point(When::Moment(_)) => {}
+        other => panic!("expected a moment, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_due_date_never_becomes_an_instant() {
+    // §3.6: "due Friday" is not 00:00 UTC on Friday. The type makes the mistake
+    // unrepresentable — a `FloatingDate` has no conversion to an instant — and
+    // this is here so that a later convenience method cannot quietly add one.
+    match read("pay the invoice on friday").shape {
+        Shape::Task { due: Some(_) } => {}
+        other => panic!("expected a floating due date, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_verb_with_no_day_still_only_suggests() {
+    // Unchanged and deliberately so. Verbs are an open class and any list is
+    // wrong at the edges, so the verb alone stays below the floor: it offers
+    // "task?" and applies nothing.
+    let r = read("call the dentist about the crown");
+    assert_eq!(r.shape, Shape::Task { due: None });
+    assert!(!promotes("call the dentist about the crown"));
+    assert!(r.confidence > 0, "it is a suggestion, not silence");
+}
+
+#[test]
+fn a_day_with_no_verb_is_still_a_day() {
+    // The composition must not swallow the tier it composes with. "Dentist
+    // thursday" is an appointment nobody phrased as a task, and it keeps its
+    // own band — below the floor, where §3.1.5 put it.
+    match read("dentist thursday").shape {
+        Shape::Point(When::Date(_)) => {}
+        other => panic!("expected a bare day, got {other:?}"),
+    }
+    assert!(!promotes("dentist thursday"));
+}
+
+#[test]
+fn the_guards_still_hold_against_a_verb() {
+    // A task verb must not become a licence to match loosely. These are the
+    // document's own counter-examples with a verb in front, and every one of
+    // them must still find nothing to be due.
+    for text in [
+        "check the march timeline",
+        "fix the 7am problem",
+        "review the budget 40k",
+    ] {
+        let r = read(text);
+        assert_eq!(
+            r.shape,
+            Shape::Task { due: None },
+            "{text:?} found a date the guards should have killed"
+        );
+    }
+}
+
+#[test]
+fn an_offset_behind_a_verb_is_a_nudge_rather_than_a_due_date() {
+    // Found by the band test above rather than by reasoning, and it is the
+    // distinction that keeps the composition honest. "Check back in 3 weeks" is
+    // not something you are overdue on come the 23rd — §3.1's own worked
+    // example reads "revisit in Q2" as a note with a review prompt, not a task,
+    // and `check` being in the verb list must not change that.
+    match read("check back in 3 weeks").shape {
+        Shape::Point(When::Date(d)) => {
+            assert_eq!((d.year, d.month, d.day), (2026, 6, 22));
+        }
+        other => panic!("an offset became {other:?}"),
+    }
+    assert_eq!(read("check back in 3 weeks").confidence, 85);
+}
+
+#[test]
+fn a_verb_does_not_turn_a_series_into_a_task() {
+    // Only `point` sees the verb, and this is why. A recurring obligation is a
+    // rule, and being introduced by a verb does not make it one thing to do.
+    match read("review the docs every friday").shape {
+        Shape::Recurring { .. } => {}
+        other => panic!("a series became {other:?}"),
+    }
 }

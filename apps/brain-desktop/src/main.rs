@@ -25,6 +25,7 @@ fn main() {
             ipc::timeline,
             ipc::agenda,
             ipc::set_occurrence,
+            ipc::set_task_done,
             ipc::note,
             ipc::search,
             ipc::ambient,

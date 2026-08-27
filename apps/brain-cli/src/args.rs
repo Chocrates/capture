@@ -45,6 +45,10 @@ pub enum Command {
     Agenda { day: Option<String>, json: bool },
     /// Notes promoted to tasks.
     Tasks { json: bool },
+    /// Assign the task type by hand, with an optional due date.
+    Task { name: String, due: Option<String> },
+    /// Mark a task done, or open again.
+    TaskDone { name: String, done: bool },
     /// A bounded review session.
     Review { json: bool },
     /// Make an if-then plan.
@@ -331,6 +335,14 @@ where
             let done = args[0] == "done";
             let rest = &args[1..];
             match rest {
+                // One name is a task; a name and an occurrence is one instance
+                // of a series. Both are "this is finished", and §3.6 keeps them
+                // distinct underneath — a task has state, a series has state
+                // per instance and nothing accumulates between them.
+                [name] => Ok(Command::TaskDone {
+                    name: name.clone(),
+                    done,
+                }),
                 [name, occ] => occ
                     .parse::<i64>()
                     .map(|occ| Command::Occurrence {
@@ -344,7 +356,24 @@ where
                     }),
                 _ => Err(Bad::UnknownFlag {
                     command: args[0].clone(),
-                    flag: "expected a series and an occurrence".into(),
+                    flag: "expected a task, or a series and an occurrence".into(),
+                }),
+            }
+        }
+        "task" => {
+            let rest = &args[1..];
+            match rest {
+                [name] => Ok(Command::Task {
+                    name: name.clone(),
+                    due: None,
+                }),
+                [name, due] => Ok(Command::Task {
+                    name: name.clone(),
+                    due: Some(due.clone()),
+                }),
+                _ => Err(Bad::UnknownFlag {
+                    command: "task".into(),
+                    flag: "expected a note, and optionally a due date".into(),
                 }),
             }
         }
@@ -704,6 +733,21 @@ READING
   brain links <name>      what it points at, and what points at it
 
   Any of these takes --json.
+
+TIME AND TASKS
+  brain agenda [day]           what is due and what occurs, default today
+  brain tasks                  open tasks, newest first
+  brain task <name> [due]      say it is a task, optionally due YYYY-MM-DD
+  brain done|undone <name>     finish a task, or open it again
+  brain done|undone <name> <occ>   one instance of a series, by its start
+  brain review                 a bounded session, five notes and then over
+  brain engaged|deferred <name>    what became of one that was offered
+  brain carries-forward <name>     missing this series leaves something owed
+  brain read <text>            what the recognizer makes of it, storing nothing
+
+  A capture becomes a task on its own only where a verb and a day agree —
+  "call the dentist tomorrow". A verb alone is a suggestion and nothing more,
+  which is what brain task is for.
 
 CHANGING A NOTE
   brain edit <name> <text>     replace the text; the old version is kept
