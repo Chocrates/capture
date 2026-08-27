@@ -510,6 +510,70 @@ pub fn tagged(tag: String) -> std::result::Result<Vec<Note>, String> {
     })())
 }
 
+/// One entry in the wiki's sidebar.
+#[derive(Serialize)]
+pub struct Entry {
+    /// What to show: an alias, or a name without its sigil.
+    pub name: String,
+    /// For a page, the note to open. Absent for a person, project or tag,
+    /// which open a page of their own.
+    pub slug: Option<String>,
+    /// How many notes name it. Absent for a page, which is one note.
+    pub count: Option<u32>,
+}
+
+/// The sidebar: everything there is to browse.
+#[derive(Serialize)]
+pub struct Index {
+    /// Notes given a name by hand.
+    pub pages: Vec<Entry>,
+    pub people: Vec<Entry>,
+    pub projects: Vec<Entry>,
+    pub tags: Vec<Entry>,
+}
+
+/// What the wiki can reach.
+///
+/// Four lists, none of them maintained by anybody. Pages are the notes somebody
+/// aliased — the one act that says "this is a thing I will come back to" — and
+/// the other three are what the notes happen to say. There is nothing to file
+/// into and nothing to prune, which is §3.7's whole argument applied to a
+/// sidebar: the moment a list needs tending it stops being tended.
+#[tauri::command]
+pub fn wiki_index() -> std::result::Result<Index, String> {
+    wire((|| {
+        let s = read_only()?;
+
+        let pages = s
+            .named()?
+            .into_iter()
+            .map(|(alias, slug)| Entry {
+                name: alias,
+                slug: Some(slug),
+                count: None,
+            })
+            .collect();
+
+        let listed = |sigil: char| -> Result<Vec<Entry>> {
+            Ok(s.distinct_mentions(sigil)?
+                .into_iter()
+                .map(|(name, count)| Entry {
+                    name,
+                    slug: None,
+                    count: Some(count),
+                })
+                .collect())
+        };
+
+        Ok(Index {
+            pages,
+            people: listed('@')?,
+            projects: listed('^')?,
+            tags: listed('#')?,
+        })
+    })())
+}
+
 /// What the recognizer saw, when it was not sure enough to act.
 ///
 /// Deliberately says how sure it was. A suggestion the reader cannot calibrate

@@ -233,3 +233,70 @@ fn a_written_tag_and_an_added_one_are_one_page_and_one_row() {
         "a note carrying both was counted twice: {rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// What the wiki's sidebar is built from.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_pages_are_the_notes_somebody_named() {
+    // An alias is the one act in this system that says "this is a thing I will
+    // come back to". Listing every note instead would be the timeline with
+    // worse ordering.
+    let sc = Scratch::new("named");
+    let p = sc.paths();
+    let a = capture(&p, "the acme plan in full");
+    capture(&p, "an ordinary capture nobody named");
+    brain_store::mutate::set_alias(&p, &a, Some("acme-plan")).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let named = s.state.named().unwrap();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert_eq!(named[0].0, "acme-plan");
+}
+
+#[test]
+fn the_names_are_ordered_by_use() {
+    // A sidebar is read top-down and the name you want is usually one you use.
+    // Alphabetical alone puts whoever is called Aaron permanently above
+    // everyone you actually work with.
+    let sc = Scratch::new("distinct");
+    let p = sc.paths();
+    capture(&p, "kickoff with @sarah and @aaron");
+    capture(&p, "@sarah again");
+    capture(&p, "and once more with @sarah");
+
+    let s = Session::open(p.clone()).unwrap();
+    let people = s.state.distinct_mentions('@').unwrap();
+    assert_eq!(people, [("sarah".into(), 3), ("aaron".into(), 1)]);
+}
+
+#[test]
+fn a_tag_is_counted_once_however_it_arrived() {
+    // Tags come from two places — written in the text, or added by a `tag`
+    // event. A note carrying both must count once, or the sidebar reports more
+    // notes than the page it opens will show.
+    let sc = Scratch::new("distinct-tags");
+    let p = sc.paths();
+    let both = capture(&p, "notes on the paper #reading");
+    brain_store::mutate::tag(&p, &both, "reading").unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert_eq!(
+        s.state.distinct_mentions('#').unwrap(),
+        [("reading".into(), 1)]
+    );
+}
+
+#[test]
+fn a_muted_note_does_not_put_a_name_in_the_sidebar() {
+    // §2.6 again: muting is the cheap way to stop something resurfacing, and a
+    // name that only a muted note mentions would keep appearing.
+    let sc = Scratch::new("distinct-muted");
+    let p = sc.paths();
+    let slug = capture(&p, "the thing with @quiet");
+    brain_store::mutate::mute_note(&p, &slug).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(s.state.distinct_mentions('@').unwrap().is_empty());
+}

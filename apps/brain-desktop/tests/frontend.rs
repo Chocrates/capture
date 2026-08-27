@@ -332,6 +332,69 @@ fn following_a_link_can_be_undone() {
 }
 
 #[test]
+fn the_wiki_draws_the_real_note_page() {
+    // One implementation, embedded. A second copy of the note page inside the
+    // pane would drift from the first within a week — and the drift would be
+    // silent, because both would keep working.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("showNote(wikiAt.name, page)"),
+        "the wiki renders its own idea of a note rather than the note page"
+    );
+    assert!(
+        code.contains("async function showNote(name, into = view)"),
+        "the note page cannot be drawn anywhere but the whole surface"
+    );
+}
+
+#[test]
+fn a_link_inside_the_wiki_stays_inside_it() {
+    // Otherwise the first click throws away the sidebar and lands on a bare
+    // note page, which is the opposite of what a pane is for — and it would
+    // happen immediately, since a note's own links are the main way through a
+    // wiki.
+    let code = ui_code("app.js");
+    let open = code
+        .split("function openNote(")
+        .nth(1)
+        .expect("openNote exists");
+    assert!(
+        open.contains(r#"current === "wiki""#),
+        "following a link from the wiki leaves it"
+    );
+}
+
+#[test]
+fn the_wiki_remembers_where_you_were() {
+    // The difference between a pane and a view. Going to the agenda and back
+    // must not return you to an empty page — that is right for a timeline and
+    // wrong for something you were reading.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("showWiki(wikiAt)"),
+        "the wiki reopens at nothing rather than where you left it"
+    );
+}
+
+#[test]
+fn nothing_in_the_sidebar_is_maintained_by_hand() {
+    // Pages are notes somebody aliased; people, projects and tags are whatever
+    // the notes say. A control that added an entry would be the filing step
+    // §3.7 exists to remove, and a list that needs tending stops being tended.
+    let code = ui_code("app.js");
+    for filing in ["addPage", "newPage", "createPage", "removeFromSidebar"] {
+        assert!(
+            !code.contains(filing),
+            "the sidebar can be curated ({filing:?})"
+        );
+    }
+    assert!(
+        code.contains(r#"call("wiki_index""#),
+        "the sidebar is not built from the store"
+    );
+}
+
+#[test]
 fn history_records_entity_pages_too() {
     // The first version recorded notes alone, which broke the one path entity
     // pages exist to create: timeline → `@sarah` → one of her notes left no way

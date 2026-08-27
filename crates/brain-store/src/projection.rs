@@ -1443,6 +1443,59 @@ impl Store {
         Ok(out)
     }
 
+    /// Notes given a name by hand.
+    ///
+    /// The wiki's pages, and the reason the list is aliases rather than every
+    /// note: an alias is the one act in this system that says "this note is a
+    /// thing I will come back to" (§4.3). Everything else is a capture, and a
+    /// sidebar listing all of them would be the timeline with worse ordering.
+    pub fn named(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT alias, slug FROM notes
+             WHERE alias IS NOT NULL AND redacted_at IS NULL
+             ORDER BY alias",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Every distinct person, project or tag the notes name.
+    ///
+    /// Ordered by how often each is mentioned, then alphabetically. Frequency
+    /// first because a sidebar is read top-down and the name you want is
+    /// usually one you use — and because alphabetical alone puts whoever is
+    /// called Aaron permanently above everyone you actually work with.
+    pub fn distinct_mentions(&self, sigil: char) -> Result<Vec<(String, u32)>> {
+        // Tags come from two places, so `#` unions them. The other two sigils
+        // exist only in the text and the union is a no-op for them, but writing
+        // it once keeps the three consistent rather than special-casing.
+        let mut st = self.conn.prepare(
+            "SELECT value, COUNT(DISTINCT tgt) AS n FROM (
+               SELECT m.value AS value, m.tgt AS tgt
+                 FROM mentions m JOIN notes n ON n.tgt = m.tgt
+                 WHERE m.sigil = ?1 AND n.redacted_at IS NULL AND n.muted_until IS NULL
+               UNION
+               SELECT t.tag AS value, t.tgt AS tgt
+                 FROM tags t JOIN notes n ON n.tgt = t.tgt
+                 WHERE ?1 = '#' AND n.redacted_at IS NULL AND n.muted_until IS NULL
+             )
+             GROUP BY value
+             ORDER BY n DESC, value ASC",
+        )?;
+        let rows = st.query_map(params![sigil.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Names beginning with a prefix, for completing a link as it is typed.
     ///
     /// Slugs and aliases together, because they share one namespace and one

@@ -85,6 +85,7 @@ const history = { back: [], forward: [] };
 /// one of her notes left no way back to `@sarah`, because the page in the
 /// middle was never written down.
 function here() {
+  if (current === "wiki") return { view: "wiki", at: wikiAt };
   if (current === "note" && currentNote) return { view: "note", name: currentNote };
   if (current === "mentions" && currentMention) return { view: "mentions", ...currentMention };
   return null;
@@ -96,6 +97,7 @@ function same(a, b) {
 
 /// Go to a recorded place.
 function go(entry) {
+  if (entry.view === "wiki") return showWiki(entry.at);
   if (entry.view === "note") return showNote(entry.name);
   if (entry.view === "mentions") return showMentions(entry.sigil, entry.value);
 }
@@ -621,28 +623,41 @@ async function showFiltered(field, value) {
 /// directly by anything redrawing the page it is already on — an edit, a tag —
 /// so that changing a note does not push a copy of it into the history.
 function openNote(name) {
+  // Following a link from inside the wiki keeps you inside it. Without this
+  // every link in the pane would throw away the sidebar and land on a bare note
+  // page, which is the opposite of what a pane is for — and it would happen on
+  // the first click, since the note page's own links are the main way through a
+  // wiki.
+  if (current === "wiki") return openWiki({ kind: "note", name });
   visit({ view: "note", name });
   return showNote(name);
 }
 
-async function showNote(name) {
+async function showNote(name, into = view) {
+  // `into` is what makes a note page embeddable. Inside the wiki pane it is the
+  // pane's content area rather than the whole surface, so the sidebar beside it
+  // survives — the alternative was a second copy of this function that would
+  // have drifted from it within a week.
+  const embedded = into !== view;
   const mine = beginRender();
-  current = "note";
+  if (!embedded) current = "note";
   currentNote = name;
   drawHistory();
   const page = await call("note", { name });
   if (stale(mine)) return;
   const n = page.note;
-  view.replaceChildren();
+  into.replaceChildren();
 
-  const bar = el("div", "row nav");
-  const back = el("button", "act", "← timeline");
-  back.addEventListener("click", showTimeline);
-  bar.append(back);
-  view.append(bar);
+  if (!embedded) {
+    const bar = el("div", "row nav");
+    const back = el("button", "act", "← timeline");
+    back.addEventListener("click", showTimeline);
+    bar.append(back);
+    into.append(bar);
+  }
 
   const title = el("h2", null, n.alias ? `${n.alias}  ·  ${n.slug}` : n.slug);
-  view.append(title);
+  into.append(title);
 
   const text = el("div", "text");
   if (n.text !== null && n.text !== undefined) {
@@ -690,7 +705,7 @@ async function showNote(name) {
         ? "(content withheld — queued for destruction)"
         : "(no readable text)";
   }
-  view.append(text);
+  into.append(text);
 
   // Tags, which the note page did not show at all — they were on the timeline
   // row and nowhere else, so the page for a note said less about it than the
@@ -702,7 +717,7 @@ async function showNote(name) {
       b.addEventListener("click", () => openMentions("#", t));
       box.append(b);
     }
-    view.append(box);
+    into.append(box);
   }
 
   // What the note currently *is*, beside what was captured.
@@ -725,12 +740,12 @@ async function showNote(name) {
       c.title = "How sure the recognizer was.";
       box.append(c);
     }
-    view.append(box);
+    into.append(box);
   }
 
   // A reading it had and did not act on. One line, applied to nothing.
   if (page.suggestion) {
-    view.append(el("p", "suggestion", page.suggestion));
+    into.append(el("p", "suggestion", page.suggestion));
   }
 
   const meta = el("p", "day");
@@ -738,10 +753,10 @@ async function showNote(name) {
   if (n.updated_ms !== n.captured_ms) {
     meta.textContent += `  ·  updated ${stamp(n.updated_ms, n.tz)}`;
   }
-  view.append(meta);
+  into.append(meta);
 
   const ambient = await call("ambient", { name }).catch(() => []);
-  if (ambient.length) view.append(contextStrip(ambient, showFiltered));
+  if (ambient.length) into.append(contextStrip(ambient, showFiltered));
 
   if (n.divergences > 0) {
     // Reported, never prompted. A divergence is information about the note,
@@ -758,10 +773,10 @@ async function showNote(name) {
     const dismissRow = el("div", "row");
     dismissRow.append(dismiss);
     d.append(dismissRow);
-    view.append(d);
+    into.append(d);
   }
 
-  view.append(linkList("Links to", page.links, (l) => {
+  into.append(linkList("Links to", page.links, (l) => {
     if (l.broken) {
       const li = el("li");
       const span = el("span", "broken", l.name);
@@ -782,7 +797,7 @@ async function showNote(name) {
     return li;
   }));
 
-  view.append(linkList("Linked from", page.backlinks, (b) => {
+  into.append(linkList("Linked from", page.backlinks, (b) => {
     const li = el("li");
     const a = el("a", null, b.slug);
     a.addEventListener("click", () => openNote(b.slug));
@@ -790,7 +805,7 @@ async function showNote(name) {
     return li;
   }));
 
-  view.append(actions(n));
+  into.append(actions(n));
 }
 
 function linkList(heading, items, render) {
@@ -1087,24 +1102,28 @@ async function renderPending() {
 /// is why there is no "new entity" anywhere in the interface.
 /// Open an entity page, remembering where you came from.
 function openMentions(sigil, value) {
+  if (current === "wiki") return openWiki({ kind: "mentions", sigil, value });
   visit({ view: "mentions", sigil, value });
   return showMentions(sigil, value);
 }
 
-async function showMentions(sigil, value) {
+async function showMentions(sigil, value, into = view) {
+  const embedded = into !== view;
   const mine = beginRender();
-  current = "mentions";
+  if (!embedded) current = "mentions";
   currentMention = { sigil, value };
   drawHistory();
-  view.replaceChildren();
+  into.replaceChildren();
 
-  const bar = el("div", "row");
-  const back = el("button", "act", "← timeline");
-  back.addEventListener("click", showTimeline);
-  bar.append(back);
-  view.append(bar);
+  if (!embedded) {
+    const bar = el("div", "row");
+    const back = el("button", "act", "← timeline");
+    back.addEventListener("click", showTimeline);
+    bar.append(back);
+    into.append(bar);
+  }
 
-  view.append(el("h2", null, `${sigil}${value}`));
+  into.append(el("h2", null, `${sigil}${value}`));
 
   // One page for three sigils, from two tables. A tag is an OR-Set with its own
   // events and a mention is part of the text — a real difference underneath,
@@ -1119,14 +1138,94 @@ async function showMentions(sigil, value) {
     // Reachable: a page can be opened from a note whose text is then edited,
     // or from one that has since been muted. Saying so is better than an empty
     // page that reads as a fault.
-    view.append(el("p", "empty", "Nothing names this now."));
+    into.append(el("p", "empty", "Nothing names this now."));
     return;
   }
 
-  view.append(
+  into.append(
     el("p", "hint", `${notes.length} note${notes.length === 1 ? "" : "s"}`),
   );
-  for (const n of notes) view.append(noteRow(n, openNote));
+  for (const n of notes) into.append(noteRow(n, openNote));
+}
+
+// ------------------------------------------------------------------- wiki ---
+
+/// Where the wiki pane is, so leaving it and coming back returns you to it.
+///
+/// The point of a pane rather than a view: Timeline → a note → Agenda →
+/// Timeline puts you back at the top of the timeline, which is right for a
+/// timeline and wrong for a place you were reading. `null` is the pane with
+/// nothing open yet.
+let wikiAt = null;
+
+/// The wiki: a sidebar of everything there is to browse, and a page beside it.
+///
+/// The sidebar is not maintained by anybody. Pages are the notes somebody
+/// aliased — the one act that says "this is a thing I will come back to" — and
+/// people, projects and tags are whatever the notes happen to say. There is
+/// nothing to file into and nothing to prune, which is §3.7's argument applied
+/// to a sidebar: a list that needs tending is a list that stops being tended.
+async function showWiki(at) {
+  const mine = beginRender();
+  current = "wiki";
+  wikiAt = at || null;
+  view.replaceChildren();
+
+  const index = await call("wiki_index", {});
+  if (stale(mine)) return;
+
+  const frame = el("div", "wiki");
+  const side = el("aside", "sidebar");
+  const page = el("div", "page");
+  frame.append(side, page);
+  view.append(frame);
+
+  const section = (label, entries, open) => {
+    if (!entries.length) return;
+    side.append(el("div", "side-label", label));
+    for (const e of entries) {
+      const b = el("button", "side-item", e.name);
+      if (e.count !== null && e.count !== undefined) {
+        b.append(el("span", "side-count", String(e.count)));
+      }
+      if (same(open(e), wikiAt)) b.classList.add("on");
+      b.addEventListener("click", () => openWiki(open(e)));
+      side.append(b);
+    }
+  };
+
+  section("pages", index.pages, (e) => ({ kind: "note", name: e.slug }));
+  section("people", index.people, (e) => ({ kind: "mentions", sigil: "@", value: e.name }));
+  section("projects", index.projects, (e) => ({ kind: "mentions", sigil: "^", value: e.name }));
+  section("tags", index.tags, (e) => ({ kind: "mentions", sigil: "#", value: e.name }));
+
+  if (!side.childNodes.length) {
+    side.append(
+      el("p", "empty", "Nothing to browse yet."),
+      el(
+        "p",
+        "hint",
+        "Pages are notes you have named, and the rest is whatever your notes say — write @someone, ^something or #anything, or give a note a name with Rename.",
+      ),
+    );
+  }
+
+  if (!wikiAt) {
+    page.append(el("p", "empty", "Pick something on the left."));
+    return;
+  }
+
+  // The pane draws a real note page or a real entity page, rather than its own
+  // version of either. One implementation, so the wiki cannot drift from the
+  // rest of the interface as either of them changes.
+  if (wikiAt.kind === "note") await showNote(wikiAt.name, page);
+  else await showMentions(wikiAt.sigil, wikiAt.value, page);
+}
+
+/// Move within the pane, recording it.
+function openWiki(at) {
+  visit({ view: "wiki", at });
+  return showWiki(at);
 }
 
 // ----------------------------------------------------------------- review ---
@@ -1367,7 +1466,8 @@ document.querySelectorAll("nav button[data-view]").forEach((b) => {
   b.addEventListener("click", () => {
     document.querySelectorAll("nav button[data-view]").forEach((o) => o.classList.remove("on"));
     b.classList.add("on");
-    if (b.dataset.view === "health") showHealth();
+    if (b.dataset.view === "wiki") showWiki(wikiAt);
+    else if (b.dataset.view === "health") showHealth();
     else if (b.dataset.view === "agenda") showAgenda(today());
     else if (b.dataset.view === "review") showReview();
     else showTimeline();

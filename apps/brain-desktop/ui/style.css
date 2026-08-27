@@ -176,6 +176,36 @@ h2:first-child { margin-top: 0; }
  * already dealt with is how a bounded session shows itself ending. */
 .note.done { opacity: .55; }
 
+/* The wiki pane: a sidebar of what there is, and a page beside it.
+ *
+ * The sidebar scrolls on its own, so a long list of people does not push the
+ * page you are reading off the bottom. */
+.wiki { display: flex; gap: 1.2rem; align-items: flex-start; }
+.sidebar {
+  flex: 0 0 13rem; position: sticky; top: 1rem;
+  max-height: calc(100vh - 5rem); overflow-y: auto;
+  border-right: 1px solid var(--line); padding-right: .8rem;
+}
+.page { flex: 1 1 auto; min-width: 0; }
+
+.side-label {
+  color: var(--dim); font-size: .7rem; letter-spacing: .06em;
+  text-transform: uppercase; margin: 1rem 0 .3rem;
+}
+.side-label:first-child { margin-top: 0; }
+.side-item {
+  display: flex; justify-content: space-between; gap: .5rem; width: 100%;
+  background: none; border: none; border-radius: 5px;
+  padding: .2rem .4rem; text-align: left; cursor: pointer;
+  color: var(--text); font: inherit; font-size: .85rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.side-item:hover { background: var(--panel); }
+/* Where you are, kept visible. A sidebar that does not say which of its rows is
+ * open is a list of links rather than a place. */
+.side-item.on { background: var(--panel); color: var(--accent); }
+.side-count { color: var(--dim); font-size: .75rem; font-variant-numeric: tabular-nums; }
+
 /* The history pair. Quieter than the view buttons beside them: they are
  * navigation, not a place, and one of them is usually unavailable. */
 nav .hist {

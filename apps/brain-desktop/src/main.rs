@@ -31,6 +31,7 @@ fn main() {
             ipc::names,
             ipc::mentioning,
             ipc::tagged,
+            ipc::wiki_index,
             ipc::ambient,
             ipc::filter_by_context,
             ipc::health,
