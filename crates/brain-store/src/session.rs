@@ -147,6 +147,25 @@ impl Session {
             Err(e) => tracing::error!(%e, "could not finish an interrupted purge"),
         }
 
+        // A projection whose shape predates this build.
+        //
+        // §8.8 makes the projection derived and nothing in it authoritative,
+        // which is what allows the entire migration strategy to be "throw it
+        // away and compute it again" — no migration code, and none ever
+        // accumulates. What was missing was anything that *noticed*:
+        // `is_stale` existed and was called only by its own tests, so a schema
+        // change left every existing store on the old shape until somebody
+        // happened to run `brain rebuild` by hand.
+        //
+        // Here rather than at every open, because it costs a full fold and only
+        // ever fires once per upgrade.
+        if catch_up && s.state.is_stale().unwrap_or(false) {
+            match s.rebuild_projection() {
+                Ok(g) => tracing::info!(generation = g, "projection rebuilt for a new schema"),
+                Err(e) => tracing::warn!(%e, "the projection could not be rebuilt"),
+            }
+        }
+
         // Read anything nothing has read yet, or that an older grammar read.
         //
         // Every startup except a capture's. §3.1 puts parsing after the commit
@@ -316,6 +335,24 @@ impl Session {
     /// Returns what it did, so `brain status` can report when this last ran —
     /// without that, a long-dead overlay means redactions sitting undestroyed
     /// while every surface reports them complete.
+    /// Throw the projection away and compute it again from the log.
+    ///
+    /// Written beside the current generation, with the pointer moved afterwards
+    /// — never renamed over an open database, because readers keep the file
+    /// they already opened and SQLite's sidecars are named from the path.
+    pub fn rebuild_projection(&mut self) -> Result<u64> {
+        let events = self.log.all()?;
+        let ops = Ops::open(&self.paths.ops)?;
+        let current = ops.generation()?;
+
+        let next =
+            crate::projection::rebuild(&self.paths.state, &events, current, now_ms() as i64)?;
+        ops.set_generation(next)?;
+
+        self.state = Store::open(&projection::generation_path(&self.paths.state, next))?;
+        Ok(next)
+    }
+
     pub fn drain_due(&mut self) -> Result<crate::due::Drained> {
         let ops = Ops::open(&self.paths.ops)?;
         let now = now_ms();

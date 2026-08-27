@@ -213,6 +213,27 @@ fn a_render_cannot_be_overtaken_by_another() {
 }
 
 #[test]
+fn a_store_error_is_not_a_broken_window() {
+    // These need different words and for a while had the same ones. A
+    // projection being rebuilt after an upgrade made the page announce that
+    // something in it was broken — and the evidence it was wrong is that the
+    // window fixed itself a few seconds later, which a broken one does not.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("class StoreError"),
+        "nothing distinguishes a store refusing from a fault in this page"
+    );
+    assert!(
+        code.contains("instanceof StoreError"),
+        "the rejection handler does not tell the two apart"
+    );
+    assert!(
+        code.contains("function notReady"),
+        "there is no way to report a store error that is not `fatal`"
+    );
+}
+
+#[test]
 fn the_page_talks_only_to_the_commands_it_is_given() {
     // No fetch, no URL, no server. The capability list is the invoke handler in
     // main.rs, and it is only a real boundary if the page has no other way out.

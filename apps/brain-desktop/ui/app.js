@@ -45,9 +45,15 @@ function fatal(what) {
 }
 
 window.addEventListener("error", (e) => fatal(e.message || e.error || e));
-window.addEventListener("unhandledrejection", (e) =>
-  fatal((e.reason && (e.reason.message || e.reason)) || "a promise was rejected"),
-);
+window.addEventListener("unhandledrejection", (e) => {
+  // A store error is not a broken page, and the two need different words. The
+  // poll will try again; `fatal` would stop and blame the window.
+  if (e.reason instanceof StoreError) {
+    notReady(e.reason);
+    return;
+  }
+  fatal((e.reason && (e.reason.message || e.reason)) || "a promise was rejected");
+});
 
 // Which view is on screen.
 //
@@ -195,6 +201,15 @@ function toast(message) {
   toast.timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 
+/// A store error, as distinct from a fault in this page.
+///
+/// The difference decides what the reader is told, and getting it wrong told
+/// somebody their window was broken when the store was merely busy being
+/// upgraded. A `call` that fails rethrows this, the view catches it and says
+/// the store could not be read, and the poll tries again a moment later — which
+/// is usually all it takes.
+class StoreError extends Error {}
+
 async function call(name, args) {
   try {
     return await invoke(name, args);
@@ -202,8 +217,24 @@ async function call(name, args) {
     // Shown rather than swallowed. A surface that silently does nothing when a
     // write fails is worse than one that refuses loudly.
     toast(String(e));
-    throw e;
+    throw new StoreError(String(e));
   }
+}
+
+/// Draw a store error, and let the next poll try again.
+///
+/// Not `fatal`. That is for a fault in this page — a TypeError, a bad
+/// assumption — where the page really is broken and staying still is the right
+/// thing. A store that says no is a different situation and often a passing
+/// one: a projection being rebuilt after an upgrade, another process holding
+/// the writer for a moment. Reporting it as breakage is both alarming and
+/// wrong, and the evidence was somebody watching a "broken" window fix itself
+/// a few seconds later.
+function notReady(e) {
+  view.replaceChildren();
+  view.append(el("h2", null, "Could not read the store"));
+  view.append(el("p", null, String(e.message || e)));
+  view.append(el("p", "hint", "Trying again — this usually clears on its own."));
 }
 
 /// The day a note belongs to, in the zone it was captured in.
