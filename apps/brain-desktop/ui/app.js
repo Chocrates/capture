@@ -152,7 +152,7 @@ async function showAgenda(day) {
     for (const r of allDay) band.append(agendaRow(r));
     view.append(band);
   }
-  for (const r of timed) view.append(agendaRow(r));
+  view.append(grid(timed));
 }
 
 function agendaRow(r) {
@@ -206,6 +206,114 @@ function agendaRow(r) {
     if (e.target.tagName !== "BUTTON") showNote(r.slug);
   });
   return row;
+}
+
+/// The timed grid: hours down the side, occurrences placed on them.
+///
+/// §4.4 asks for this shape rather than a list, and the reason is overlap. A
+/// list of times can only say that two things start at nine; a grid shows that
+/// one runs until eleven and the other is over by half past — which is the
+/// question somebody actually has when they look at a day.
+///
+/// The columns are not decided here. `agenda` packs them, so the command line
+/// and this page resolve a day the same way and a change to the rule cannot
+/// reach one surface and miss the other.
+function grid(rows) {
+  const wrap = el("div", "grid");
+  if (!rows.length) {
+    wrap.append(el("p", "empty", "Nothing at a particular time."));
+    return wrap;
+  }
+
+  // The hours drawn are the hours in use, with a little room either side.
+  //
+  // A fixed midnight-to-midnight grid spends most of its height on hours
+  // nobody has anything in, and pushes the part being read off the screen. An
+  // occurrence outside the usual working day still pulls the grid open to
+  // include it — the alternative is drawing a day that omits something on it,
+  // which is worse than any amount of scrolling.
+  const starts = rows.map((r) => hourOf(r.start_ms));
+  const ends = rows.map((r) => hourOf(r.end_ms || r.start_ms) + 1);
+  const first = Math.max(0, Math.min(...starts) - 1);
+  const last = Math.min(24, Math.max(...ends) + 1);
+
+  const span = (last - first) * 60;
+  wrap.style.height = `${span * PIXELS_PER_MINUTE}px`;
+
+  for (let h = first; h < last; h++) {
+    const line = el("div", "hour");
+    line.style.top = `${(h - first) * 60 * PIXELS_PER_MINUTE}px`;
+    line.append(el("span", "hour-label", `${String(h).padStart(2, "0")}:00`));
+    wrap.append(line);
+  }
+
+  // The blocks go in a container inset past the hour labels, rather than being
+  // offset one by one. An absolutely positioned child resolves against its
+  // ancestor's *padding* box, so padding on the grid moves the labels and not
+  // the blocks — which put every block on top of the label beside it, and then
+  // put the labels off the left of the window when the offset was applied
+  // twice. One inset box, and the percentages inside it mean what they say.
+  const lanes = el("div", "lanes");
+  for (const r of rows) lanes.append(block(r, first));
+  wrap.append(lanes);
+  return wrap;
+}
+
+/// How tall a minute is. One place, because the hour lines and the blocks have
+/// to agree or an occurrence is drawn against the wrong hour.
+const PIXELS_PER_MINUTE = 0.9;
+
+/// How long a block with no written end is drawn as.
+///
+/// It is drawn as a mark rather than as a length. The promoter refuses to
+/// invent §3.3's "30m default" — a wrong end time is harder to notice than a
+/// missing one — and a block claiming half an hour would put that invention
+/// back on the screen, where it looks like something somebody wrote.
+const NO_END_HEIGHT = 20;
+
+function block(r, firstHour) {
+  const b = el("div", `block${r.done ? " done" : ""}${r.end_ms ? "" : " open"}`);
+
+  const startMin = minutesOf(r.start_ms) - firstHour * 60;
+  b.style.top = `${startMin * PIXELS_PER_MINUTE}px`;
+  b.style.height = r.end_ms
+    ? `${Math.max(NO_END_HEIGHT, (minutesOf(r.end_ms) - minutesOf(r.start_ms)) * PIXELS_PER_MINUTE)}px`
+    : `${NO_END_HEIGHT}px`;
+
+  // Side by side where they overlap, full width where they do not. The hour
+  // labels live in the grid's left padding, so a block at 0% starts clear of
+  // them rather than on top of the one it shares an hour with.
+  const width = 100 / r.columns;
+  b.style.left = `${r.column * width}%`;
+  b.style.width = `${width - 1}%`;
+
+  b.append(el("span", "block-when", clockOf(r.start_ms)));
+  b.append(el("span", "block-what", r.text || "(no readable text)"));
+
+  // A shifted occurrence says so here too. §4.4: a time that moves on its own
+  // with no explanation is what makes somebody distrust the whole system, and
+  // the grid is where a moved time is most visible and least explained.
+  if (r.shift === "gap") {
+    b.append(el("span", "shift", "moved by a daylight-saving gap"));
+  } else if (r.shift === "ambiguous") {
+    b.append(el("span", "shift", "the clock struck this hour twice"));
+  }
+
+  b.addEventListener("click", async () => {
+    await call("set_occurrence", { name: r.slug, occ: r.occ, done: !r.done });
+    showAgenda(agendaDay);
+  });
+  b.title = r.done ? "click to un-tick" : "click to mark done";
+  return b;
+}
+
+function hourOf(ms) {
+  return new Date(ms).getHours();
+}
+
+function minutesOf(ms) {
+  const d = new Date(ms);
+  return d.getHours() * 60 + d.getMinutes();
 }
 
 function clockOf(ms) {

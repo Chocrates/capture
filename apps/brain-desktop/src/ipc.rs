@@ -159,6 +159,19 @@ pub struct Occurrence {
     /// `gap` or `ambiguous`, when a daylight-saving transition moved it.
     pub shift: Option<String>,
     pub text: Option<String>,
+    /// When it ends, where an end was written.
+    ///
+    /// Absent is the common case and is not a defect: §3.3's "30m default" is
+    /// deliberately not invented by the promoter, because a wrong end time is
+    /// harder to notice than a missing one. The grid draws these as a mark at
+    /// their start rather than as a block, so nothing on screen claims a length
+    /// nobody wrote.
+    pub end_ms: Option<i64>,
+    /// Which column this occupies where occurrences overlap, and how many
+    /// columns its cluster needs. Computed here rather than in the page so
+    /// every surface packs a day the same way (§4.4).
+    pub column: usize,
+    pub columns: usize,
     /// A task due on this day rather than something that occurs on it.
     ///
     /// The two are drawn together because §4.4's agenda is "what is due and
@@ -381,6 +394,9 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 done: false,
                 shift: None,
                 text: s.text_of(&tgt)?,
+                end_ms: None,
+                column: 0,
+                columns: 1,
                 due: false,
                 was_due: None,
             });
@@ -400,6 +416,9 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 done: o.done,
                 shift: o.shift,
                 text: o.title.clone().or(s.text_of(&tgt)?),
+                end_ms: o.end_ms,
+                column: 0,
+                columns: 1,
                 due: false,
                 was_due: None,
             });
@@ -418,6 +437,9 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 done,
                 shift: None,
                 text: s.text_of(&tgt)?,
+                end_ms: None,
+                column: 0,
+                columns: 1,
                 due: true,
                 was_due: None,
             });
@@ -441,14 +463,88 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                     done: false,
                     shift: None,
                     text: s.text_of(&tgt)?,
+                    end_ms: None,
+                    column: 0,
+                    columns: 1,
                     due: true,
                     was_due: was,
                 });
             }
         }
 
+        pack(&mut out);
         Ok(out)
     })())
+}
+
+/// How long an occurrence with no written end occupies, for overlap only.
+///
+/// Not a duration and never drawn as one. Two things at the same time are still
+/// two things at the same time, and a zero-width interval overlaps nothing — so
+/// packing would put them in one column and the page would draw them on top of
+/// each other. Fifteen minutes is enough to make them collide and short enough
+/// that it cannot manufacture a collision between meetings an hour apart.
+const UNWRITTEN: i64 = 15 * 60 * 1000;
+
+/// Assign each timed occurrence a column, so overlapping ones sit side by side.
+///
+/// §4.4 asks for column packing and does not say how. This is the ordinary
+/// algorithm: occurrences are grouped into clusters that transitively overlap,
+/// and within a cluster each takes the first column free at its start time. The
+/// cluster is what decides the width — every occurrence in it is drawn at
+/// `1/columns`, so a day with one three-way overlap at noon does not squeeze the
+/// morning.
+///
+/// All-day entries and due tasks are left alone: they have no position on an
+/// hour axis, which is the whole reason §3.2 keeps them in a band of their own.
+fn pack(rows: &mut [Occurrence]) {
+    let mut timed: Vec<usize> = (0..rows.len())
+        .filter(|&i| !rows[i].all_day && !rows[i].due)
+        .collect();
+
+    timed.sort_by_key(|&i| (rows[i].start_ms, -end_of(&rows[i])));
+
+    let mut cluster: Vec<usize> = Vec::new();
+    let mut cluster_end = i64::MIN;
+    // The end of the last occurrence in each open column.
+    let mut columns: Vec<i64> = Vec::new();
+
+    for &i in &timed {
+        // A gap closes the cluster: nothing after this point can overlap
+        // anything in it, so the width is settled and can be written down.
+        if rows[i].start_ms >= cluster_end && !cluster.is_empty() {
+            let width = columns.len().max(1);
+            for &j in &cluster {
+                rows[j].columns = width;
+            }
+            cluster.clear();
+            columns.clear();
+            cluster_end = i64::MIN;
+        }
+
+        let col = match columns.iter().position(|&end| end <= rows[i].start_ms) {
+            Some(c) => c,
+            None => {
+                columns.push(i64::MIN);
+                columns.len() - 1
+            }
+        };
+
+        let end = end_of(&rows[i]);
+        columns[col] = end;
+        rows[i].column = col;
+        cluster.push(i);
+        cluster_end = cluster_end.max(end);
+    }
+
+    let width = columns.len().max(1);
+    for &j in &cluster {
+        rows[j].columns = width;
+    }
+}
+
+fn end_of(o: &Occurrence) -> i64 {
+    o.end_ms.unwrap_or(o.start_ms + UNWRITTEN)
 }
 
 /// Mark a task done, or open again.
@@ -999,6 +1095,154 @@ mod tests {
                 "diverged",
                 "muted"
             ]
+        );
+    }
+
+    // ------------------------------------------------------------ packing ----
+    //
+    // §4.4 asks for overlap "resolved by column packing" and does not say how,
+    // so the how is pinned here. Every case below is one somebody's real day
+    // produces, and the failure they guard against is the same one: two things
+    // at the same time drawn on top of each other, so one of them is invisible.
+
+    const H: i64 = 60 * 60 * 1000;
+
+    /// One timed occurrence, from hour to hour.
+    fn at(start: i64, end: Option<i64>) -> Occurrence {
+        Occurrence {
+            slug: format!("s{start}"),
+            occ: start,
+            start_ms: start,
+            end_ms: end,
+            all_day: false,
+            done: false,
+            shift: None,
+            text: None,
+            column: 0,
+            columns: 1,
+            due: false,
+            was_due: None,
+        }
+    }
+
+    fn packed(mut rows: Vec<Occurrence>) -> Vec<(i64, usize, usize)> {
+        pack(&mut rows);
+        rows.iter()
+            .map(|o| (o.start_ms, o.column, o.columns))
+            .collect()
+    }
+
+    #[test]
+    fn a_day_with_no_overlap_is_one_column_wide() {
+        let out = packed(vec![
+            at(9 * H, Some(10 * H)),
+            at(11 * H, Some(12 * H)),
+            at(14 * H, Some(15 * H)),
+        ]);
+        for (start, col, cols) in out {
+            assert_eq!(
+                (col, cols),
+                (0, 1),
+                "the occurrence at {start} was narrowed"
+            );
+        }
+    }
+
+    #[test]
+    fn two_things_at_once_sit_side_by_side() {
+        let out = packed(vec![at(9 * H, Some(10 * H)), at(9 * H, Some(10 * H))]);
+        assert_eq!(out[0].2, 2, "an overlap was not widened");
+        assert_ne!(out[0].1, out[1].1, "two occurrences share a column");
+    }
+
+    #[test]
+    fn touching_is_not_overlapping() {
+        // A meeting ending at ten and one starting at ten do not overlap, and
+        // drawing them as if they did halves the width of both for nothing.
+        let out = packed(vec![at(9 * H, Some(10 * H)), at(10 * H, Some(11 * H))]);
+        assert_eq!(out[0].2, 1);
+        assert_eq!(out[1].2, 1);
+    }
+
+    #[test]
+    fn a_column_is_reused_once_it_is_free() {
+        // 9–11 beside 9–10 and 10–11: the second two follow each other, so they
+        // share a column and the day is two wide rather than three.
+        let out = packed(vec![
+            at(9 * H, Some(11 * H)),
+            at(9 * H, Some(10 * H)),
+            at(10 * H, Some(11 * H)),
+        ]);
+        assert!(
+            out.iter().all(|(_, _, cols)| *cols == 2),
+            "a reusable column was not reused: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_cluster_does_not_narrow_the_rest_of_the_day() {
+        // The reason width is per-cluster rather than per-day. A three-way
+        // overlap at noon must not squeeze a lone meeting at nine into a third
+        // of the page.
+        let out = packed(vec![
+            at(9 * H, Some(10 * H)),
+            at(12 * H, Some(13 * H)),
+            at(12 * H, Some(13 * H)),
+            at(12 * H, Some(13 * H)),
+        ]);
+        assert_eq!(out[0].2, 1, "the morning was narrowed by the afternoon");
+        assert!(out[1..].iter().all(|(_, _, c)| *c == 3));
+    }
+
+    #[test]
+    fn a_chain_of_overlaps_is_one_cluster() {
+        // A overlaps B, B overlaps C, A does not touch C. They are still one
+        // cluster: B has to be drawn beside both, so all three share a width.
+        let out = packed(vec![
+            at(9 * H, Some(10 * H)),
+            at(9 * H + H / 2, Some(11 * H)),
+            at(10 * H + H / 2, Some(12 * H)),
+        ]);
+        assert!(
+            out.iter().all(|(_, _, c)| *c == 2),
+            "a transitive overlap was split: {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_occurrence_with_no_written_end_still_collides() {
+        // Most captures have no end: the promoter refuses to invent §3.3's
+        // "30m default", because a wrong end time is harder to notice than a
+        // missing one. A zero-length interval overlaps nothing, so without a
+        // minimum these would be packed into one column and drawn on top of
+        // each other — two meetings at nine, and only one of them visible.
+        let out = packed(vec![at(9 * H, None), at(9 * H, None)]);
+        assert_eq!(out[0].2, 2);
+        assert_ne!(out[0].1, out[1].1);
+    }
+
+    #[test]
+    fn a_missing_end_does_not_invent_a_collision() {
+        // The other side of it. The minimum exists to make two things at the
+        // same time collide, not to make an hour's worth of room.
+        let out = packed(vec![at(9 * H, None), at(10 * H, None)]);
+        assert_eq!(out[0].2, 1);
+        assert_eq!(out[1].2, 1);
+    }
+
+    #[test]
+    fn a_band_entry_is_left_where_it_is() {
+        // All-day entries and due tasks have no position on an hour axis, which
+        // is the whole reason §3.2 keeps them in a band above the grid. Packing
+        // one would give it a column, and a column is a claim about a time.
+        let mut rows = vec![at(9 * H, Some(10 * H)), at(9 * H, Some(10 * H))];
+        rows[0].all_day = true;
+        pack(&mut rows);
+        assert_eq!((rows[0].column, rows[0].columns), (0, 1));
+        assert_eq!(
+            (rows[1].column, rows[1].columns),
+            (0, 1),
+            "the timed one was widened against a band entry it cannot overlap"
         );
     }
 }

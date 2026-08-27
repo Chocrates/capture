@@ -213,6 +213,46 @@ fn a_render_cannot_be_overtaken_by_another() {
 }
 
 #[test]
+fn the_grid_does_not_invent_an_end_time() {
+    // The promoter refuses to invent §3.3's "30m default", because a wrong end
+    // time is harder to notice than a missing one. A block drawn half an hour
+    // tall would put that invention straight back on the screen, where it looks
+    // like something somebody wrote — so an occurrence with no written end is
+    // drawn as a mark at its start and says so by its border.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("NO_END_HEIGHT"),
+        "an occurrence with no end has no distinct rendering"
+    );
+    assert!(
+        code.contains("r.end_ms ?"),
+        "the block height does not distinguish a written end from a missing one"
+    );
+    assert!(
+        ui("style.css").contains(".block.open"),
+        "nothing on screen tells a known length from an unknown one"
+    );
+}
+
+#[test]
+fn the_page_does_not_decide_where_columns_go() {
+    // Packing lives in `agenda`, so the command line and this page resolve a
+    // day the same way and a change to the rule cannot reach one and miss the
+    // other. A second implementation here would be a second answer.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("r.columns") && code.contains("r.column"),
+        "the grid does not use the columns it was given"
+    );
+    for invented in ["function pack", "overlaps(", "cluster"] {
+        assert!(
+            !code.contains(invented),
+            "the page grew its own packing ({invented:?}), which is a second answer to one question"
+        );
+    }
+}
+
+#[test]
 fn review_keeps_no_score_of_any_kind() {
     // The surface where a graded record would do the most harm: recurring,
     // permanently recorded, delivered on a schedule the user did not set, to

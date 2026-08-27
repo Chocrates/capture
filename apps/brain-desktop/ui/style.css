@@ -111,6 +111,38 @@ h2:first-child { margin-top: 0; }
         background: var(--panel); border: 1px solid var(--line);
         border-radius: 8px; padding: .8rem; }
 
+/* The timed grid (§4.4). Hours down the side, occurrences placed on them, and
+ * overlapping ones side by side — a list can say two things start at nine, and
+ * only a grid can show which of them is over by half past. */
+.grid { position: relative; margin-top: .6rem; }
+/* Where the blocks live: everything right of the hour labels. Their left and
+ * width percentages are of this box, so a column is a fraction of the space
+ * actually available rather than of the page. */
+.lanes { position: absolute; left: 3.4rem; right: 0; top: 0; bottom: 0; }
+.hour {
+  position: absolute; left: 0; right: 0; height: 0;
+  border-top: 1px solid var(--line);
+}
+.hour-label {
+  position: absolute; left: 0; top: -.55rem;
+  color: var(--dim); font-size: .7rem; font-variant-numeric: tabular-nums;
+  background: var(--bg); padding-right: .3rem;
+}
+.block {
+  position: absolute; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  border-radius: 5px; padding: .1rem .35rem; cursor: pointer;
+  font-size: .8rem; line-height: 1.25;
+}
+.block:hover { border-color: var(--text); }
+/* No end was written, so none is drawn. A block claiming half an hour would put
+ * an invention on the screen looking like something somebody wrote. */
+.block.open { border-style: dashed; border-left-style: solid; }
+.block.done { opacity: .5; text-decoration: line-through; }
+.block-when { color: var(--dim); font-variant-numeric: tabular-nums; margin-right: .35rem; }
+.block .shift { display: block; color: var(--warn); font-size: .7rem; }
+
 /* A due date is not a time. It reads as what it is rather than sitting in an
  * empty clock column pretending to have an hour. */
 .when.due { color: var(--warn); font-variant-numeric: normal; }
