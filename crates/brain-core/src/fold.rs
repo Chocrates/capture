@@ -39,8 +39,8 @@ use minicbor::{Decode, Encode};
 use crate::{
     body::{
         AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, OccBody, OccEditBody, OccMoveBody,
-        PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody, SettingBody, TagBody,
-        UntagBody,
+        Outcome, PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody, ReviewBody,
+        SettingBody, TagBody, UntagBody,
     },
     envelope::Envelope,
     event::Kind,
@@ -219,6 +219,14 @@ pub struct Note {
     /// searchable and surfaced.
     #[n(20)]
     pub promotion: Option<Promotion>,
+    /// What review has done with this note.
+    ///
+    /// Counts of engagement, and nothing about memory. §2.7 withdrew the graded
+    /// outcome deliberately: a recurring, permanently-recorded record of recall
+    /// failures, on a schedule the user did not set, is the single most harmful
+    /// thing this design could contain for the person it is for.
+    #[n(22)]
+    pub review: ReviewState,
     /// Per-occurrence exceptions to this note's series, keyed by original start.
     ///
     /// Only ever populated for a promoted series. An exception naming an
@@ -272,6 +280,36 @@ pub struct Promotion {
     /// The event that assigned it.
     #[n(5)]
     pub event: EventId,
+}
+
+/// What review has done with a note.
+///
+/// Deliberately not a score. These are inputs to scheduling — §2.8 tunes
+/// intervals by engagement, and an item deferred twice stops being offered —
+/// and they are never a number shown to anybody. The distinction is the whole
+/// of §2.7: engagement is a fact about what you did, and recall is a judgement
+/// about your memory, which this system does not record.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Encode, Decode)]
+pub struct ReviewState {
+    /// When it was last offered.
+    #[n(0)]
+    pub last_shown: Option<Hlc>,
+    /// How many times something was done with it.
+    #[n(1)]
+    pub engaged: u32,
+    /// How many times it was pushed away.
+    ///
+    /// Twice is the limit, and then it stops being offered rather than being
+    /// pressed. Somebody who has declined an item twice has told you.
+    #[n(2)]
+    pub deferred: u32,
+}
+
+impl ReviewState {
+    /// Whether review should stop offering this.
+    pub fn declined(&self) -> bool {
+        self.deferred >= 2
+    }
 }
 
 /// What has happened to one occurrence of a series (§3.5).
@@ -487,15 +525,15 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::UNTAG => apply_untag(&mut proj, &mut tags, e),
             Kind::PIN => apply_pin(&mut proj, e),
             Kind::PROMOTE => apply_promote(&mut proj, e),
+            Kind::REVIEW => apply_review(&mut proj, e),
             Kind::OCC_MOVE => apply_occ_move(&mut proj, e),
             Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
             Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
             Kind::OCC_DONE => apply_occ(&mut proj, e, |o| o.done = true),
             Kind::OCC_UNDONE => apply_occ(&mut proj, e, |o| o.done = false),
-            // An intent is a plan, and a review is a record that something was
-            // resurfaced. Neither is a fact about a note's content, so neither
-            // changes one here.
-            Kind::INTENT | Kind::REVIEW => {}
+            // An intent is a plan rather than a fact about any note's content,
+            // so it changes nothing here.
+            Kind::INTENT => {}
             Kind::ALIAS => apply_alias(&mut proj, &mut names, e),
             Kind::UNFLAG => apply_unflag(&mut proj, e),
             Kind::RESOLVE => collect_resolve(&mut proj, &mut dismissed, e),
@@ -622,6 +660,7 @@ fn apply_capture(
             tag_adds: Vec::new(),
             pinned: false,
             promotion: None,
+            review: ReviewState::default(),
             occurrences: BTreeMap::new(),
             muted_until: None,
             redacted_at: None,
@@ -933,6 +972,35 @@ fn apply_promote(proj: &mut Projection, e: &Envelope) {
 
     if wins {
         n.promotion = Some(incoming);
+    }
+}
+
+/// Record that a note was resurfaced, and what became of it.
+///
+/// Three outcomes and no fourth. `recalled / missed / snoozed` was withdrawn in
+/// §2.7, and the encoding has no representation for it — which is why this can
+/// only ever count what somebody did rather than how well they remembered.
+fn apply_review(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(r) = minicbor::decode::<ReviewBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    let Some(n) = proj.notes.get_mut(&tgt) else {
+        return;
+    };
+
+    // Later wins for the timestamp, and the counts accumulate. A union rather
+    // than last-write-wins: two devices offering the same note independently
+    // both happened, and picking one would lose the other.
+    if n.review.last_shown.is_none_or(|at| e.header.hlc > at) {
+        n.review.last_shown = Some(e.header.hlc);
+    }
+    match r.outcome {
+        Outcome::Engaged => n.review.engaged += 1,
+        Outcome::Deferred => n.review.deferred += 1,
+        Outcome::Shown => {}
     }
 }
 

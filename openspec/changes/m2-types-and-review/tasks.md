@@ -69,13 +69,13 @@
 
 ## 8. Review — the component with the best evidence
 
-- [ ] 8.1 Implement the session at **five items**. The property that matters is that it is always finishable — a session you do not finish is a backlog by another name. Not a setting: a knob nobody turns is a default with extra code.
-- [ ] 8.2 Implement selection in the stated priority order: forward markers, active project or upcoming event, never engaged since capture (oldest first), matching ambient context.
-- [ ] 8.3 Implement the session shape: bounded, ending, and saying so. Never an unbounded queue — §3.6 spends its length on why manufactured backlogs are the wrong shape here.
-- [ ] 8.4 Implement the `review` event with outcomes `shown / engaged / deferred` only.
-- [ ] 8.5 Implement scheduling by engagement rather than accuracy: engaged recurs less often, deferred twice stops being offered rather than being pressed.
-- [ ] 8.6 Confirm by test that **no score, streak, accuracy or aggregate exists anywhere, at any aggregation**. This is the surface where a graded record would do the most harm, and the absence is a requirement rather than an omission.
-- [ ] 8.7 Confirm `mute` applies to review, and that "pause review" and "less often" work without asking for a reason.
+- [x] 8.1 Implement the session at **five items**. The property that matters is that it is always finishable — a session you do not finish is a backlog by another name. Not a setting: a knob nobody turns is a default with extra code.
+- [~] 8.2 Implement selection in the stated priority order: forward markers, active project or upcoming event, never engaged since capture (oldest first), matching ambient context. **Three of four**: forward markers, never-engaged-oldest-first, and a context tier are in. The second — "attached to an active project or an upcoming calendar event" — needs a notion of an *active* project that does not exist: `^project` is a sigil the recognizer collects and nothing yet makes one current. Building a guess at it would put a tier in the order that fires on the wrong things.
+- [x] 8.3 Implement the session shape: bounded, ending, and saying so. Never an unbounded queue — §3.6 spends its length on why manufactured backlogs are the wrong shape here.
+- [x] 8.4 Implement the `review` event with outcomes `shown / engaged / deferred` only.
+- [x] 8.5 Implement scheduling by engagement rather than accuracy: engaged recurs less often, deferred twice stops being offered rather than being pressed.
+- [x] 8.6 Confirm by test that **no score, streak, accuracy or aggregate exists anywhere, at any aggregation**. This is the surface where a graded record would do the most harm, and the absence is a requirement rather than an omission.
+- [x] 8.7 Confirm `mute` applies to review, and that "pause review" and "less often" work without asking for a reason.
 
 ## 9. Intents — if-then plans firing locally
 

@@ -194,6 +194,35 @@ pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result
     Ok(())
 }
 
+/// Record what became of a resurfaced note.
+///
+/// Three outcomes and no fourth. §2.7 withdrew the graded one — there is
+/// nothing here that records whether you remembered, because the system does
+/// not need to know in order to schedule well, and a permanent record of recall
+/// failures is the most harmful thing this design could contain.
+pub fn reviewed(paths: StorePaths, name: &str, outcome: &str) -> Result<()> {
+    use brain_core::body::Outcome;
+
+    let outcome = match outcome {
+        "engaged" => Outcome::Engaged,
+        "deferred" => Outcome::Deferred,
+        "shown" => Outcome::Shown,
+        other => {
+            return Err(brain_store::Error::Usage(format!(
+                "'{other}' is not an outcome; use engaged, deferred or shown"
+            )));
+        }
+    };
+
+    brain_store::review::record(&paths, name, outcome)?;
+    match outcome {
+        Outcome::Engaged => say!("Noted."),
+        Outcome::Deferred => say!("Pushed away. Twice and it stops being offered."),
+        Outcome::Shown => {}
+    }
+    Ok(())
+}
+
 /// Suppress a note from surfacing, without destroying it.
 ///
 /// Muting exists so that making something go away is *cheaper* than destroying

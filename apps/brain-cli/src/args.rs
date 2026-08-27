@@ -45,6 +45,10 @@ pub enum Command {
     Agenda { day: Option<String>, json: bool },
     /// Notes promoted to tasks.
     Tasks { json: bool },
+    /// A bounded review session.
+    Review { json: bool },
+    /// Record what became of a resurfaced note.
+    Reviewed { name: String, outcome: String },
     /// Mark one occurrence of a recurring series complete, or not.
     Occurrence {
         /// The series.
@@ -234,6 +238,24 @@ where
                 }),
             }
         }
+        "review" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            match rest.iter().find(|a| *a != "--json") {
+                Some(extra) => Err(Bad::UnknownFlag {
+                    command: "review".into(),
+                    flag: extra.clone(),
+                }),
+                None => Ok(Command::Review { json }),
+            }
+        }
+        "engaged" | "deferred" | "shown" => Ok(Command::Reviewed {
+            name: args.get(1).cloned().ok_or_else(|| Bad::UnknownFlag {
+                command: args[0].clone(),
+                flag: "no note name".into(),
+            })?,
+            outcome: args[0].clone(),
+        }),
         "tasks" => {
             let rest = &args[1..];
             let json = has_json(rest);

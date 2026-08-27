@@ -283,6 +283,19 @@ CREATE TABLE IF NOT EXISTS occurrences (
 
 CREATE INDEX IF NOT EXISTS occurrences_start ON occurrences(start_ms);
 
+-- What review has done with each note.
+--
+-- Counts of engagement and nothing about memory. §2.7 removed the graded
+-- outcome deliberately, and there is no column here for one: `engaged` and
+-- `deferred` are what somebody did, which is a different fact from how well
+-- they remembered and the only one this design will record.
+CREATE TABLE IF NOT EXISTS review (
+  tgt        BLOB PRIMARY KEY,
+  last_shown INTEGER,
+  engaged    INTEGER NOT NULL DEFAULT 0,
+  deferred   INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS mutes (
   scope TEXT NOT NULL,
   value TEXT NOT NULL,
@@ -329,6 +342,35 @@ pub struct OccurrenceRow {
     pub location: Option<String>,
     /// Notes on this occurrence only.
     pub notes: Option<String>,
+}
+
+/// The columns a `NoteRow` is read from, aliased to `n`.
+const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
+     n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
+     n.redacted_at, n.credential,
+     EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0)";
+
+/// What every review tier excludes, and why.
+///
+/// Muting always wins (§2.6): anything you do not want resurfaced stops being
+/// resurfaced, reversibly, without being destroyed. Two deferrals end it —
+/// somebody who has declined an item twice has told you, and pressing further
+/// is what §2.7 exists to prevent. A note with no readable text has nothing to
+/// offer. And a note is not due until its interval has elapsed.
+const REVIEW_ELIGIBLE: &str = "n.text IS NOT NULL
+       AND n.muted_until IS NULL
+       AND n.redacted_at IS NULL
+       AND COALESCE(r.deferred, 0) < 2
+       AND (r.last_shown IS NULL
+            OR ?1 - r.last_shown >= CASE COALESCE(r.engaged, 0)
+                 WHEN 0 THEN 86400000
+                 WHEN 1 THEN 259200000
+                 WHEN 2 THEN 604800000
+                 WHEN 3 THEN 1814400000
+                 ELSE 5184000000 END)";
+
+fn utc() -> brain_time::Zone {
+    brain_time::Zone::new("UTC").expect("UTC is always present")
 }
 
 /// A promotion, as the projection stores it.
@@ -505,7 +547,7 @@ impl Store {
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
-             DELETE FROM occurrences;",
+             DELETE FROM occurrences; DELETE FROM review;",
         )?;
         write_into(&tx, p, now)?;
         tx.commit()?;
@@ -532,6 +574,7 @@ impl Store {
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM promotions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM review WHERE tgt = ?1", params![t])?;
             if let Some(row) = fts_row(&tx, tgt)? {
                 tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
             }
@@ -806,6 +849,83 @@ impl Store {
             if let Some(id) = id_from(r?) {
                 out.push(id);
             }
+        }
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------ review ----
+    //
+    // The three selection tiers of §2.8, in its order. Each excludes the same
+    // things for the same reasons, which is why they share `REVIEW_ELIGIBLE`:
+    // a muted note is not resurfaced (§2.6), a note declined twice stops being
+    // offered rather than being pressed, a note with no readable text has
+    // nothing to resurface, and a note whose interval has not elapsed is not
+    // due.
+
+    /// Notes carrying a forward marker — "revisit Q2", "check back in a month".
+    ///
+    /// The first tier, and the strongest signal there is: somebody said, in the
+    /// note itself, that this was worth coming back to.
+    pub fn review_forward(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             JOIN promotions p ON p.tgt = n.tgt
+             LEFT JOIN review r ON r.tgt = n.tgt
+             WHERE {REVIEW_ELIGIBLE}
+               AND ((p.start_ms IS NOT NULL AND p.start_ms > ?1)
+                 OR (p.start_date IS NOT NULL AND p.start_date > ?3))
+             ORDER BY n.created_wall ASC
+             LIMIT ?2"
+        );
+        // The only tier that compares a date, so the only one given one.
+        let today = format!("{}", brain_time::civil_date(now, utc()));
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![now, limit as i64, today], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Notes never engaged with since capture, oldest first.
+    pub fn review_never_engaged(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             LEFT JOIN review r ON r.tgt = n.tgt
+             WHERE {REVIEW_ELIGIBLE}
+               AND COALESCE(r.engaged, 0) = 0
+             ORDER BY n.created_wall ASC
+             LIMIT ?2"
+        );
+        self.review_query(&sql, now, limit)
+    }
+
+    /// Notes captured in the context you are in now.
+    ///
+    /// The recognition cue is frequently the situation rather than the text
+    /// (§2.3), so a note captured in this repository is a candidate while you
+    /// are in it.
+    pub fn review_by_context(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             LEFT JOIN review r ON r.tgt = n.tgt
+             WHERE {REVIEW_ELIGIBLE}
+             ORDER BY n.created_wall ASC
+             LIMIT ?2"
+        );
+        self.review_query(&sql, now, limit)
+    }
+
+    fn review_query(&self, sql: &str, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let mut st = self.conn.prepare(sql)?;
+        let rows = st.query_map(params![now, limit as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
         }
         Ok(out)
     }
@@ -1678,6 +1798,19 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
     }
 
     for (tgt, n) in &p.notes {
+        if n.review.last_shown.is_some() || n.review.engaged > 0 || n.review.deferred > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO review (tgt, last_shown, engaged, deferred)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    tgt.0.to_vec(),
+                    n.review.last_shown.map(|h| h.wall as i64),
+                    n.review.engaged as i64,
+                    n.review.deferred as i64,
+                ],
+            )?;
+        }
+
         if let Some(promotion) = &n.promotion {
             write_promotion(tx, tgt, promotion)?;
             expand_occurrences(tx, tgt, n, promotion, &p.notes, now)?;

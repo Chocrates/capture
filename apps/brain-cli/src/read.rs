@@ -209,6 +209,79 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// A bounded review session.
+///
+/// Five items, then it is over and says so. An unbounded queue is a backlog and
+/// §3.6 spends its length on why a manufactured one is the wrong shape here — a
+/// session you always finish cannot become one.
+///
+/// Nothing is scored. The session records whether an item appeared, whether you
+/// did anything with it, and whether you pushed it away, and nothing anywhere
+/// aggregates those into a number about you (§2.7).
+pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
+    // A session opens the store because being offered an item is itself
+    // recorded — `shown` is an outcome, and a surface that read without writing
+    // would schedule the same five notes forever.
+    let mut s = brain_store::session::Session::open(paths.clone())?;
+    let now = now_ms();
+    let items = brain_store::review::session(&s, now)?;
+
+    if json {
+        let out: Vec<String> = items
+            .iter()
+            .map(|i| {
+                format!(
+                    "{{\"slug\":{},\"because\":{},\"text\":{}}}",
+                    quote(&i.note.slug),
+                    quote(match i.because {
+                        brain_store::review::Because::Forward => "forward",
+                        brain_store::review::Because::Never => "never-engaged",
+                        brain_store::review::Because::Context => "context",
+                    }),
+                    i.note
+                        .text
+                        .as_deref()
+                        .map(quote)
+                        .unwrap_or_else(|| "null".into())
+                )
+            })
+            .collect();
+        say!("[{}]", out.join(","));
+    } else if items.is_empty() {
+        say!("Nothing to review.");
+        say!();
+        say!("That is the ordinary state. Review offers what is due, and when");
+        say!("nothing is, the session is over before it started.");
+    } else {
+        say!("{} note(s), and then this is over.", items.len());
+        say!();
+        for i in &items {
+            let why = match i.because {
+                brain_store::review::Because::Forward => "you said to come back to this",
+                brain_store::review::Because::Never => "never looked at since capture",
+                brain_store::review::Because::Context => "captured somewhere like here",
+            };
+            say!("  {}", i.note.slug);
+            say!(
+                "    {}",
+                i.note.text.as_deref().map(first_line).unwrap_or_default()
+            );
+            say!("    — {why}");
+            say!();
+        }
+        say!("brain engaged <name>   did something with it");
+        say!("brain deferred <name>  push it away (twice and it stops being offered)");
+    }
+
+    // Being offered is itself the outcome `shown`. Recorded after the items are
+    // printed, so a failure to write cannot lose the session somebody is
+    // already reading.
+    for i in &items {
+        brain_store::review::write(&mut s, i.note.tgt, brain_core::body::Outcome::Shown)?;
+    }
+    Ok(())
+}
+
 fn utc() -> brain_time::Zone {
     brain_time::Zone::new("UTC").expect("UTC is always present")
 }
