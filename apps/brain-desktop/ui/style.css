@@ -167,6 +167,26 @@ h2:first-child { margin-top: 0; }
  * already dealt with is how a bounded session shows itself ending. */
 .note.done { opacity: .55; }
 
+/* A link inside the note's own text. Click-through is the point of the wiki
+ * layer (§4.3), and a link the reader has to find in a list below the note is
+ * one they will not follow. */
+.text .link {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--accent); cursor: pointer; border-bottom: 1px solid transparent;
+}
+.text .link:hover { border-bottom-color: var(--accent); }
+/* A name that has moved renders as a warning: something it used to reach is now
+ * something else, and that is worth noticing. Never followed, and never
+ * silently repointed at whatever the name means now. */
+.text .link.moved {
+  color: var(--danger); cursor: help; text-decoration: line-through;
+  border-bottom: none;
+}
+/* A name nothing answers to yet is ordinary, not alarming. Forward references
+ * are a normal way to write, and drawing one in red would make writing one feel
+ * like a mistake. */
+.link.unresolved { color: var(--dim); cursor: help; border-bottom: none; }
+
 .links a { color: var(--accent); cursor: pointer; text-decoration: none; }
 .links .broken { color: var(--danger); text-decoration: line-through; }
 .links li { margin: .2rem 0; }

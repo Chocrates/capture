@@ -65,8 +65,42 @@ pub const NAME_CAP: usize = 200;
 /// Duplicates are preserved in order. A note that links the same place twice
 /// really does link it twice, and collapsing them would misreport the text.
 pub fn extract(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    segments(text)
+        .into_iter()
+        .filter_map(|p| match p {
+            Piece::Link(name) => Some(name),
+            Piece::Text(_) => None,
+        })
+        .collect()
+}
+
+/// A run of note text, or a link in the middle of it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Piece {
+    /// Ordinary text, exactly as written.
+    Text(String),
+    /// A `[[name]]`, without its brackets.
+    Link(String),
+}
+
+/// Split note text into what to show and what to make clickable.
+///
+/// The same scan as [`extract`], which is defined in terms of this one. A
+/// surface that wanted clickable links had otherwise to find `[[name]]` again
+/// itself, and two scanners over one syntax is two answers to one question:
+/// the note body would eventually disagree with the list of links below it
+/// about what the note links to, and neither would be obviously wrong.
+///
+/// A run of text that *looks* like a link but is not one — no closing brackets,
+/// a name past [`NAME_CAP`], a newline inside — comes back as text, exactly as
+/// it was typed. Captured text is stored verbatim and shown verbatim; the
+/// brackets are not markup the user agreed to, so anything this does not
+/// recognise stays visible rather than disappearing into a failed parse.
+pub fn segments(text: &str) -> Vec<Piece> {
+    let mut out: Vec<Piece> = Vec::new();
     let bytes = text.as_bytes();
+    // Where the current run of plain text began.
+    let mut plain = 0;
     let mut i = 0;
 
     while i + 3 < bytes.len() {
@@ -82,9 +116,17 @@ pub fn extract(text: &str) -> Vec<String> {
         };
         let name = &text[start..end];
         if !name.is_empty() && name.len() <= NAME_CAP && !name.contains('\n') {
-            out.push(String::from(name));
+            if plain < i {
+                out.push(Piece::Text(String::from(&text[plain..i])));
+            }
+            out.push(Piece::Link(String::from(name)));
+            plain = end + 2;
         }
         i = end + 2;
+    }
+
+    if plain < text.len() {
+        out.push(Piece::Text(String::from(&text[plain..])));
     }
     out
 }
@@ -200,5 +242,75 @@ mod tests {
         };
         assert_eq!(l.name, "old-name");
         assert!(l.resolved.is_some());
+    }
+
+    #[test]
+    fn segments_and_extract_are_one_scan() {
+        // They must agree by construction, not by coincidence: the note body is
+        // drawn from `segments` and the links below it from `extract`, and a
+        // surface where those two disagree is one that shows a clickable link
+        // it does not list, or lists one the reader cannot see.
+        for text in [
+            "see [[budget-notes]] for detail",
+            "[[first]] then [[second]] then [[third]]",
+            "no links at all",
+            "[[a]] and again [[a]]",
+            "an unclosed [[link",
+            "brackets [[]] with nothing in them",
+        ] {
+            let from_segments: Vec<String> = segments(text)
+                .into_iter()
+                .filter_map(|p| match p {
+                    Piece::Link(n) => Some(n),
+                    Piece::Text(_) => None,
+                })
+                .collect();
+            assert_eq!(from_segments, extract(text), "disagreed about {text:?}");
+        }
+    }
+
+    #[test]
+    fn every_character_survives_being_split() {
+        // The pieces are what a surface draws, so anything dropped here is text
+        // that vanishes off the page. Reassembling must give back exactly what
+        // was captured, brackets included.
+        for text in [
+            "see [[budget-notes]] for detail",
+            "leading text [[a]]",
+            "[[a]] trailing text",
+            "[[a]][[b]]",
+            "an unclosed [[link stays visible",
+            "brackets [[]] with nothing in them",
+            "",
+            "[[",
+        ] {
+            let mut rebuilt = String::new();
+            for p in segments(text) {
+                match p {
+                    Piece::Text(t) => rebuilt.push_str(&t),
+                    Piece::Link(n) => {
+                        rebuilt.push_str("[[");
+                        rebuilt.push_str(&n);
+                        rebuilt.push_str("]]");
+                    }
+                }
+            }
+            assert_eq!(rebuilt, text, "text was lost splitting {text:?}");
+        }
+    }
+
+    #[test]
+    fn something_that_is_not_a_link_stays_text() {
+        // Captured text is stored verbatim and shown verbatim. Two brackets are
+        // not markup somebody agreed to, so anything the scanner does not
+        // recognise has to remain on the page rather than disappearing into a
+        // failed parse.
+        assert_eq!(
+            segments("an unclosed [[link"),
+            [Piece::Text("an unclosed [[link".to_string())]
+        );
+        let long = "x".repeat(NAME_CAP + 1);
+        let text = alloc::format!("[[{long}]]");
+        assert_eq!(segments(&text), [Piece::Text(text.clone())]);
     }
 }

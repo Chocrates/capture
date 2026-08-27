@@ -116,10 +116,41 @@ pub struct Backlink {
     pub name: String,
 }
 
+/// One run of a note's text, or a link inside it.
+///
+/// The body is sent pre-split rather than as a string the page scans itself.
+/// Two scanners over one syntax is two answers to one question: the body would
+/// eventually disagree with the list of links beneath it about what the note
+/// links to, and neither would be visibly wrong.
+#[derive(Serialize)]
+pub struct Piece {
+    /// Text as written. For a link this is the name between the brackets.
+    pub text: String,
+    /// Present only for a link: the note to navigate to, if the name still
+    /// denotes one.
+    pub target: Option<String>,
+    /// A link, rather than a run of text.
+    pub link: bool,
+    /// What became of the name. Three outcomes, not two — the first version had
+    /// only "broken or not" and rendered a name matching nothing as an ordinary
+    /// followable link, which went nowhere when clicked.
+    ///
+    /// - `"ok"` — it still denotes what it did; follow it.
+    /// - `"moved"` — the name now means something else. §4.3: silently pointing
+    ///   an old reference at new content is how a memory system starts lying to
+    ///   you, so this renders as broken showing the name as written.
+    /// - `"unresolved"` — nothing has that name. Not an error and not broken:
+    ///   forward references are a normal way to write, and the note that
+    ///   answers one may not exist yet. Shown as written, not followable.
+    pub state: &'static str,
+}
+
 /// Everything the note page shows.
 #[derive(Serialize)]
 pub struct Page {
     pub note: Note,
+    /// The text, split into what to show and what to make clickable.
+    pub body: Vec<Piece>,
     pub links: Vec<Link>,
     pub backlinks: Vec<Backlink>,
     pub versions: u64,
@@ -282,9 +313,10 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
         };
         let row = s.note(&tgt)?.ok_or_else(|| Error::NotFound(name.clone()))?;
 
-        let links = s
-            .links_from(&tgt)?
-            .into_iter()
+        let links_now = s.links_from(&tgt)?;
+        let links = links_now
+            .iter()
+            .cloned()
             .map(|l| Link {
                 broken: l.is_broken(),
                 target: l.target_slug,
@@ -298,6 +330,48 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             .map(|b| Backlink {
                 slug: b.slug,
                 name: b.name,
+            })
+            .collect();
+
+        // The body, split once here so the page never has to find a link
+        // itself. Zipped against `links` in order, which is what `ord` in that
+        // table is for: the Nth link in the text is the Nth row.
+        let mut nth = 0;
+        let body: Vec<Piece> = row
+            .text
+            .as_deref()
+            .map(brain_core::link::segments)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| match p {
+                brain_core::link::Piece::Text(t) => Piece {
+                    text: t,
+                    target: None,
+                    link: false,
+                    state: "ok",
+                },
+                brain_core::link::Piece::Link(name) => {
+                    let row = links_now.get(nth);
+                    nth += 1;
+                    // Followed to where the name means *now*. Following the
+                    // authoring-time target instead would navigate to content
+                    // the name no longer names.
+                    let target = row.and_then(|l: &projection::LinkRow| l.target_slug.clone());
+                    let state = match row {
+                        Some(l) if l.is_broken() => "moved",
+                        Some(_) if target.is_some() => "ok",
+                        // Either nothing by that name, or a target that is no
+                        // longer here. Both are "there is nowhere to go", and
+                        // neither is a lie about what the note says.
+                        _ => "unresolved",
+                    };
+                    Piece {
+                        text: name,
+                        target,
+                        link: true,
+                        state,
+                    }
+                }
             })
             .collect();
 
@@ -323,6 +397,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
 
         Ok(Page {
             note: Note::from(row),
+            body,
             links,
             backlinks,
             versions,

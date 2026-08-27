@@ -62,6 +62,33 @@ window.addEventListener("unhandledrejection", (e) => {
 // that forgets to would have the timeline reappear underneath whatever it drew.
 let current = "timeline";
 let agendaDay = null;
+let currentNote = null;
+
+// Where you have been, and where you were before you went back.
+//
+// §4.3 asks for this outright — "navigation keeps a back/forward history, since
+// click-through is the entire point" — and it is the difference between a wiki
+// and a set of pages. Following a link three notes deep and having no way back
+// except the timeline makes the third link one nobody clicks.
+//
+// Two stacks, which is how every browser does it and for the same reason: going
+// back does not erase where you were, and going somewhere new does. Entries are
+// the arguments to a view, not rendered pages — a page re-read on the way back
+// shows what the note says now, and a snapshot would show what it said then.
+const history = { back: [], forward: [] };
+
+/// Record where we are before going somewhere else.
+///
+/// Called by navigation, never by a redraw. `showNote` refreshing itself after
+/// an edit must not push a second copy of the same note, or "back" walks
+/// through the same page once per change made to it.
+function visit(entry) {
+    const here = current === "note" ? { view: "note", name: currentNote } : null;
+    if (here && here.name !== entry.name) history.back.push(here);
+    // A new destination ends the forward branch, exactly as it does in a
+    // browser: the path you came back from is no longer the path you are on.
+    history.forward.length = 0;
+}
 
 // The session on offer, held rather than re-fetched.
 //
@@ -203,7 +230,7 @@ function agendaRow(r) {
   }
 
   row.addEventListener("click", (e) => {
-    if (e.target.tagName !== "BUTTON") showNote(r.slug);
+    if (e.target.tagName !== "BUTTON") openNote(r.slug);
   });
   return row;
 }
@@ -500,7 +527,7 @@ async function showTimeline() {
       view.append(el("div", "day", d));
       day = d;
     }
-    view.append(noteRow(n, showNote));
+    view.append(noteRow(n, openNote));
   }
 }
 
@@ -533,29 +560,90 @@ async function showFiltered(field, value) {
   const notes = await call("filter_by_context", { field, value });
   if (stale(mine)) return;
   if (notes.length === 0) view.append(el("p", "empty", "Nothing else from there."));
-  for (const n of notes) view.append(noteRow(n, showNote));
+  for (const n of notes) view.append(noteRow(n, openNote));
 }
 
 // -------------------------------------------------------------- note page ---
 
+/// Open a note, remembering where you came from.
+///
+/// The navigating entry point. `showNote` is the drawing one and is called
+/// directly by anything redrawing the page it is already on — an edit, a tag —
+/// so that changing a note does not push a copy of it into the history.
+function openNote(name) {
+  visit({ view: "note", name });
+  return showNote(name);
+}
+
 async function showNote(name) {
   const mine = beginRender();
   current = "note";
+  currentNote = name;
   const page = await call("note", { name });
   if (stale(mine)) return;
   const n = page.note;
   view.replaceChildren();
 
+  const bar = el("div", "row nav");
+
   const back = el("button", "act", "← timeline");
   back.addEventListener("click", showTimeline);
-  view.append(back);
+  bar.append(back);
+
+  if (history.back.length) {
+    const b = el("button", "act", "◀ back");
+    b.addEventListener("click", () => {
+      const to = history.back.pop();
+      history.forward.push({ view: "note", name: currentNote });
+      showNote(to.name);
+    });
+    bar.append(b);
+  }
+  if (history.forward.length) {
+    const f = el("button", "act", "forward ▶");
+    f.addEventListener("click", () => {
+      const to = history.forward.pop();
+      history.back.push({ view: "note", name: currentNote });
+      showNote(to.name);
+    });
+    bar.append(f);
+  }
+  view.append(bar);
 
   const title = el("h2", null, n.alias ? `${n.alias}  ·  ${n.slug}` : n.slug);
   view.append(title);
 
   const text = el("div", "text");
   if (n.text !== null && n.text !== undefined) {
-    text.textContent = n.text;
+    // Rendered from the pieces the store split, never by scanning the text
+    // here. Every piece goes in as text — a note is stored verbatim and may
+    // contain anything at all, so a link's name is set with textContent like
+    // everything else and never as markup.
+    for (const p of page.body) {
+      if (!p.link) {
+        text.append(document.createTextNode(p.text));
+      } else if (p.state === "ok") {
+        const a = el("button", "link", p.text);
+        a.addEventListener("click", () => openNote(p.target));
+        text.append(a);
+      } else {
+        // Shown, not hidden, and showing the name that failed. §4.3: an
+        // unexplained absence costs more trust than an explained one, and a
+        // link quietly repointed at different content is worse than either.
+        //
+        // Two ways to have nowhere to go, and they are not the same thing to
+        // the reader. A moved name is a warning — something it used to reach is
+        // now something else. An unresolved one is ordinary: forward references
+        // are a normal way to write, and drawing one in alarm colours would
+        // make writing one feel like a mistake.
+        const b = el("span", `link ${p.state}`, `[[${p.text}]]`);
+        b.title =
+          p.state === "moved"
+            ? "this name no longer means what it did when it was written"
+            : "nothing has this name yet";
+        text.append(b);
+      }
+    }
   } else {
     text.className = "text absent";
     text.textContent = n.redacted
@@ -629,9 +717,16 @@ async function showNote(name) {
       li.append(span, ` — was ${l.target || "a note that is gone"}`);
       return li;
     }
+    // Nothing to open, so nothing that looks openable. The same defect as in
+    // the body: a name matching no note was drawn as a link and went nowhere.
+    if (!l.target) {
+      const li = el("li");
+      li.append(el("span", "link unresolved", l.name), " — nothing has this name yet");
+      return li;
+    }
     const li = el("li");
     const a = el("a", null, l.name);
-    a.addEventListener("click", () => showNote(l.target || l.name));
+    a.addEventListener("click", () => openNote(l.target));
     li.append(a);
     return li;
   }));
@@ -639,7 +734,7 @@ async function showNote(name) {
   view.append(linkList("Linked from", page.backlinks, (b) => {
     const li = el("li");
     const a = el("a", null, b.slug);
-    a.addEventListener("click", () => showNote(b.slug));
+    a.addEventListener("click", () => openNote(b.slug));
     li.append(a, ` — as ${b.name}`);
     return li;
   }));
@@ -862,7 +957,7 @@ function reviewCard(item) {
   const card = el("div", "note review");
 
   const open = el("button", "slug", item.slug);
-  open.addEventListener("click", () => showNote(item.slug));
+  open.addEventListener("click", () => openNote(item.slug));
   card.append(open);
 
   card.append(el("p", "body", item.text || ""));
@@ -1052,7 +1147,7 @@ q.addEventListener("input", () => {
     view.replaceChildren();
     const hits = await call("search", { query });
     view.append(el("h2", null, hits.length ? "Results" : `Nothing matches ${query}`));
-    for (const n of hits) view.append(noteRow(n, showNote));
+    for (const n of hits) view.append(noteRow(n, openNote));
   }, 150);
 });
 

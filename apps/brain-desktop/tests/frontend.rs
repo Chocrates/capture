@@ -275,6 +275,98 @@ fn the_page_does_not_decide_where_columns_go() {
 }
 
 #[test]
+fn the_page_does_not_look_for_links_itself() {
+    // The body arrives pre-split from `brain-core`, which is the same scan the
+    // links table is built from. A second scanner here is a second answer to
+    // one question: the note text would eventually disagree with the list of
+    // links beneath it about what the note links to, and neither would be
+    // visibly wrong.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("page.body"),
+        "the note body is not rendered from the pieces the store split"
+    );
+    // Looked for as a *scan*, not as an appearance: the page does render the
+    // brackets back around a name it cannot follow, which is the point of
+    // showing the raw text that failed.
+    for scan in ["indexOf(\"[[\")", "split(\"[[\")", "\\[\\[", "match(/"] {
+        assert!(
+            !code.contains(scan),
+            "the page looks for link syntax itself ({scan}), which is a second answer"
+        );
+    }
+}
+
+#[test]
+fn a_link_with_nowhere_to_go_is_not_drawn_as_followable() {
+    // Found by clicking one. A name matching no note was drawn as an ordinary
+    // link and navigated nowhere — twice over, in the note body and in the
+    // "links to" list. Three states, not two: it resolves, it moved, or nothing
+    // has that name yet.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains(r#"p.state === "ok""#),
+        "the body follows a link without checking whether it resolves"
+    );
+    assert!(
+        code.contains("if (!l.target)"),
+        "the links list still offers to open a name that matches nothing"
+    );
+    let css = ui("style.css");
+    assert!(
+        css.contains(".link.unresolved") && css.contains(".text .link.moved"),
+        "a name that moved and a name nothing answers to look the same"
+    );
+}
+
+#[test]
+fn following_a_link_can_be_undone() {
+    // §4.3 asks for this outright: "navigation keeps a back/forward history,
+    // since click-through is the entire point". Three notes deep with no way
+    // back except the timeline makes the third link one nobody clicks.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("history.back") && code.contains("history.forward"),
+        "there is no navigation history"
+    );
+}
+
+#[test]
+fn redrawing_a_note_does_not_count_as_going_somewhere() {
+    // `showNote` is the drawing entry point and `openNote` the navigating one.
+    // If an edit or a tag redrew through `openNote`, "back" would walk through
+    // one copy of the same note per change made to it.
+    let code = ui_code("app.js");
+    // Bounded to the function, by the next one declared after it. Taking
+    // everything to the end of the file swept in the review pane, which
+    // navigates through `openNote` correctly and should; bounding on a comment
+    // marker instead does not work here, because `ui_code` strips comments.
+    let after = code
+        .split("function actions(")
+        .nth(1)
+        .expect("actions() exists");
+    let end = after
+        .find("\nfunction ")
+        .into_iter()
+        .chain(after.find("\nasync function "))
+        .min()
+        .unwrap_or(after.len());
+    let actions = &after[..end];
+    assert!(
+        end < after.len(),
+        "the slice ran to the end of the file, so this checks more than actions()"
+    );
+    assert!(
+        !actions.contains("openNote("),
+        "an action redraws through the navigating entry point, so back walks through edits"
+    );
+    assert!(
+        actions.contains("showNote("),
+        "this test would pass vacuously if actions redrew nothing"
+    );
+}
+
+#[test]
 fn review_keeps_no_score_of_any_kind() {
     // The surface where a graded record would do the most harm: recurring,
     // permanently recorded, delivered on a schedule the user did not set, to
