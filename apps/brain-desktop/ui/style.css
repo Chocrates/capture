@@ -111,6 +111,26 @@ h2:first-child { margin-top: 0; }
         background: var(--panel); border: 1px solid var(--line);
         border-radius: 8px; padding: .8rem; }
 
+/* Review. A card is not a row: it is a thing being offered, with answers on it,
+ * so it does not pretend to be clickable the way a timeline row does. */
+.note.review, .note.nagging { cursor: default; }
+.note.review:hover, .note.nagging:hover { border-color: var(--line); }
+.note .slug { background: none; border: none; padding: 0; font: inherit;
+              color: var(--accent); cursor: pointer; font-family: ui-monospace, monospace;
+              font-size: .8rem; }
+.why { color: var(--dim); font-size: .85rem; margin-top: .35rem; }
+
+/* An offer, and it looks like one. Nothing here has been applied to the note,
+ * and a suggestion styled like a fact would be read as one. */
+.suggestion { color: var(--warn); font-size: .85rem; margin-top: .35rem;
+              border-left: 2px solid var(--warn); padding-left: .5rem; }
+
+.said { color: var(--dim); font-size: .85rem; margin-top: .8rem; }
+/* Answered items stay on the page rather than vanishing. A list that reflows
+ * under the cursor makes the next click a gamble, and seeing what you have
+ * already dealt with is how a bounded session shows itself ending. */
+.note.done { opacity: .55; }
+
 .links a { color: var(--accent); cursor: pointer; text-decoration: none; }
 .links .broken { color: var(--danger); text-decoration: line-through; }
 .links li { margin: .2rem 0; }

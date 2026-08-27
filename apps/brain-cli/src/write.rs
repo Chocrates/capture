@@ -233,28 +233,10 @@ pub fn reviewed(paths: StorePaths, name: &str, outcome: &str) -> Result<()> {
 ///
 /// Pinned, like every correction, so no later reparse takes it back off.
 pub fn carries_forward(paths: StorePaths, name: &str) -> Result<()> {
-    use brain_core::body::Promoted;
-
-    let current = {
-        let store = crate::read::open(&paths)?;
-        let row = crate::read::find(&store, name)?;
-        store
-            .promotion_of(&row.tgt)?
-            .map(|p| p.as_)
-            .ok_or_else(|| {
-                brain_store::Error::Usage(format!("'{name}' has not been recognised as anything"))
-            })?
-    };
-
-    let Promoted::Series(mut fields) = current else {
-        return Err(brain_store::Error::Usage(format!(
-            "'{name}' is not a recurring series, so nothing about it can be owed"
-        )));
-    };
-
-    fields.carries_forward = true;
-    brain_store::promote::correct(&paths, name, Promoted::Series(fields))?;
-
+    // The rule about what may carry forward lives in the store, because the
+    // review pane asks for the same thing and two copies of "only a series can
+    // owe you anything" is one copy too many.
+    brain_store::promote::carries_forward(&paths, name)?;
     say!("Noted. Missed instances of {name} will stay until they are dealt with.");
     Ok(())
 }

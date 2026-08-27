@@ -161,6 +161,34 @@ pub struct Occurrence {
     pub text: Option<String>,
 }
 
+/// One note offered in a review session.
+#[derive(Serialize)]
+pub struct ReviewItem {
+    pub slug: String,
+    pub text: Option<String>,
+    /// `forward`, `never-engaged` or `context` — why this one was chosen.
+    pub because: &'static str,
+    /// A reading the recognizer had and did not act on, offered here as one
+    /// line. §3.1.1 keeps it an offer: nothing has been applied to this note.
+    pub suggestion: Option<String>,
+}
+
+/// A series that has lapsed often enough to be worth one question.
+#[derive(Serialize)]
+pub struct Nagging {
+    pub slug: String,
+}
+
+/// A whole session, which is a fixed small number of items and then over.
+#[derive(Serialize)]
+pub struct ReviewSession {
+    pub items: Vec<ReviewItem>,
+    /// Asked once, not inferred (§3.6). A parser cannot tell a missed walk from
+    /// a missed dose, and guessing wrong builds the backlog this system exists
+    /// to not have.
+    pub nagging: Vec<Nagging>,
+}
+
 /// One thing worth telling the user.
 #[derive(Serialize)]
 pub struct Condition {
@@ -649,6 +677,102 @@ pub fn acknowledge_exports() -> std::result::Result<(), String> {
         Ops::open(&paths()?.ops)?.exports_pruned()?;
         Ok(())
     })())
+}
+
+/// Offer a session, and record that it was offered.
+///
+/// # Why this writes
+///
+/// Being offered an item is itself an outcome — `shown` — and a surface that
+/// read without writing would schedule the same five notes forever. So this is
+/// a write command even though it looks like a read, and that is the same
+/// reason `brain review` opens the store rather than the projection.
+///
+/// The page holds the returned session rather than asking again, because a
+/// second call really would be a second offering: `last_shown` moves, and the
+/// items become ineligible for a day. In a terminal that is fine — running the
+/// command twice is two deliberate acts. Clicking a nav button twice is not,
+/// and a surface that quietly consumed somebody's session because they looked
+/// away would be punishing them for navigating.
+#[tauri::command]
+pub fn review() -> std::result::Result<ReviewSession, String> {
+    wire((|| {
+        let mut s = Session::open(paths()?)?;
+        let now = now_ms() as i64;
+        let chosen = brain_store::review::session(&s, now)?;
+
+        let items: Vec<ReviewItem> = chosen
+            .iter()
+            .map(|i| ReviewItem {
+                slug: i.note.slug.clone(),
+                // Only where nothing was promoted: once a note has a type, a
+                // competing reading is noise rather than an offer.
+                suggestion: match (
+                    s.state.promotion_of(&i.note.tgt).ok().flatten(),
+                    i.note.text.as_deref(),
+                ) {
+                    (None, Some(text)) => suggestion_for(text, i.note.tz.as_deref()),
+                    _ => None,
+                },
+                text: i.note.text.clone(),
+                because: match i.because {
+                    brain_store::review::Because::Forward => "forward",
+                    brain_store::review::Because::Never => "never-engaged",
+                    brain_store::review::Because::Context => "context",
+                },
+            })
+            .collect();
+
+        let nagging = s
+            .state
+            .repeatedly_lapsed(now, 3)?
+            .into_iter()
+            .map(|tgt| {
+                Ok(Nagging {
+                    slug: s.state.slug_of(&tgt)?.unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Written after everything above has succeeded, so a failure to read
+        // cannot spend a session nobody got to see.
+        for i in &chosen {
+            brain_store::review::write(&mut s, i.note.tgt, brain_core::body::Outcome::Shown)?;
+        }
+
+        Ok(ReviewSession { items, nagging })
+    })())
+}
+
+/// What became of one offered note.
+///
+/// Three outcomes and no fourth. §2.7 removed the grade rather than the
+/// feature: nothing here knows whether you remembered, because nothing here
+/// asks.
+#[tauri::command]
+pub fn reviewed(name: String, outcome: String) -> std::result::Result<(), String> {
+    wire((|| {
+        let outcome = match outcome.as_str() {
+            "engaged" => brain_core::body::Outcome::Engaged,
+            "deferred" => brain_core::body::Outcome::Deferred,
+            other => {
+                return Err(Error::Usage(format!(
+                    "'{other}' is not an outcome the page may record"
+                )));
+            }
+        };
+        brain_store::review::record(&paths()?, &name, outcome)
+    })())
+}
+
+/// Say that missing an instance of a series leaves something owed.
+///
+/// The answer to the one question review asks. Only ever set by a person —
+/// §3.6 forbids the recognizer inferring it, because a missed dose and a missed
+/// walk are the same sentence to a parser.
+#[tauri::command]
+pub fn carries_forward(name: String) -> std::result::Result<(), String> {
+    wire((|| brain_store::promote::carries_forward(&paths()?, &name))())
 }
 
 /// Drain anything that has become due.

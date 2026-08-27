@@ -213,6 +213,86 @@ fn a_render_cannot_be_overtaken_by_another() {
 }
 
 #[test]
+fn review_keeps_no_score_of_any_kind() {
+    // The surface where a graded record would do the most harm: recurring,
+    // permanently recorded, delivered on a schedule the user did not set, to
+    // somebody whose stated difficulty is memory. §2.7 removed the grade rather
+    // than the feature, and the absence is a requirement rather than an
+    // omission — which is exactly what a later change would fill in.
+    //
+    // Code only. This file argues the point in prose, and the first version of
+    // the equivalent test in `review.rs` failed on its own comments.
+    let code = ui_code("app.js");
+    for forbidden in ["streak", "accuracy", "grade", "correct", "score"] {
+        assert!(
+            !code.contains(forbidden),
+            "the review pane grew a {forbidden:?} — §2.7 says it must not"
+        );
+    }
+}
+
+#[test]
+fn a_session_is_fetched_once_rather_than_on_every_visit() {
+    // Asking for a session is a write: being offered is the outcome `shown`,
+    // which moves `last_shown` and makes those notes ineligible for a day. A
+    // pane that re-fetched on navigation would spend somebody's five notes
+    // because they glanced at the timeline and came back.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("if (!session)"),
+        "the review pane fetches unconditionally, so navigating spends a session"
+    );
+}
+
+#[test]
+fn review_does_not_redraw_on_its_own() {
+    // Two reasons, and the second is the one that bites: a redraw would discard
+    // a session part-way through, and the `shown` events this pane writes are
+    // themselves a store change — so a review that refreshed on change would
+    // refresh because of itself.
+    let code = ui_code("app.js");
+    let refresh = code
+        .split("function refresh()")
+        .nth(1)
+        .expect("refresh() exists");
+    let body = &refresh[..refresh.find("\n}").unwrap_or(refresh.len())];
+    assert!(
+        !body.contains("showReview"),
+        "refresh() redraws review, which discards a session in progress"
+    );
+    assert!(
+        body.contains("showTimeline"),
+        "this test would pass vacuously if refresh() drew nothing at all"
+    );
+}
+
+#[test]
+fn an_answered_item_stays_answered_across_a_visit() {
+    // Found by using it: the answers lived in the DOM, so leaving the pane and
+    // coming back redrew the buttons on items already dealt with. Pressing one
+    // again writes a second event, and `deferred` accumulates — two deferrals
+    // retire an item permanently. A trip through the nav bar could have quietly
+    // ended a note the user pushed away exactly once.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains("item.answered") && code.contains("n.answered"),
+        "answers are not recorded on the session, so a redraw offers them again"
+    );
+}
+
+#[test]
+fn leaving_a_review_is_not_the_same_as_deferring() {
+    // Two deferrals end an item permanently. That is a real consequence, and
+    // closing a window must not be able to trigger it — only the button may.
+    let code = ui_code("app.js");
+    let n = code.matches("\"deferred\"").count();
+    assert_eq!(
+        n, 1,
+        "expected exactly one place to record a deferral (the button), found {n}"
+    );
+}
+
+#[test]
 fn a_store_error_is_not_a_broken_window() {
     // These need different words and for a while had the same ones. A
     // projection being rebuilt after an upgrade made the page announce that

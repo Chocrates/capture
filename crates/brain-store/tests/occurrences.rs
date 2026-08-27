@@ -365,3 +365,64 @@ fn a_completion_survives_a_split_that_moves_past_it() {
         "a completion was lost when the schedule moved past it"
     );
 }
+
+/// The one question review asks, and the answer being a person's to give.
+///
+/// §3.6 makes this the foot-gun exception: "walk the dog daily" and "take the
+/// pill daily" are the same sentence to a parser and opposite answers to
+/// somebody living with the consequences. So the flag is only ever set by a
+/// person, and it lives in the store rather than in a surface because there are
+/// now two surfaces asking for it — the command line and the review pane.
+#[test]
+fn a_person_can_say_that_missing_an_instance_leaves_something_owed() {
+    let scratch = Scratch::new("carries");
+    let paths = scratch.paths();
+    let (slug, tgt) = weekday_series(&paths);
+
+    let before = {
+        let s = Session::open(paths.clone()).unwrap();
+        match s.state.promotion_of(&tgt).unwrap().map(|p| p.as_) {
+            Some(Promoted::Series(f)) => f.carries_forward,
+            other => panic!("expected a series, got {other:?}"),
+        }
+    };
+    assert!(!before, "nothing may carry forward until somebody says so");
+
+    promote::carries_forward(&paths, &slug).unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+    match s.state.promotion_of(&tgt).unwrap().map(|p| p.as_) {
+        Some(Promoted::Series(f)) => assert!(f.carries_forward),
+        other => panic!("expected a series, got {other:?}"),
+    }
+
+    // Pinned, like every correction: a later reparse must not take it back off.
+    // A flag that silently reverted would be worse than never having been set,
+    // because the user would have been told it was.
+    assert!(
+        s.state.promotion_of(&tgt).unwrap().unwrap().pinned,
+        "a person's answer must not be displaced by a reparse"
+    );
+}
+
+#[test]
+fn nothing_but_a_series_can_owe_you_anything() {
+    // A one-off cannot lapse repeatedly, so there is nothing for the flag to
+    // mean. Refused rather than accepted and ignored — a setting that appears
+    // to take and does nothing is the shape of failure §2.4.1 spends its length
+    // on.
+    let scratch = Scratch::new("carries-nonseries");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("dentist on friday").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+    promote::correct(&paths, &slug, promote::task(false, None)).unwrap();
+
+    let e = promote::carries_forward(&paths, &slug).unwrap_err();
+    assert!(
+        e.to_string().contains("not a recurring series"),
+        "unhelpful refusal: {e}"
+    );
+}

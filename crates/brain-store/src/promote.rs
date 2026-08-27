@@ -220,6 +220,42 @@ pub fn correct(paths: &StorePaths, name: &str, as_: Promoted) -> Result<()> {
     Ok(())
 }
 
+/// Say that missing an instance of a series leaves something owed.
+///
+/// Only ever set by a person. §3.6 is explicit that the recognizer must not
+/// infer this: "walk the dog daily" and "take the pill daily" are the same
+/// sentence to a parser and opposite answers to somebody living with the
+/// consequences, and guessing wrong in the direction of a manufactured backlog
+/// is the todo-app failure the default exists to avoid.
+///
+/// Lives here rather than in a surface because there are now two surfaces
+/// asking for it — the command line and the review pane — and the rule that it
+/// is only meaningful for a series is part of the operation rather than part of
+/// either one's presentation.
+pub fn carries_forward(paths: &StorePaths, name: &str) -> Result<()> {
+    let current = {
+        let store = crate::projection::Store::open_read(&crate::projection::generation_path(
+            &paths.state,
+            crate::ops::Ops::open_read(&paths.ops)?.generation()?,
+        ))?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        store.promotion_of(&tgt)?.map(|p| p.as_).ok_or_else(|| {
+            crate::Error::Usage(format!("'{name}' has not been recognised as anything"))
+        })?
+    };
+
+    let Promoted::Series(mut fields) = current else {
+        return Err(crate::Error::Usage(format!(
+            "'{name}' is not a recurring series, so nothing about it can be owed"
+        )));
+    };
+
+    fields.carries_forward = true;
+    correct(paths, name, Promoted::Series(fields))
+}
+
 /// Change a series from one occurrence onward.
 ///
 /// Bounds the existing rule with `UNTIL` immediately before the occurrence,

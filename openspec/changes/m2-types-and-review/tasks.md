@@ -39,7 +39,7 @@
 ## 5. Promotion — where recognitions become events
 
 - [x] 5.1 Author `promote` from a recognition at or above the 0.75 floor. Enforce the floor in one place.
-- [~] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing. **Partial**: nothing is applied, which is the half that matters and is tested. A suggestion is derived data rather than a decision, so it must not become an event — it is computed when review asks, which is section 8.
+- [x] 5.2 Record recognitions below the floor as suggestions, surfaced as one line in review, applied to nothing. A suggestion is derived data rather than a decision, so it never becomes an event — it is computed when the surface asks, and only where nothing was promoted, because once a note has a type a competing reading is noise rather than an offer. Both halves are now real: nothing is applied, and it is offered as one line on the note page and in the review pane (7.7).
 - [x] 5.3 Implement the reparse path on text edit, respecting pins.
 - [x] 5.3a Record the grammar version on every promotion, and sweep at startup: anything promoted under an older version is reparsed, pins untouched. The cost is the one §2.5.1 already anticipates — one `promote` per note per sweep. **Done**: every startup except a capture's. `Session::open_for_capture` opts the one path that must stay fast out of it, because a sweep can touch two hundred notes and §3.1 will not spend that on the gesture. The sweep is an indexed query now rather than a fold of the whole log.
 - [x] 5.4 Implement the human correction path, authoring `pinned: true`.
@@ -66,6 +66,7 @@
 - [x] 7.4 Agenda: what is due and what occurs, drawn from the same substrate — a meeting and the notes taken during it are one record, not two.
 - [x] 7.5 Occurrence completion in the GUI, including un-completing a mistaken tick.
 - [x] 7.6 CLI equivalents: agenda, tasks, occurrence completion, and the pinned correction path. Every one takes `--json`.
+- [x] 7.7 Review in the desktop, which section 8 built and no first-party surface reached. It existed only as `brain review` — the component with the best evidence behind it (§0.1 finding 2) was invisible in the window meant to be lived in. Two things about it are not obvious and are both tested. **Asking for a session is a write**: being offered is the outcome `shown`, so a pane that re-fetched on every visit would spend somebody's five notes because they glanced at the timeline and came back — the session is fetched once and held. And **an answer has to outlive a redraw**: the first version kept answers in the page, so leaving and returning offered the buttons again, and `deferred` accumulates — a trip through the nav bar could have retired a note the user pushed away exactly once. Found by using it.
 
 ## 8. Review — the component with the best evidence
 

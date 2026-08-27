@@ -63,6 +63,19 @@ window.addEventListener("unhandledrejection", (e) => {
 let current = "timeline";
 let agendaDay = null;
 
+// The session on offer, held rather than re-fetched.
+//
+// Asking for a session is a write: being offered a note is the outcome `shown`,
+// which moves `last_shown` and makes those notes ineligible for a day. Running
+// `brain review` twice in a terminal is two deliberate acts and spending the
+// session is fair. Clicking a nav button twice is not, and a pane that quietly
+// consumed somebody's five notes because they looked at the timeline in between
+// would be punishing them for navigating.
+//
+// So the session is fetched once and kept. It is over when it is over, and the
+// next one comes with the next window.
+let session = null;
+
 // Which render is the current one.
 //
 // Every view clears the page, then awaits the store, then appends. Two of those
@@ -644,6 +657,184 @@ async function renderPending() {
   }
 }
 
+// ----------------------------------------------------------------- review ---
+
+/// A fixed small number of notes, and then it is over.
+///
+/// # What this surface deliberately does not have
+///
+/// No score, no streak, no count of how many sessions you have done, no
+/// percentage. §2.7 removed the grade rather than the feature, and this is the
+/// surface where a graded record would do the most harm: a recurring,
+/// permanently recorded history of memory failures, delivered on a schedule the
+/// user did not set, to somebody whose stated difficulty is memory.
+///
+/// The outcomes are *did something* and *not now*. Neither is a mark.
+///
+/// # Leaving is not deferring
+///
+/// An item you never touch records nothing beyond having been shown. Only the
+/// button defers, because two deferrals end an item permanently — that is a
+/// real consequence, and closing a window must not be able to trigger it.
+async function showReview() {
+  const mine = beginRender();
+  current = "review";
+  view.replaceChildren();
+
+  if (!session) {
+    // Cleared by removing it rather than by replacing the page a second time.
+    // Two clears in one render is how a view ends up drawing over itself, and
+    // the page has already been emptied above.
+    const waiting = el("p", "empty", "Opening…");
+    view.append(waiting);
+    session = await call("review", {});
+    if (stale(mine)) return;
+    waiting.remove();
+  }
+
+  if (!session.items.length && !session.nagging.length) {
+    view.append(el("h2", null, "Nothing to review"));
+    view.append(
+      el("p", "hint", "That is the ordinary state. Review offers what is due, and when nothing is, the session is over before it started."),
+    );
+    return;
+  }
+
+  if (session.items.length) {
+    view.append(el("h2", null, `${session.items.length} note${session.items.length === 1 ? "" : "s"}, and then this is over.`));
+  }
+
+  for (const item of session.items) view.append(reviewCard(item));
+
+  for (const n of session.nagging) view.append(naggingCard(n));
+}
+
+const WHY = {
+  forward: "you said to come back to this",
+  "never-engaged": "never looked at since capture",
+  context: "captured somewhere like here",
+};
+
+function reviewCard(item) {
+  const card = el("div", "note review");
+
+  const open = el("button", "slug", item.slug);
+  open.addEventListener("click", () => showNote(item.slug));
+  card.append(open);
+
+  card.append(el("p", "body", item.text || ""));
+  card.append(el("p", "why", `— ${WHY[item.because] || item.because}`));
+
+  // A reading the recognizer had and did not act on. One line, applied to
+  // nothing: §3.1.1 is explicit that a low-confidence reading is an offer, and
+  // an offer that quietly became a calendar entry is the failure the floor
+  // exists to prevent.
+  if (item.suggestion) card.append(el("p", "suggestion", item.suggestion));
+
+  // An answered item keeps its answer on the session rather than in the page.
+  //
+  // The first version held it in the DOM, so leaving the pane and coming back
+  // redrew the buttons on items that had already been answered — and pressing
+  // one again would have written a second event. That is not cosmetic:
+  // `engaged` and `deferred` accumulate, and two deferrals end an item
+  // permanently. A round trip through the nav bar could have silently retired a
+  // note the user pushed away exactly once.
+  if (item.answered) {
+    card.classList.add("done");
+    card.append(el("p", "said", item.answered));
+    return card;
+  }
+
+  const row = el("div", "row");
+  const said = el("p", "said");
+  said.hidden = true;
+
+  const settle = (then) => {
+    item.answered = then;
+    row.hidden = true;
+    said.textContent = then;
+    said.hidden = false;
+    card.classList.add("done");
+  };
+
+  const record = async (outcome, then) => {
+    await call("reviewed", { name: item.slug, outcome });
+    settle(then);
+  };
+
+  const engaged = el("button", "act", "Did something with it");
+  engaged.addEventListener("click", () => record("engaged", "Noted."));
+
+  const deferred = el("button", "act", "Not now");
+  deferred.addEventListener("click", () =>
+    record("deferred", "Pushed away. Twice and it stops being offered."),
+  );
+
+  // §8.7: muting applies to review, and asks for no reason. Reversible and
+  // destroys nothing — the note stays exactly where it was.
+  const mute = el("button", "act quiet", "Stop resurfacing this");
+  mute.addEventListener("click", async () => {
+    await call("mute", { name: item.slug });
+    settle("Muted. It stays where it is; it just stops coming back.");
+  });
+
+  row.append(engaged, deferred, mute);
+  card.append(row, said);
+  return card;
+}
+
+/// The one question review asks, asked once.
+///
+/// §3.6: a series that has lapsed several times might be one that genuinely
+/// accumulates — a dose rather than a walk — and the recognizer must never
+/// decide that from phrasing. Both answers are offered, and the default of
+/// nothing being owed is the one that needs no action.
+function naggingCard(n) {
+  const card = el("div", "note nagging");
+  card.append(el("p", "body", `${n.slug} has lapsed several times.`));
+  card.append(
+    el("p", "why", "If missing it leaves something owed — a dose, an invoice — say so. Otherwise there is nothing to do: a missed day costs almost nothing."),
+  );
+
+  // Answered once, and it stays answered — the question is asked once, not once
+  // per visit.
+  if (n.answered) {
+    card.classList.add("done");
+    card.append(el("p", "said", n.answered));
+    return card;
+  }
+
+  const row = el("div", "row");
+  const said = el("p", "said");
+  said.hidden = true;
+
+  const settle = (then) => {
+    n.answered = then;
+    row.hidden = true;
+    said.textContent = then;
+    said.hidden = false;
+    card.classList.add("done");
+  };
+
+  const owed = el("button", "act", "Missing it leaves something owed");
+  owed.addEventListener("click", async () => {
+    await call("carries_forward", { name: n.slug });
+    settle("Noted. Missed instances will stay until they are dealt with.");
+  });
+
+  const fine = el("button", "act quiet", "Nothing is owed");
+  fine.addEventListener("click", () => {
+    // Nothing is written, because nothing changed. The default already says
+    // this, and recording an event to confirm a default is how a log fills up
+    // with facts about the system rather than facts about the user.
+    settle("Then there is nothing to do.");
+  });
+
+  row.append(owed, fine);
+  card.append(row, said);
+  return card;
+}
+
 // ----------------------------------------------------------------- health ---
 
 async function showHealth() {
@@ -702,6 +893,7 @@ document.querySelectorAll("nav button").forEach((b) => {
     b.classList.add("on");
     if (b.dataset.view === "health") showHealth();
     else if (b.dataset.view === "agenda") showAgenda(today());
+    else if (b.dataset.view === "review") showReview();
     else showTimeline();
   });
 });
@@ -756,6 +948,10 @@ function refresh() {
   if (current === "timeline") showTimeline();
   else if (current === "health") showHealth();
   else if (current === "agenda") showAgenda(agendaDay);
+  // Review is absent on purpose, and not merely unimplemented. Redrawing it
+  // would re-render a session the user is part-way through, and — worse — the
+  // `shown` events this pane writes are themselves a store change, so a review
+  // that refreshed on change would refresh because of itself.
 }
 
 showTimeline();

@@ -41,6 +41,9 @@ fn main() {
             ipc::redact,
             ipc::cancel_redaction,
             ipc::acknowledge_exports,
+            ipc::review,
+            ipc::reviewed,
+            ipc::carries_forward,
             ipc::tick,
         ])
         .run(tauri::generate_context!())
