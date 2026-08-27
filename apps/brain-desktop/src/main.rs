@@ -28,6 +28,7 @@ fn main() {
             ipc::set_task_done,
             ipc::note,
             ipc::search,
+            ipc::names,
             ipc::ambient,
             ipc::filter_by_context,
             ipc::health,

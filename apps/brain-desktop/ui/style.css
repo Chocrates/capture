@@ -167,6 +167,22 @@ h2:first-child { margin-top: 0; }
  * already dealt with is how a bounded session shows itself ending. */
 .note.done { opacity: .55; }
 
+/* Editing happens where the text is, not in a dialog over it. The note stays
+ * where it was on the page, and Escape puts it back untouched. */
+.editor {
+  display: block; width: 100%; box-sizing: border-box;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 8px;
+  padding: .8rem; font: inherit; line-height: 1.5; resize: vertical;
+}
+.completions { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .4rem; }
+.offer {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  color: var(--dim); padding: .15rem .45rem; cursor: pointer;
+  font-family: ui-monospace, monospace; font-size: .78rem;
+}
+.offer.on { color: var(--text); border-color: var(--accent); }
+
 /* A link inside the note's own text. Click-through is the point of the wiki
  * layer (§4.3), and a link the reader has to find in a list below the note is
  * one they will not follow. */

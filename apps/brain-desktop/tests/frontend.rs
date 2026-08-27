@@ -367,6 +367,56 @@ fn redrawing_a_note_does_not_count_as_going_somewhere() {
 }
 
 #[test]
+fn editing_does_not_happen_in_a_browser_dialog() {
+    // A `prompt` is a single-line box for multi-line prose, and it hides the
+    // note while you change it. It also made the wiki layer unusable by hand: a
+    // slug ends in ten base32 characters nobody will retype, so writing a link
+    // meant leaving to find the note and copy its name — the filing ritual §3.7
+    // exists to avoid.
+    let code = ui_code("app.js");
+    assert!(
+        !code.contains("prompt(\"Replace the text"),
+        "the editor is still a browser dialog"
+    );
+    assert!(
+        code.contains("function editNote"),
+        "there is no in-place editor"
+    );
+}
+
+#[test]
+fn completing_a_link_asks_the_store_for_names() {
+    // §4.3 specifies `[[` autocomplete. The names come from the store rather
+    // than from whatever happens to be on screen — the note you want to link to
+    // is usually not one of the twenty in the timeline behind you.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains(r#"call("names""#),
+        "completion does not ask the store, so it can only offer what is loaded"
+    );
+}
+
+#[test]
+fn the_completion_list_owns_enter_while_it_is_open() {
+    // Enter inserting a newline while a list of offers is showing is the thing
+    // that makes an autocomplete infuriating, and it is silent: you get a
+    // broken link and a line break instead of the note you meant.
+    let code = ui_code("app.js");
+    let keydown = code
+        .split("area.addEventListener(\"keydown\"")
+        .nth(1)
+        .expect("the editor handles keys");
+    let guarded = keydown
+        .split("if (offers.length)")
+        .nth(1)
+        .expect("the offers guard exists");
+    assert!(
+        guarded.contains("preventDefault"),
+        "keys are not taken back from the textarea while offers are showing"
+    );
+}
+
+#[test]
 fn review_keeps_no_score_of_any_kind() {
     // The surface where a graded record would do the most harm: recurring,
     // permanently recorded, delivered on a schedule the user did not set, to

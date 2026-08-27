@@ -752,6 +752,145 @@ function linkList(heading, items, render) {
   return box;
 }
 
+/// Edit the text in place, with `[[` completion.
+///
+/// A browser `prompt` was what this was, and it is a single-line box for
+/// multi-line prose with no way to see the note while changing it. Worse for
+/// the wiki layer specifically: a slug ends in ten base32 characters nobody
+/// will retype, so writing a link by hand meant going and finding the note to
+/// copy its name — the filing ritual §3.7 exists to avoid. §4.3 specifies `[[`
+/// autocomplete for exactly this reason.
+///
+/// The editor replaces the text block rather than opening over it, so the note
+/// stays where it was on the page and Escape puts it back untouched.
+function editNote(n) {
+  const box = document.querySelector(".text");
+  if (!box) return;
+
+  const area = el("textarea", "editor");
+  area.value = n.text || "";
+  // Sized to the text, so a one-line note does not get a page-tall box and a
+  // long one does not get a peephole.
+  area.rows = Math.min(20, Math.max(3, area.value.split("\n").length + 1));
+
+  const hint = el("p", "hint", "⌘/Ctrl+Enter saves · Escape cancels · [[ links");
+  const suggestions = el("div", "completions");
+  suggestions.hidden = true;
+
+  const done = () => showNote(n.slug);
+
+  const save = async () => {
+    if (area.value === (n.text || "")) return done();
+    await call("edit", { name: n.slug, text: area.value });
+    toast("Edited. The previous version is kept.");
+    done();
+  };
+
+  // What is being completed: the text between an unclosed `[[` and the caret.
+  //
+  // Deliberately narrow. It gives up at a newline or a closing bracket, so a
+  // note that merely contains brackets somewhere earlier does not put the
+  // editor into a completion it cannot leave.
+  const openLink = () => {
+    const upto = area.value.slice(0, area.selectionStart);
+    const at = upto.lastIndexOf("[[");
+    if (at < 0) return null;
+    const after = upto.slice(at + 2);
+    if (after.includes("]]") || after.includes("\n")) return null;
+    return { at, prefix: after };
+  };
+
+  let offers = [];
+  let chosen = 0;
+
+  const draw = () => {
+    suggestions.replaceChildren();
+    suggestions.hidden = offers.length === 0;
+    offers.forEach((name, i) => {
+      const b = el("button", i === chosen ? "offer on" : "offer", name);
+      b.addEventListener("click", () => accept(name));
+      suggestions.append(b);
+    });
+  };
+
+  const accept = (name) => {
+    const open = openLink();
+    if (!open) return;
+    const before = area.value.slice(0, open.at);
+    const after = area.value.slice(area.selectionStart);
+    area.value = `${before}[[${name}]]${after}`;
+    const caret = before.length + name.length + 4;
+    area.setSelectionRange(caret, caret);
+    offers = [];
+    draw();
+    area.focus();
+  };
+
+  const look = async () => {
+    const open = openLink();
+    if (!open) {
+      offers = [];
+      draw();
+      return;
+    }
+    offers = await call("names", { prefix: open.prefix });
+    chosen = 0;
+    draw();
+  };
+
+  area.addEventListener("input", look);
+  area.addEventListener("keydown", (e) => {
+    if (offers.length) {
+      // The completion list owns these keys while it is open, and nothing else
+      // does. Enter inserting a newline while a list is showing is the thing
+      // that makes an autocomplete infuriating.
+      if (e.key === "ArrowDown") {
+        chosen = (chosen + 1) % offers.length;
+        draw();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        chosen = (chosen - 1 + offers.length) % offers.length;
+        draw();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        accept(offers[chosen]);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Escape") {
+        offers = [];
+        draw();
+        e.preventDefault();
+        return;
+      }
+    }
+    if (e.key === "Escape") {
+      done();
+      e.preventDefault();
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      save();
+      e.preventDefault();
+    }
+  });
+
+  const row = el("div", "row");
+  const ok = el("button", "act", "Save");
+  ok.addEventListener("click", save);
+  const cancel = el("button", "act", "Cancel");
+  cancel.addEventListener("click", done);
+  row.append(ok, cancel);
+
+  box.replaceWith(area);
+  area.after(suggestions, hint, row);
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+}
+
 /// Everything that can be done to a note, from the note.
 ///
 /// The design is explicit that management should not require a terminal:
@@ -768,13 +907,7 @@ function actions(n) {
     return b;
   };
 
-  add("Edit", async () => {
-    const text = prompt("Replace the text with:", n.text || "");
-    if (text === null) return;
-    await call("edit", { name: n.slug, text });
-    toast("Edited. The previous version is kept.");
-    showNote(n.slug);
-  });
+  add("Edit", () => editNote(n));
 
   add("Tag", async () => {
     const tag = prompt("Tag:");

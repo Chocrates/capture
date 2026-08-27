@@ -657,6 +657,17 @@ pub fn set_occurrence(name: String, occ: i64, done: bool) -> std::result::Result
     })())
 }
 
+/// Names beginning with what has been typed, for completing a link.
+///
+/// §4.3 specifies `[[` autocomplete, and the reason is that the alternative is
+/// worse than no linking at all: a slug ends in ten base32 characters nobody
+/// will retype, so writing a link by hand means going and finding the note to
+/// copy its name — which is the filing ritual §3.7 exists to avoid.
+#[tauri::command]
+pub fn names(prefix: String) -> std::result::Result<Vec<String>, String> {
+    wire((|| read_only()?.names_like(&prefix, 8))())
+}
+
 #[tauri::command]
 pub fn search(query: String) -> std::result::Result<Vec<Note>, String> {
     wire((|| {

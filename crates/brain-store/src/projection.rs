@@ -1354,6 +1354,49 @@ impl Store {
         Ok(row.and_then(id_from))
     }
 
+    /// Names beginning with a prefix, for completing a link as it is typed.
+    ///
+    /// Slugs and aliases together, because they share one namespace and one
+    /// uniqueness constraint (§4.3) — a completion list that offered only slugs
+    /// would hide exactly the names somebody chose for being memorable.
+    ///
+    /// Redacted notes are excluded. A destroyed note still has a slug, and
+    /// offering it would invite writing a link to content that is gone; §1.1
+    /// keeps the tombstone visible in the timeline, which is where an absence
+    /// is explained rather than where a new reference to it is created.
+    ///
+    /// Ordered by how recently captured, so the note you are thinking of is
+    /// usually the first offer: linking is overwhelmingly to something recent.
+    pub fn names_like(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
+        // Escaped, because a name may contain the wildcards. A slug is
+        // kebab-case and cannot, but an alias is whatever somebody typed, and a
+        // `%` in one would otherwise match every note in the store.
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut st = self.conn.prepare(
+            "SELECT name FROM (
+               SELECT slug AS name, created_wall FROM notes
+                 WHERE slug LIKE ?1 ESCAPE '\\' AND redacted_at IS NULL
+               UNION
+               SELECT alias AS name, created_wall FROM notes
+                 WHERE alias LIKE ?1 ESCAPE '\\' AND redacted_at IS NULL
+             )
+             ORDER BY created_wall DESC
+             LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![pattern, limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Notes newest first.
     ///
     /// Ordered by **capture** time, not by last change. A view that reshuffled
