@@ -145,3 +145,75 @@ h2:first-child { margin-top: 0; }
 
 .empty { color: var(--dim); line-height: 1.6; }
 .empty code { background: var(--panel); padding: .1rem .35rem; border-radius: 4px; }
+
+/* --------------------------------------------------------------- promotion */
+
+/* What a note currently is, beside what was captured. Quiet enough that the
+   text stays the thing being read — the fields are what fires, not what the
+   note is about. */
+.promotion {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  margin: 0.5rem 0 0.2rem;
+  font-size: 0.85rem;
+}
+.promotion .kind {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+  color: var(--dim, #8a8f98);
+}
+.promotion .descriptor { color: var(--fg, #d8dee9); }
+.promotion .pinned-by-hand,
+.promotion .confidence {
+  font-size: 0.7rem;
+  color: var(--dim, #8a8f98);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 0.4rem;
+}
+
+/* A reading the recognizer had and did not act on. Deliberately understated:
+   it is an offer, and an offer that shouts is a decision. */
+.suggestion {
+  font-size: 0.85rem;
+  color: var(--dim, #8a8f98);
+  font-style: italic;
+  margin: 0.2rem 0 0.6rem;
+}
+
+/* ------------------------------------------------------------------ agenda */
+
+.all-day {
+  border-bottom: 1px solid var(--rule, #2a2f38);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+.band-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim, #8a8f98);
+}
+.agenda-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: baseline;
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+}
+.agenda-row:hover { background: var(--hover, #1b2029); }
+.agenda-row .when {
+  min-width: 3.2rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim, #8a8f98);
+}
+.agenda-row .what { flex: 1; }
+.agenda-row.done .what { opacity: 0.55; text-decoration: line-through; }
+/* A shift is stated rather than shown silently: a time that moves on its own
+   with no explanation is what makes somebody distrust the whole system. */
+.agenda-row .shift {
+  font-size: 0.75rem;
+  color: var(--warn, #d0a215);
+}

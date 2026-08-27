@@ -515,8 +515,11 @@ name = "brain-desktop"
 version = "0.1.0"
 dependencies = [
  "brain-core",
+ "brain-parse",
  "brain-store",
+ "brain-time",
  "jiff",
+ "minicbor",
  "serde",
  "serde_json",
  "tauri",

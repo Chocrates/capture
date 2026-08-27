@@ -60,11 +60,11 @@
 
 ## 7. Surfaces — the desktop first, it is the first-party one
 
-- [ ] 7.1 Note page: the captured text and the current fields side by side, so drift is visible rather than silent.
-- [ ] 7.2 Note page: suggestions below the floor offered as one line, applied to nothing.
-- [ ] 7.3 Calendar: all-day events in a band above the timed grid, timed occurrences column-packed, DST-shifted occurrences marked, cancelled ones hidden but recoverable.
-- [ ] 7.4 Agenda: what is due and what occurs, drawn from the same substrate — a meeting and the notes taken during it are one record, not two.
-- [ ] 7.5 Occurrence completion in the GUI, including un-completing a mistaken tick.
+- [x] 7.1 Note page: the captured text and the current fields side by side, so drift is visible rather than silent.
+- [x] 7.2 Note page: suggestions below the floor offered as one line, applied to nothing.
+- [~] 7.3 Calendar: all-day events in a band above the timed grid, timed occurrences column-packed, DST-shifted occurrences marked, cancelled ones hidden but recoverable. **Partial**: three of the four are done and live in the agenda — the all-day band, the DST marker with its reason, and cancelled occurrences hidden while a moved-and-cancelled one is still drawn. What is missing is the calendar proper: an hour grid with overlapping occurrences packed into columns. The agenda is a list, and a list has no overlap to resolve.
+- [x] 7.4 Agenda: what is due and what occurs, drawn from the same substrate — a meeting and the notes taken during it are one record, not two.
+- [x] 7.5 Occurrence completion in the GUI, including un-completing a mistaken tick.
 - [x] 7.6 CLI equivalents: agenda, tasks, occurrence completion, and the pinned correction path. Every one takes `--json`.
 
 ## 8. Review — the component with the best evidence

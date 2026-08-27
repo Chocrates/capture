@@ -20,6 +20,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 brain-core = { path = "../../crates/brain-core", features = ["std"] }
 brain-store = { path = "../../crates/brain-store" }
+brain-parse = { path = "../../crates/brain-parse" }
+brain-time = { path = "../../crates/brain-time" }
+minicbor = { workspace = true }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -55,6 +55,128 @@ window.addEventListener("unhandledrejection", (e) =>
 // redrawing is safe. Every function that replaces the view sets it, and one
 // that forgets to would have the timeline reappear underneath whatever it drew.
 let current = "timeline";
+let agendaDay = null;
+
+// Which render is the current one.
+//
+// Every view clears the page, then awaits the store, then appends. Two of those
+// running at once — a click and the refresh poll landing in the same moment —
+// both clear and then both append, and the page shows everything twice. It is
+// not a data bug and looking at the store will never explain it.
+//
+// So each render takes a number, and after every await it checks that it is
+// still the newest. A render that has been overtaken stops rather than drawing
+// on top of its successor.
+let renderSeq = 0;
+
+function beginRender() {
+  renderSeq += 1;
+  return renderSeq;
+}
+
+function stale(mine) {
+  return mine !== renderSeq;
+}
+
+// ----------------------------------------------------------------- agenda ---
+
+/// What occurs and what is due, for one day.
+///
+/// Two bands, and that is a consequence of the time model rather than a layout
+/// choice (§4.4): all-day entries are floating dates and have no position on an
+/// hour axis, so putting them in the timed list would imply one.
+async function showAgenda(day) {
+  const mine = beginRender();
+  current = "agenda";
+  agendaDay = day || today();
+  view.replaceChildren();
+
+  const bar = el("div", "row");
+  const back = el("button", "act", "← timeline");
+  back.addEventListener("click", showTimeline);
+  bar.append(back);
+
+  const prev = el("button", "act", "◀");
+  prev.addEventListener("click", () => showAgenda(shiftDay(agendaDay, -1)));
+  const next = el("button", "act", "▶");
+  next.addEventListener("click", () => showAgenda(shiftDay(agendaDay, 1)));
+  bar.append(prev, next);
+  view.append(bar);
+
+  view.append(el("h2", null, agendaDay));
+
+  const rows = await call("agenda", { day: agendaDay });
+  if (stale(mine)) return;
+  if (!rows.length) {
+    view.append(el("p", "empty", "Nothing on this day."));
+    return;
+  }
+
+  const allDay = rows.filter((r) => r.all_day);
+  const timed = rows.filter((r) => !r.all_day);
+
+  if (allDay.length) {
+    const band = el("div", "all-day");
+    band.append(el("div", "band-label", "all day"));
+    for (const r of allDay) band.append(agendaRow(r));
+    view.append(band);
+  }
+  for (const r of timed) view.append(agendaRow(r));
+}
+
+function agendaRow(r) {
+  const row = el("div", `agenda-row${r.done ? " done" : ""}`);
+
+  row.append(el("span", "when", r.all_day ? "" : clockOf(r.start_ms)));
+
+  const body = el("span", "what", r.text || "(no readable text)");
+  row.append(body);
+
+  // A shifted occurrence says why. §4.4: a time that moves on its own with no
+  // explanation is what makes somebody distrust the whole system.
+  if (r.shift === "gap") {
+    row.append(el("span", "shift", "moved by a daylight-saving gap"));
+  } else if (r.shift === "ambiguous") {
+    row.append(el("span", "shift", "the clock struck this hour twice"));
+  }
+
+  // Completion is per occurrence, not per series. Ticking Tuesday says nothing
+  // about Wednesday, and un-ticking has to be possible because a mistaken tick
+  // is a thing that happens.
+  if (!r.all_day) {
+    const tick = el("button", "act", r.done ? "✓ done" : "mark done");
+    tick.addEventListener("click", async () => {
+      await call("set_occurrence", {
+        name: r.slug,
+        occ: r.occ,
+        done: !r.done,
+      });
+      showAgenda(agendaDay);
+    });
+    row.append(tick);
+  }
+
+  row.addEventListener("click", (e) => {
+    if (e.target.tagName !== "BUTTON") showNote(r.slug);
+  });
+  return row;
+}
+
+function clockOf(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function shiftDay(day, by) {
+  const d = new Date(`${day}T12:00:00`);
+  d.setDate(d.getDate() + by);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 // ---------------------------------------------------------------- helpers ---
 
@@ -171,12 +293,14 @@ function contextStrip(ambient, onFilter) {
 // --------------------------------------------------------------- timeline ---
 
 async function showTimeline() {
+  const mine = beginRender();
   current = "timeline";
   view.replaceChildren();
 
   await renderPending();
 
   const notes = await call("timeline", { limit: 500 });
+  if (stale(mine)) return;
   if (notes.length === 0) {
     view.append(emptyState());
     return;
@@ -211,6 +335,7 @@ function emptyState() {
 }
 
 async function showFiltered(field, value) {
+  const mine = beginRender();
   current = "filtered";
   view.replaceChildren();
   const back = el("button", "act", "← everything");
@@ -219,6 +344,7 @@ async function showFiltered(field, value) {
   view.append(el("h2", null, `${field}: ${value}`));
 
   const notes = await call("filter_by_context", { field, value });
+  if (stale(mine)) return;
   if (notes.length === 0) view.append(el("p", "empty", "Nothing else from there."));
   for (const n of notes) view.append(noteRow(n, showNote));
 }
@@ -226,8 +352,10 @@ async function showFiltered(field, value) {
 // -------------------------------------------------------------- note page ---
 
 async function showNote(name) {
+  const mine = beginRender();
   current = "note";
   const page = await call("note", { name });
+  if (stale(mine)) return;
   const n = page.note;
   view.replaceChildren();
 
@@ -250,6 +378,34 @@ async function showNote(name) {
         : "(no readable text)";
   }
   view.append(text);
+
+  // What the note currently *is*, beside what was captured.
+  //
+  // §3.1.4 keeps these apart deliberately: the text is the episodic record, the
+  // fields are what actually fires, and neither is regenerated from the other.
+  // Showing both is what makes drift visible — the text saying "every day at 7"
+  // while the fields say weekdays is a thing you can see rather than a
+  // discrepancy hiding in a form.
+  if (page.promotion) {
+    const box = el("div", "promotion");
+    box.append(el("span", "kind", page.promotion.kind));
+    box.append(el("span", "descriptor", page.promotion.descriptor));
+    if (page.promotion.pinned) {
+      const p = el("span", "pinned-by-hand", "yours");
+      p.title = "You set this. No later reparse will change it.";
+      box.append(p);
+    } else if (page.promotion.confidence !== null) {
+      const c = el("span", "confidence", `${page.promotion.confidence}%`);
+      c.title = "How sure the recognizer was.";
+      box.append(c);
+    }
+    view.append(box);
+  }
+
+  // A reading it had and did not act on. One line, applied to nothing.
+  if (page.suggestion) {
+    view.append(el("p", "suggestion", page.suggestion));
+  }
 
   const meta = el("p", "day");
   meta.textContent = `captured ${stamp(n.captured_ms, n.tz)}`;
@@ -460,10 +616,12 @@ async function renderPending() {
 // ----------------------------------------------------------------- health ---
 
 async function showHealth() {
+  const mine = beginRender();
   current = "health";
   view.replaceChildren();
 
   const h = await call("health");
+  if (stale(mine)) return;
   view.append(el("h2", null, "Store"));
   view.append(el("p", "healthy", `${h.notes} notes, ${h.events} events`));
 
@@ -511,7 +669,9 @@ document.querySelectorAll("nav button").forEach((b) => {
   b.addEventListener("click", () => {
     document.querySelectorAll("nav button").forEach((o) => o.classList.remove("on"));
     b.classList.add("on");
-    b.dataset.view === "health" ? showHealth() : showTimeline();
+    if (b.dataset.view === "health") showHealth();
+    else if (b.dataset.view === "agenda") showAgenda(today());
+    else showTimeline();
   });
 });
 
@@ -564,6 +724,7 @@ function refresh() {
   if (document.getElementById("confirm").hidden === false) return;
   if (current === "timeline") showTimeline();
   else if (current === "health") showHealth();
+  else if (current === "agenda") showAgenda(agendaDay);
 }
 
 showTimeline();

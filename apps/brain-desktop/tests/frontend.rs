@@ -195,6 +195,24 @@ fn the_page_notices_captures_on_its_own() {
 }
 
 #[test]
+fn a_render_cannot_be_overtaken_by_another() {
+    // Every view clears the page, awaits the store, then appends. Two running
+    // at once — a click and the refresh poll landing together — both clear and
+    // both append, and the page shows everything twice. It looks like duplicate
+    // data and no amount of looking at the store explains it.
+    let code = ui_code("app.js");
+    let awaits_then_appends = code.matches("beginRender()").count();
+    assert!(
+        awaits_then_appends >= 4,
+        "only {awaits_then_appends} views take a render number; every async view needs one"
+    );
+    assert!(
+        code.matches("stale(mine)").count() >= 4,
+        "a view took a render number and never checked it was still the newest"
+    );
+}
+
+#[test]
 fn the_page_talks_only_to_the_commands_it_is_given() {
     // No fetch, no URL, no server. The capability list is the invoke handler in
     // main.rs, and it is only a real boundary if the page has no other way out.

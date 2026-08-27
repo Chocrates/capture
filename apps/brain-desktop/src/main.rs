@@ -23,6 +23,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ipc::changed,
             ipc::timeline,
+            ipc::agenda,
+            ipc::set_occurrence,
             ipc::note,
             ipc::search,
             ipc::ambient,

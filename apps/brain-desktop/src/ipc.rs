@@ -123,6 +123,42 @@ pub struct Page {
     pub links: Vec<Link>,
     pub backlinks: Vec<Backlink>,
     pub versions: u64,
+    /// What this note was recognised as, if anything.
+    pub promotion: Option<Promotion>,
+    /// A reading the recognizer had but did not act on.
+    pub suggestion: Option<String>,
+}
+
+/// What a note currently is, beside what was captured.
+///
+/// §3.1.4 keeps the two apart on purpose: the text is the episodic record and
+/// the fields are operationally authoritative, and neither is regenerated from
+/// the other. Showing both is what makes drift visible instead of silent.
+#[derive(Serialize)]
+pub struct Promotion {
+    /// `note`, `task`, `event` or `series`.
+    pub kind: String,
+    /// The one-line rendering of the fields.
+    pub descriptor: String,
+    /// Whether a person assigned it, and therefore whether a reparse may
+    /// replace it.
+    pub pinned: bool,
+    /// The confidence behind it, where a recognizer produced it.
+    pub confidence: Option<u32>,
+}
+
+/// One occurrence of a series, as a surface draws it.
+#[derive(Serialize)]
+pub struct Occurrence {
+    pub slug: String,
+    /// The occurrence's name — its original start.
+    pub occ: i64,
+    pub start_ms: i64,
+    pub all_day: bool,
+    pub done: bool,
+    /// `gap` or `ambiguous`, when a daylight-saving transition moved it.
+    pub shift: Option<String>,
+    pub text: Option<String>,
 }
 
 /// One thing worth telling the user.
@@ -215,12 +251,142 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             .collect();
 
         let versions = row.divergences + 1;
+
+        let promotion = s.promotion_of(&tgt)?.map(|p| Promotion {
+            kind: p.kind,
+            descriptor: p.descriptor,
+            pinned: p.pinned,
+            confidence: p.confidence,
+        });
+
+        // A reading the recognizer had and did not act on, offered as one line.
+        //
+        // Computed here rather than stored, because a suggestion is derived
+        // data and not a decision — writing one into the log would make an
+        // event out of a guess. Only offered where nothing was promoted: once a
+        // note has a type, a competing reading is noise rather than an offer.
+        let suggestion = match (&promotion, row.text.as_deref()) {
+            (None, Some(text)) => suggestion_for(text, row.tz.as_deref()),
+            _ => None,
+        };
+
         Ok(Page {
             note: Note::from(row),
             links,
             backlinks,
             versions,
+            promotion,
+            suggestion,
         })
+    })())
+}
+
+/// What the recognizer saw, when it was not sure enough to act.
+///
+/// Deliberately says how sure it was. A suggestion the reader cannot calibrate
+/// is one they either always take or always ignore, and §3.1.3 wants it to cost
+/// a glance either way.
+fn suggestion_for(text: &str, tz: Option<&str>) -> Option<String> {
+    let zone = tz
+        .and_then(brain_time::Zone::new)
+        .unwrap_or_else(|| brain_time::Zone::new("UTC").expect("UTC is always present"));
+
+    let r = brain_parse::recognize(text, now_ms() as i64, zone);
+    if r.confidence == 0 || r.confidence >= brain_store::promote::FLOOR {
+        return None;
+    }
+
+    let what = match &r.shape {
+        brain_parse::Shape::Task => String::from("a task"),
+        brain_parse::Shape::Point(brain_parse::When::Date(d)) => format!("something on {d}"),
+        brain_parse::Shape::Point(brain_parse::When::Moment(ms)) => {
+            let (h, m) = brain_time::civil_clock(*ms, zone);
+            format!(
+                "something on {} at {h:02}:{m:02}",
+                brain_time::civil_date(*ms, zone)
+            )
+        }
+        brain_parse::Shape::Range { from, to } => format!("something from {from} to {to}"),
+        brain_parse::Shape::Recurring { .. } => String::from("something recurring"),
+        brain_parse::Shape::Nothing => return None,
+    };
+
+    Some(format!(
+        "This might be {what} — {}% sure, which is under the bar for deciding on its own.",
+        r.confidence
+    ))
+}
+
+/// Occurrences and one-off events on a day.
+#[tauri::command]
+pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
+    wire((|| {
+        let s = read_only()?;
+        let zone = brain_time::Zone::new("UTC").expect("UTC is always present");
+        let date = brain_time::FloatingDate::parse(&day)
+            .ok_or_else(|| Error::Usage(format!("'{day}' is not a date")))?;
+        let from = brain_time::at_local(date, 0, 0, zone)
+            .ok_or_else(|| Error::Usage("that day does not exist".into()))?;
+        let to = from + 24 * 60 * 60 * 1000;
+
+        let mut out = Vec::new();
+
+        // All-day entries first, in their own band. They are floating dates and
+        // have no position on an hour axis (§4.4).
+        for tgt in s.all_day_on(&day)? {
+            out.push(Occurrence {
+                slug: s.slug_of(&tgt)?.unwrap_or_default(),
+                occ: from,
+                start_ms: from,
+                all_day: true,
+                done: false,
+                shift: None,
+                text: s.text_of(&tgt)?,
+            });
+        }
+
+        for (tgt, o) in s.happening_between(from, to)? {
+            // Hidden, not gone: the cancellation is an ordinary event. One that
+            // was also moved is drawn, because a move outranks a cancel (§6).
+            if o.cancelled && o.start_ms == o.occ {
+                continue;
+            }
+            out.push(Occurrence {
+                slug: s.slug_of(&tgt)?.unwrap_or_default(),
+                occ: o.occ,
+                start_ms: o.start_ms,
+                all_day: o.all_day,
+                done: o.done,
+                shift: o.shift,
+                text: o.title.clone().or(s.text_of(&tgt)?),
+            });
+        }
+
+        Ok(out)
+    })())
+}
+
+/// Mark one occurrence complete, or not.
+#[tauri::command]
+pub fn set_occurrence(name: String, occ: i64, done: bool) -> std::result::Result<(), String> {
+    wire((|| {
+        let mut s = Session::open(paths()?)?;
+        let tgt = s
+            .state
+            .resolve(&name)?
+            .ok_or_else(|| Error::NotFound(name.clone()))?;
+        let kind = if done {
+            brain_core::event::Kind::OCC_DONE
+        } else {
+            brain_core::event::Kind::OCC_UNDONE
+        };
+        s.append(kind, Some(tgt), None, |nonce| {
+            let mut b = Vec::new();
+            minicbor::encode(&brain_core::body::OccBody { nonce, occ }, &mut b)
+                .expect("encoding into Vec is infallible");
+            b
+        })?;
+        Ok(())
     })())
 }
 
