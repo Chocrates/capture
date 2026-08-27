@@ -57,6 +57,8 @@ pub enum Command {
     Intents { json: bool },
     /// Notes captured while a recurring thing was happening.
     During { name: String, json: bool },
+    /// Show what the recognizer makes of some text, without storing anything.
+    Read { text: String },
     /// Record what became of a resurfaced note.
     Reviewed { name: String, outcome: String },
     /// Mark one occurrence of a recurring series complete, or not.
@@ -261,6 +263,16 @@ where
                     flag: "expected: brain intent <at|branch> <value> <what to do>".into(),
                 }),
             }
+        }
+        "read" => {
+            let text = args[1..].join(" ");
+            if text.is_empty() {
+                return Err(Bad::UnknownFlag {
+                    command: "read".into(),
+                    flag: "nothing to read".into(),
+                });
+            }
+            Ok(Command::Read { text })
         }
         "during" => one_name(&args[1..], "during", |name, json| Command::During {
             name,

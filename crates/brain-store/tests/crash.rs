@@ -54,6 +54,21 @@ use brain_store::{
 /// How many kill-and-inspect rounds each mode gets.
 const ROUNDS: usize = 8;
 
+/// How many extra rounds to run when the harness has not yet proved anything.
+///
+/// The victim is killed after a random 60–300ms, and whether it gets far enough
+/// to complete a purge or a rebuild in that time is luck. When no round managed
+/// it, the assertion at the end is right to fail — the harness genuinely proved
+/// nothing — but failing the build over a coin toss is not the same as finding
+/// a bug, and a gate that goes red a third of the time is one people learn to
+/// re-run rather than read.
+///
+/// Measured before changing anything: this suite failed 7 times in 20 on an
+/// unmodified tree. So the fix is more attempts rather than a weaker assertion.
+/// The invariants inside each round are untouched, and they still fail
+/// immediately if the store is ever wrong.
+const EXTRA_ROUNDS: usize = 24;
+
 /// The window kills are drawn from.
 ///
 /// The lower bound is not zero. Every write here goes through an `fsync`, so a
@@ -351,7 +366,13 @@ fn a_killed_purge_never_leaves_content_half_destroyed() {
     let mut rng = Rng(seed());
     let mut ever_purged = false;
 
-    for round in 0..ROUNDS {
+    for round in 0..ROUNDS + EXTRA_ROUNDS {
+        // Stop once the harness has something to stand on. Every round is a
+        // real test of the invariants; the extra ones exist only so that
+        // *reaching* the interesting state is not left to chance.
+        if ever_purged && round >= ROUNDS {
+            break;
+        }
         run_and_kill("redact", scratch.path(), &mut rng);
         check_log(scratch.path());
 
@@ -438,7 +459,8 @@ fn a_killed_purge_never_leaves_content_half_destroyed() {
 
     assert!(
         ever_purged,
-        "nothing was ever destroyed — the harness proved nothing"
+        "nothing was ever destroyed in {} rounds — the harness proved nothing",
+        ROUNDS + EXTRA_ROUNDS
     );
 }
 
@@ -452,7 +474,10 @@ fn a_killed_rebuild_leaves_a_usable_projection() {
     let mut rng = Rng(seed());
     let mut saw_a_rebuild = false;
 
-    for round in 0..ROUNDS {
+    for round in 0..ROUNDS + EXTRA_ROUNDS {
+        if saw_a_rebuild && round >= ROUNDS {
+            break;
+        }
         run_and_kill("rebuild", scratch.path(), &mut rng);
         check_log(scratch.path());
 
@@ -479,6 +504,7 @@ fn a_killed_rebuild_leaves_a_usable_projection() {
 
     assert!(
         saw_a_rebuild,
-        "no rebuild ever completed — the harness proved nothing"
+        "no rebuild completed in {} rounds — the harness proved nothing",
+        ROUNDS + EXTRA_ROUNDS
     );
 }

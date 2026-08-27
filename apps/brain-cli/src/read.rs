@@ -282,6 +282,81 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Show what the recognizer makes of some text.
+///
+/// Stores nothing and decides nothing. It exists because the confidence bands
+/// were reasoned rather than measured (§3.1.5), and the only honest way to find
+/// out whether they are right is to point them at real captures and look — a
+/// band that is wrong is invisible from the inside.
+pub fn explain(text: &str) -> Result<()> {
+    let zone = brain_time::Zone::new(&local_zone()).unwrap_or_else(utc);
+    let r = brain_parse::recognize(text, now_ms(), zone);
+
+    say!("{text}");
+    say!();
+
+    let shape = match &r.shape {
+        brain_parse::Shape::Nothing => "nothing temporal".to_string(),
+        brain_parse::Shape::Task => "a task, by its verb".to_string(),
+        brain_parse::Shape::Point(brain_parse::When::Date(d)) => format!("a day: {d}"),
+        brain_parse::Shape::Point(brain_parse::When::Moment(ms)) => {
+            let (h, m) = brain_time::civil_clock(*ms, zone);
+            format!(
+                "a moment: {} at {h:02}:{m:02}",
+                brain_time::civil_date(*ms, zone)
+            )
+        }
+        brain_parse::Shape::Range { from, to } => format!("a span: {from} to {to}"),
+        brain_parse::Shape::Recurring { rule, at_minute } => match at_minute {
+            Some(m) => format!(
+                "a series: freq {} at {:02}:{:02}",
+                rule.freq,
+                m / 60,
+                m % 60
+            ),
+            None => format!("a series: freq {}", rule.freq),
+        },
+    };
+
+    say!("  reads as   {shape}");
+    say!(
+        "  confidence {}%{}",
+        r.confidence,
+        if r.confidence >= brain_store::promote::FLOOR {
+            "  — enough to decide on its own"
+        } else if r.confidence > 0 {
+            "  — under the bar; a suggestion, applied to nothing"
+        } else {
+            ""
+        }
+    );
+
+    if r.markers.any() {
+        let mut parts = Vec::new();
+        for t in &r.markers.tags {
+            parts.push(format!("#{t}"));
+        }
+        for p in &r.markers.people {
+            parts.push(format!("@{p}"));
+        }
+        if let Some(d) = &r.markers.date {
+            parts.push(format!(">{d}"));
+        }
+        if let Some(p) = r.markers.priority {
+            parts.push(format!("!p{p}"));
+        }
+        if let Some(m) = r.markers.duration_min {
+            parts.push(format!("~{m}m"));
+        }
+        if let Some(p) = &r.markers.project {
+            parts.push(format!("^{p}"));
+        }
+        say!("  markers    {}", parts.join(" "));
+    }
+
+    Ok(())
+}
+
 /// Notes captured while a recurring thing was happening.
 ///
 /// Activation (§3.9): a meeting surfacing what was said at previous ones. The

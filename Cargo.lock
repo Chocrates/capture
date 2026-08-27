@@ -485,6 +485,7 @@ name = "brain-cli"
 version = "0.1.0"
 dependencies = [
  "brain-core",
+ "brain-parse",
  "brain-store",
  "brain-time",
  "clap",

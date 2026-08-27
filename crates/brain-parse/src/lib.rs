@@ -81,7 +81,12 @@ pub use token::{Class, Token, tokenize};
 /// improving is not an event, so without a version written into the data a note
 /// captured in March could never benefit from a grammar fix shipped in June —
 /// the improvement would apply only to whatever was captured after it.
-pub const GRAMMAR_VERSION: u32 = 1;
+///
+/// Version 2 added two productions that real captures needed and the grammar
+/// could not express: a bare clock meaning today ("meeting at 14:00"), and
+/// offsets shorter than a day ("in 10 minutes"). Both were found by pointing
+/// the recognizer at an actual store rather than at its own examples.
+pub const GRAMMAR_VERSION: u32 = 2;
 
 /// A word the recognizer knows, and what it is worth.
 ///

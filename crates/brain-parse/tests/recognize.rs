@@ -318,3 +318,78 @@ fn alloc_format(a: &str, b: &str) -> String {
     s.push_str(b);
     s
 }
+
+// ------------------------------------------------- found on real captures ---
+//
+// Task 11.3. Each of these is a capture that was actually made, that the
+// recognizer got wrong, and that forced a change. §3.1.5's bands and
+// productions were reasoned rather than measured, and this is the only honest
+// way to find out where the reasoning was thin — a grammar that has only ever
+// been tested against its own examples will pass every one of them.
+
+#[test]
+fn a_bare_clock_means_today() {
+    // "meeting at 14:00" read as nothing. The `point` production requires an
+    // anchor and a bare clock is not one, so about the most ordinary capture
+    // there is had no production at all.
+    match read("meeting at 14:00").shape {
+        Shape::Point(When::Moment(ms)) => {
+            let d = brain_time::civil_date(ms, denver());
+            let (h, m) = brain_time::civil_clock(ms, denver());
+            assert_eq!((d.year, d.month, d.day), (2026, 6, 1), "not today");
+            assert_eq!((h, m), (14, 0));
+        }
+        other => panic!("meeting at 14:00 -> {other:?}"),
+    }
+    assert!(promotes("meeting at 14:00"));
+}
+
+#[test]
+fn a_bare_clock_is_still_refused_behind_an_article() {
+    // The guard has to survive the new production, or "the 7am problem" starts
+    // becoming a calendar entry — §3.1.3's own counter-example.
+    assert_eq!(read("the 7am problem").shape, Shape::Nothing);
+}
+
+#[test]
+fn an_offset_shorter_than_a_day_is_a_moment() {
+    // "go to the gas station in 10 minutes" read as nothing: `in N unit` only
+    // resolved days and longer, and rounding ten minutes to a date would turn
+    // a reminder into an all-day entry.
+    match read("go to the gas station in 10 minutes").shape {
+        Shape::Point(When::Moment(ms)) => {
+            assert_eq!(ms, NOW + 10 * 60_000);
+        }
+        other => panic!("in 10 minutes -> {other:?}"),
+    }
+
+    match read("call back in 2 hours").shape {
+        Shape::Point(When::Moment(ms)) => assert_eq!(ms, NOW + 120 * 60_000),
+        other => panic!("in 2 hours -> {other:?}"),
+    }
+}
+
+#[test]
+fn a_forward_marker_never_resolves_into_the_past() {
+    // "revisit in Q2", said in June, resolved to the April that had already
+    // been. A forward marker pointing backwards is a review prompt that can
+    // never come due — and forward markers are review's first selection tier,
+    // so it would have sat there being ignored.
+    match read("budget 40k, revisit in Q2").shape {
+        Shape::Point(When::Date(d)) => {
+            assert!(
+                (d.year, d.month) > (2026, 6),
+                "resolved to {d}, which is not ahead of the capture"
+            );
+        }
+        other => panic!("revisit in Q2 -> {other:?}"),
+    }
+}
+
+#[test]
+fn the_grammar_version_moved_with_the_grammar() {
+    // The version is what makes a fix reach notes captured before it. Changing
+    // a production without bumping it would leave every existing note parsed by
+    // the old rules for ever, which is the whole failure the version prevents.
+    const { assert!(brain_parse::GRAMMAR_VERSION >= 2) };
+}

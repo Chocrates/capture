@@ -9,24 +9,46 @@
 
 [bans]
 multiple-versions = "warn"
+
+# A wildcard version from a registry is a real hazard: it means "whatever
+# happens to be published", and the build changes under you.
 wildcards = "deny"
 
-# These are legitimate dependencies of brain-store and the applications. They
-# must never become dependencies of brain-core.
-[[bans.deny]]
-name = "tokio"
-wrappers = []
+# A path dependency inside this workspace is not that. It has no version to pin
+# because it is the same source tree, checked out together and built together —
+# `brain-cli` depending on `brain-store` cannot drift, because there is nothing
+# for it to drift from.
+#
+# Without this the gate fails on every internal crate, which is precisely what
+# it did: `make ci` had never passed on a developer machine, because cargo-deny
+# was not installed and so nobody had run the check that would have said so.
+allow-wildcard-paths = true
 
-[[bans.deny]]
-name = "rusqlite"
-wrappers = []
+# The purity boundary is enforced where it can be stated correctly, and that is
+# not here.
+#
+# These four — tokio, rusqlite, getrandom, jiff — were listed as global bans
+# with the comment "legitimate dependencies of brain-store and the applications;
+# they must never become dependencies of brain-core". The comment is right and
+# the rule was not: a `[[bans.deny]]` entry bans a crate from the whole
+# workspace, so it rejected the very uses the comment calls legitimate. The
+# gate could never have passed with them in, and — because cargo-deny was not
+# installed on any developer machine — nobody found out.
+#
+# What was meant is a statement about *one crate's tree*, which `make purity`
+# already makes and makes exactly: it asks `cargo tree -p brain-core` and fails
+# if any of them appears. That check also proves more than a ban list could,
+# because it additionally compiles brain-core under no_std and demonstrates that
+# a `std::time` reference fails to build.
+#
+# So the enforcement lives there, and this file keeps the one ban that really is
+# global.
 
+# serde_cbor was explicitly rejected for the frozen encoding (DESIGN.md §8.3),
+# and nothing in this workspace may reach it — including transitively, which is
+# the case a human review would miss.
 [[bans.deny]]
-name = "getrandom"
-wrappers = []
-
-[[bans.deny]]
-name = "jiff"
+name = "serde_cbor"
 wrappers = []
 
 [advisories]
@@ -34,7 +56,54 @@ wrappers = []
 # (DESIGN.md §8.3). Fail loudly if anything pulls it back in transitively.
 yanked = "deny"
 
+# Unmaintained crates reached through the GUI toolkit, and nothing else.
+#
+# Every one of these arrives via Tauri: the gtk-rs GTK3 bindings, which upstream
+# has stopped maintaining in favour of GTK4, and the rust-unic family beneath
+# `urlpattern`. None is a vulnerability — they are "unmaintained" notices — and
+# every advisory says the same thing about the way out: "No safe upgrade is
+# available."
+#
+# They are listed individually rather than waved through with a blanket setting,
+# because the point of this gate is to notice a *new* one. An advisory that is
+# not on this list still fails the build.
+#
+# This is the whole reason `make ci` had never passed on a developer machine:
+# cargo-deny was not installed, so nobody had run the gate that would have said
+# so. Recorded here rather than quietly relaxed.
+ignore = [
+    "RUSTSEC-2024-0370", # proc-macro-error, unmaintained, via tauri-codegen
+    "RUSTSEC-2024-0411", # gtk3
+    "RUSTSEC-2024-0412", # gtk3-sys
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0414", # atk-sys
+    "RUSTSEC-2024-0415", # gdk
+    "RUSTSEC-2024-0416", # gdk-sys
+    "RUSTSEC-2024-0417", # gdkwayland-sys
+    "RUSTSEC-2024-0418", # gdkx11
+    "RUSTSEC-2024-0419", # gdkx11-sys
+    "RUSTSEC-2024-0420", # gtk3-macros
+    "RUSTSEC-2025-0075", # via tauri
+    "RUSTSEC-2025-0080", # via tauri
+    "RUSTSEC-2025-0081", # via tauri
+    "RUSTSEC-2025-0098", # rust-unic, via urlpattern via tauri-utils
+    "RUSTSEC-2025-0100", # via tauri
+]
+
 [licenses]
+# Four more than the original list, and each is here for a dependency rather
+# than for anything this project wrote.
+#
+# MPL-2.0 is file-level copyleft: it obliges publishing changes to *those files*
+# and says nothing about the program that links them. Zlib and BSL-1.0 are
+# permissive. Apache-2.0 WITH LLVM-exception is Apache with the static-linking
+# obligation removed, which is strictly more permissive than Apache-2.0, already
+# on this list.
+#
+# What they have in common is where they come from: the GUI toolkit's tree
+# (cssparser, selectors, dtoa-short, option-ext, clipboard-win, error-code,
+# slotmap) and two hash and target crates below it. Nothing here changes what
+# this project may be distributed under.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -43,4 +112,8 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "BlueOak-1.0.0",
+    "MPL-2.0",
+    "Zlib",
+    "BSL-1.0",
+    "Apache-2.0 WITH LLVM-exception",
 ]

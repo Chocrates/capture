@@ -226,9 +226,17 @@ fn the_spool_is_reported_while_it_holds_anything() {
     s.unseal();
     s.ok(&["set", "timeline.limit", "25"]);
     let status = s.ok(&["status"]);
+
+    // The *spool* condition clears. Asserting that nothing at all needs
+    // attention made this test depend on every other condition in the system,
+    // including one about the developer's desktop rather than about the store:
+    // a fresh store on a machine with a hotkey mechanism also reports that the
+    // chord has never been seen to work, which is true, useful, and nothing to
+    // do with the spool. The test failed on this machine and passed on one
+    // where no mechanism is detected.
     assert!(
-        status.contains("Nothing needs your attention"),
-        "the condition should clear once the spool is empty: {status}"
+        !status.contains("spooled"),
+        "the spool condition should clear once the spool is empty: {status}"
     );
 }
 

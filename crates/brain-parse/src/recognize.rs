@@ -442,6 +442,26 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
         }
         let marked = i > 0 && tokens[i - 1].class == Class::Marker;
 
+        // A time with no day attached means today. §3.1.5's `point` production
+        // requires an anchor and a bare clock is not one, so "meeting at 14:00"
+        // — about the most ordinary capture there is — had no production at all
+        // and read as nothing. Found by pointing the recognizer at real
+        // captures, which is what task 11.3 exists for.
+        //
+        // Today even when the time has already passed. A note saying "meeting
+        // at 14:00" written at 15:00 is far more likely to be recording what
+        // happened than scheduling tomorrow, and §3.1.3 prefers the reading
+        // that invents less: a past entry is a record, a future one is a
+        // commitment nobody made.
+        if let Class::Clock { hour, minute, .. } = t.class {
+            let today = today(now, zone).1;
+            let ms = instant(today, hour * 60 + minute, zone)?;
+            return Some((
+                Shape::Point(When::Moment(ms)),
+                if marked { band::MARKED } else { band::ADJACENT },
+            ));
+        }
+
         // `consumed` is how many tokens the anchor itself used, so the search
         // for a time of day starts after it. Without that the count in "in 3
         // weeks" is read as 03:00 — it follows a marker, which is exactly the
@@ -459,12 +479,13 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
                 )
             }
             Class::Quarter(q) => {
-                let (y, _) = today(now, zone);
-                (
-                    FloatingDate::new(y, (q as u8 - 1) * 3 + 1, 1)?,
-                    1,
-                    Anchor::Offset,
-                )
+                // The coming one, by the same rule a bare "aug 14" follows.
+                // "revisit in Q2" said in August means next April, not the
+                // April that has already been — a forward marker resolving into
+                // the past is a review prompt that can never come due.
+                let month = (q as u8 - 1) * 3 + 1;
+                let year = year_for(now, zone, month, 1);
+                (FloatingDate::new(year, month, 1)?, 1, Anchor::Offset)
             }
             Class::Marker if t.text.eq_ignore_ascii_case("in") => {
                 let Class::Number(n) = tokens.get(i + 1)?.class else {
@@ -474,6 +495,18 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone) -> Option<(Shape, u32)> {
                 if unit.class != Class::Unit {
                     continue;
                 }
+
+                // "in 10 minutes" is a moment, not a day. Offsets shorter than
+                // a day cannot be expressed as a floating date at all, and
+                // rounding one to today would turn a ten-minute reminder into
+                // an all-day entry. Another miss found on a real capture.
+                if let Some(minutes) = sub_day_minutes(n, unit.text) {
+                    return Some((
+                        Shape::Point(When::Moment(now + minutes * 60_000)),
+                        band::ADJACENT,
+                    ));
+                }
+
                 (add_units(now, zone, n, unit.text)?, 3, Anchor::Offset)
             }
             Class::Determiner => {
@@ -600,6 +633,18 @@ fn day_word(now: i64, zone: Zone, word: &str) -> Option<FloatingDate> {
         _ => return None,
     };
     brain_time::add_days(now, zone, offset)
+}
+
+/// An offset shorter than a day, in minutes.
+///
+/// `None` for anything a day or longer, which is the caller's signal to resolve
+/// a date instead.
+fn sub_day_minutes(n: u32, unit: &str) -> Option<i64> {
+    match unit.to_ascii_lowercase().as_str() {
+        "minute" | "minutes" | "min" | "mins" => Some(n as i64),
+        "hour" | "hours" | "hr" | "hrs" => Some(n as i64 * 60),
+        _ => None,
+    }
 }
 
 fn add_units(now: i64, zone: Zone, n: u32, unit: &str) -> Option<FloatingDate> {
