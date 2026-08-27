@@ -11,9 +11,6 @@ use brain_core::event::Kind;
 use brain_store::session::Session;
 use brain_store::{StorePaths, promote};
 
-/// Monday 1 June 2026, 09:00 in Denver.
-const NOW: i64 = 1_780_326_000_000;
-
 struct Scratch(std::path::PathBuf);
 
 impl Scratch {
@@ -72,7 +69,7 @@ fn a_sweep_promotes_what_clears_the_floor_and_leaves_the_rest() {
     let prose = capture(&p, "the march timeline slipped");
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    let written = promote::sweep(&mut s, NOW).unwrap();
+    let written = promote::sweep(&mut s).unwrap();
     drop(s);
 
     assert_eq!(written, 1, "expected exactly one promotion");
@@ -93,7 +90,7 @@ fn promotion_never_touches_the_captured_text() {
     let slug = capture(&p, text);
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    promote::sweep(&mut s, NOW).unwrap();
+    promote::sweep(&mut s).unwrap();
     drop(s);
 
     let n = note_of(&p, &slug);
@@ -110,8 +107,8 @@ fn sweeping_twice_writes_nothing_the_second_time() {
     capture(&p, "dentist thursday 2pm");
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    assert_eq!(promote::sweep(&mut s, NOW).unwrap(), 1);
-    assert_eq!(promote::sweep(&mut s, NOW).unwrap(), 0, "it promoted again");
+    assert_eq!(promote::sweep(&mut s).unwrap(), 1);
+    assert_eq!(promote::sweep(&mut s).unwrap(), 0, "it promoted again");
 }
 
 #[test]
@@ -122,13 +119,13 @@ fn a_correction_survives_every_later_sweep() {
     let slug = capture(&p, "dentist thursday 2pm");
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    promote::sweep(&mut s, NOW).unwrap();
+    promote::sweep(&mut s).unwrap();
     drop(s);
 
     promote::correct(&p, &slug, promote::task(false, Some("2026-08-14"))).unwrap();
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    let written = promote::sweep(&mut s, NOW).unwrap();
+    let written = promote::sweep(&mut s).unwrap();
     drop(s);
     assert_eq!(written, 0, "a sweep reparsed a corrected note");
 
@@ -168,17 +165,83 @@ fn a_note_with_no_zone_is_read_in_utc_rather_than_locally() {
     let slug = capture(&p, "vacation aug 1-14");
 
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    promote::sweep(&mut s, NOW).unwrap();
+    promote::sweep(&mut s).unwrap();
     drop(s);
 
     // Whatever zone the capture recorded, an all-day range must be dates.
-    match note_of(&p, &slug).promotion.map(|p| p.as_) {
+    //
+    // The day is asserted and the year is derived, because the year depends on
+    // when this runs: "aug 1-14" is the coming August, so a capture made in
+    // September means next year — the same forward rule as "revisit in Q2".
+    // This read `assert_eq!(start_date, "2026-08-01")` while the sweep took an
+    // injected June clock, and hardcoding the year outlived the clock that made
+    // it true.
+    let note = note_of(&p, &slug);
+    let captured = note.created.wall as i64;
+    let utc = brain_time::Zone::new("UTC").unwrap();
+    let today = brain_time::civil_date(captured, utc);
+    let year = if (today.month, today.day) > (8, 1) {
+        today.year + 1
+    } else {
+        today.year
+    };
+
+    match note.promotion.map(|p| p.as_) {
         Some(Promoted::Event(f)) => match f.when {
             brain_core::body::When::AllDay { start_date, .. } => {
-                assert_eq!(start_date, "2026-08-01");
+                assert_eq!(start_date, format!("{year}-08-01"));
             }
             other => panic!("a range became {other:?}"),
         },
         other => panic!("expected an all-day event, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_reparse_reads_a_note_again_rather_than_rescheduling_it() {
+    // Found on a live store the first time a grammar bump swept one. "Meeting
+    // at 14:00", captured yesterday, came back promoted to *today* — because
+    // the sweep resolved every relative expression against its own clock rather
+    // than against the capture. It would have moved again on every later bump.
+    //
+    // A sweep is a better reading of what somebody wrote, not a rescheduling of
+    // it: "at 14:00" written on Tuesday means Tuesday however often it is read.
+    //
+    // The drift itself cannot be reproduced here, and that is worth stating
+    // rather than papering over: it needs a capture stamped in the past, and
+    // there is no way to make one — the HLC takes the real clock, which is what
+    // makes the log trustworthy. So the property is pinned two ways instead.
+    // First, and mainly, `sweep` no longer takes a clock at all: there is no
+    // "now" for it to resolve against, so the failure is unrepresentable rather
+    // than merely absent, and this test would not compile if the parameter came
+    // back. Second, the promotion has to land on the capture's own day.
+    let scratch = Scratch::new("reparse-time");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("meeting at 14:00").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+
+    // No clock passed. That is the assertion.
+    promote::sweep(&mut s).unwrap();
+
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    let note = s.state.note(&tgt).unwrap().unwrap();
+    let when = match s.state.promotion_of(&tgt).unwrap().map(|p| p.as_) {
+        Some(Promoted::Event(e)) => e.when,
+        other => panic!("expected an event, got {other:?}"),
+    };
+
+    match when {
+        brain_core::body::When::Timed { start_ms, .. } => {
+            let zone = brain_time::Zone::new(note.tz.as_deref().unwrap_or("UTC"))
+                .unwrap_or_else(|| brain_time::Zone::new("UTC").unwrap());
+            assert_eq!(
+                format!("{}", brain_time::civil_date(start_ms, zone)),
+                format!("{}", brain_time::civil_date(note.created.0 as i64, zone)),
+                "the meeting did not land on the day it was captured"
+            );
+        }
+        other => panic!("expected a timed event, got {other:?}"),
     }
 }

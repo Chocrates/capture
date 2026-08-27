@@ -391,7 +391,7 @@ fn the_grammar_version_moved_with_the_grammar() {
     // The version is what makes a fix reach notes captured before it. Changing
     // a production without bumping it would leave every existing note parsed by
     // the old rules for ever, which is the whole failure the version prevents.
-    const { assert!(brain_parse::GRAMMAR_VERSION >= 2) };
+    const { assert!(brain_parse::GRAMMAR_VERSION >= 4) };
 }
 
 // ---------------------------------------------------------------------------

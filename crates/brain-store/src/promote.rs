@@ -163,7 +163,11 @@ pub fn needs_parse(note: &Note, grammar: u32) -> bool {
 ///
 /// Returns how many promotions were written. Runs on a session that is already
 /// open, so it costs nothing when there is nothing to do.
-pub fn sweep(s: &mut Session, now: i64) -> Result<usize> {
+///
+/// Takes no clock, deliberately. Every note is read against the moment it was
+/// captured, so there is no "now" for a caller to supply — and the parameter
+/// that used to be here was the bug: it made a reparse reschedule what it read.
+pub fn sweep(s: &mut Session) -> Result<usize> {
     let grammar = brain_parse::GRAMMAR_VERSION;
     let mut written = 0;
 
@@ -191,8 +195,25 @@ pub fn sweep(s: &mut Session, now: i64) -> Result<usize> {
             // is the property the whole parse path is arranged to avoid.
             .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"));
 
-        let r = brain_parse::recognize(text, now, zone);
-        let Some(as_) = promoted_from(&r, zone, now) else {
+        // Read against the moment it was captured, never against now.
+        //
+        // Caught on a live store the first time a grammar bump reparsed one:
+        // "meeting at 14:00", captured yesterday, came back resolved to *today*
+        // — and would have moved again on every future bump. A sweep is
+        // supposed to be a better reading of what somebody wrote, not a
+        // rescheduling of it, and "at 14:00" written on Tuesday means Tuesday
+        // however many times it is read afterwards.
+        //
+        // This is the same property the recognizer is arranged around: it is a
+        // pure function of `(text, now, zone)`, and for a given note the only
+        // honest `now` is when it was written. It also makes the first parse
+        // and every reparse agree, which they did not before — enrichment runs
+        // seconds after capture, so the difference was invisible until enough
+        // time passed for it to matter.
+        let captured = note.created.0 as i64;
+
+        let r = brain_parse::recognize(text, captured, zone);
+        let Some(as_) = promoted_from(&r, zone, captured) else {
             continue;
         };
 

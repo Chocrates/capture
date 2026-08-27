@@ -92,7 +92,15 @@ pub use token::{Class, Token, tokenize};
 /// tomorrow" became an all-day event on Thursday and "finish the deck by
 /// friday" became one on Friday — neither of which occupies the day it names
 /// (§3.6). It is now a task with a floating due date, at a band of its own.
-pub const GRAMMAR_VERSION: u32 = 3;
+///
+/// Version 4 changes no grammar at all, and is here because the version is the
+/// only way to reach notes already promoted. The sweep read every note against
+/// its own clock rather than against the capture, so a reparse *rescheduled*
+/// what it read — "meeting at 14:00", captured yesterday, came back resolved to
+/// today, and would have moved again on every later bump. Anything promoted
+/// under 3 or earlier may be sitting on the day a sweep happened to run, so it
+/// is read again now that a reparse resolves against the capture.
+pub const GRAMMAR_VERSION: u32 = 4;
 
 /// A word the recognizer knows, and what it is worth.
 ///

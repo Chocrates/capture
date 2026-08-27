@@ -169,7 +169,7 @@ fn a_forward_marker_is_offered_before_anything_else() {
 
     // Promote it, which is what makes the forward date visible to selection.
     let mut s = Session::open_for_capture(p.clone()).unwrap();
-    brain_store::promote::sweep(&mut s, now()).unwrap();
+    brain_store::promote::sweep(&mut s).unwrap();
     drop(s);
 
     let session = offered(&p, now());

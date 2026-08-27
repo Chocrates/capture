@@ -172,7 +172,7 @@ impl Session {
         // and the gesture must never wait for it, so the one path that must stay
         // fast opts out and every other one catches the store up.
         if catch_up {
-            match crate::promote::sweep(&mut s, now_ms() as i64) {
+            match crate::promote::sweep(&mut s) {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(promoted = n, "notes read at startup"),
                 Err(e) => tracing::warn!(%e, "notes could not be read"),
