@@ -198,3 +198,38 @@ fn a_muted_note_stays_off_the_page() {
         "a muted note appeared on an entity page"
     );
 }
+
+#[test]
+fn a_hash_in_a_capture_reaches_its_page() {
+    // The first version of `mentions` left `#` out, on the grounds that tags
+    // have their own event kind. True, and it meant typing `#reading` in a
+    // capture did nothing whatsoever — the one organising axis somebody writes
+    // by hand was the only one that never appeared anywhere.
+    let sc = Scratch::new("hash");
+    let p = sc.paths();
+    capture(&p, "notes on the paper #reading");
+
+    let s = Session::open(p.clone()).unwrap();
+    assert_eq!(s.state.tagged("reading", u64::MAX).unwrap().len(), 1);
+}
+
+#[test]
+fn a_written_tag_and_an_added_one_are_one_page_and_one_row() {
+    // Different facts about a note — one is part of what it says, the other an
+    // OR-Set membership that can be retracted — and both belong on the page.
+    // A note carrying both must still appear once.
+    let sc = Scratch::new("hash-both");
+    let p = sc.paths();
+    let written = capture(&p, "notes on the paper #reading");
+    let added = capture(&p, "a plain note with no sigil");
+    brain_store::mutate::tag(&p, &added, "reading").unwrap();
+    brain_store::mutate::tag(&p, &written, "reading").unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let rows = s.state.tagged("reading", u64::MAX).unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "a note carrying both was counted twice: {rows:?}"
+    );
+}

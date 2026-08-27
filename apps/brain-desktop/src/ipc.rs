@@ -494,6 +494,22 @@ pub fn mentioning(sigil: String, value: String) -> std::result::Result<Vec<Note>
     })())
 }
 
+/// Every note carrying a tag.
+///
+/// The same page as a mention, from a different table. A tag is an OR-Set with
+/// its own events where a mention is part of the text (§3.7) — a real
+/// difference underneath, and none at all to somebody following one.
+#[tauri::command]
+pub fn tagged(tag: String) -> std::result::Result<Vec<Note>, String> {
+    wire((|| {
+        let s = read_only()?;
+        Ok(s.tagged(&tag, now_ms())?
+            .into_iter()
+            .map(Note::from)
+            .collect())
+    })())
+}
+
 /// What the recognizer saw, when it was not sure enough to act.
 ///
 /// Deliberately says how sure it was. A suggestion the reader cannot calibrate

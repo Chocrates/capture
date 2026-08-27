@@ -472,7 +472,16 @@ function noteRow(note, onOpen) {
     head.append(s);
   }
   if (note.pinned) head.append(el("span", "state", "pinned"));
-  for (const t of note.tags) head.append(el("span", "tag", `#${t}`));
+  for (const t of note.tags) {
+    const b = el("button", "tag", `#${t}`);
+    b.addEventListener("click", (e) => {
+      // The row beneath is itself clickable, and a tag is not a way to open the
+      // note it happens to sit on.
+      e.stopPropagation();
+      showMentions("#", t);
+    });
+    head.append(b);
+  }
   row.append(head);
 
   const body = el("div", "body");
@@ -660,6 +669,19 @@ async function showNote(name) {
         : "(no readable text)";
   }
   view.append(text);
+
+  // Tags, which the note page did not show at all — they were on the timeline
+  // row and nowhere else, so the page for a note said less about it than the
+  // list it came from.
+  if (n.tags.length) {
+    const box = el("div", "tagline");
+    for (const t of n.tags) {
+      const b = el("button", "tag", `#${t}`);
+      b.addEventListener("click", () => showMentions("#", t));
+      box.append(b);
+    }
+    view.append(box);
+  }
 
   // What the note currently *is*, beside what was captured.
   //
@@ -1054,7 +1076,13 @@ async function showMentions(sigil, value) {
 
   view.append(el("h2", null, `${sigil}${value}`));
 
-  const notes = await call("mentioning", { sigil, value });
+  // One page for three sigils, from two tables. A tag is an OR-Set with its own
+  // events and a mention is part of the text — a real difference underneath,
+  // and none at all to somebody following one.
+  const notes =
+    sigil === "#"
+      ? await call("tagged", { tag: value })
+      : await call("mentioning", { sigil, value });
   if (stale(mine)) return;
 
   if (!notes.length) {

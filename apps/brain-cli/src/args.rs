@@ -45,6 +45,8 @@ pub enum Command {
     Agenda { day: Option<String>, json: bool },
     /// Notes promoted to tasks.
     Tasks { json: bool },
+    /// Every note naming a person, a project, or carrying a tag.
+    Mentions { name: String, json: bool },
     /// Assign the task type by hand, with an optional due date.
     Task { name: String, due: Option<String> },
     /// Mark a task done, or open again.
@@ -360,6 +362,14 @@ where
                 }),
             }
         }
+        // `brain mentions @sarah`, `^acme`, `#reading`. One verb for three
+        // sigils, because a reader following one is doing the same thing in
+        // each case — the difference between an OR-Set tag and a mention in the
+        // text is real and is not theirs to keep track of.
+        "mentions" => one_name(&args[1..], "mentions", |name, json| Command::Mentions {
+            name,
+            json,
+        }),
         "task" => {
             let rest = &args[1..];
             match rest {
@@ -737,6 +747,8 @@ READING
 TIME AND TASKS
   brain agenda [day]           what is due and what occurs, default today
   brain tasks                  open tasks, newest first
+  brain mentions @sarah        every note naming a person, project or tag
+                               (@person, ^project, #tag)
   brain task <name> [due]      say it is a task, optionally due YYYY-MM-DD
   brain done|undone <name>     finish a task, or open it again
   brain done|undone <name> <occ>   one instance of a series, by its start

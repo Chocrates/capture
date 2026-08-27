@@ -1407,6 +1407,42 @@ impl Store {
         Ok(out)
     }
 
+    /// Every note carrying a tag.
+    ///
+    /// The third sigil, and the one that works differently underneath. A tag is
+    /// an OR-Set with its own events (§3.7) — added and retracted after the
+    /// fact, and often by enrichment rather than by hand — where a mention is
+    /// part of the text. To a reader following one they are the same gesture,
+    /// which is why the surfaces treat them alike and only this layer does not.
+    ///
+    /// Muted notes are excluded, as they are from mentions and search: §2.6
+    /// makes muting the cheap way to stop something resurfacing.
+    pub fn tagged(&self, tag: &str, now: u64) -> Result<Vec<NoteRow>> {
+        // Both sources, and the note appears once. A `#tag` written in a
+        // capture and a tag added afterwards are different facts — one is part
+        // of what the note says, the other is an OR-Set membership that can be
+        // retracted — and a page that showed only one of them would answer a
+        // narrower question than the reader asked. `#reading` typed into a
+        // capture reached nothing at all before this.
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
+             FROM notes n
+             WHERE (EXISTS (SELECT 1 FROM tags t WHERE t.tgt = n.tgt AND t.tag = ?1)
+                 OR EXISTS (SELECT 1 FROM mentions m
+                            WHERE m.tgt = n.tgt AND m.sigil = '#' AND m.value = ?1))
+               AND (n.muted_until IS NULL
+                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
+             ORDER BY n.created_wall DESC"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![tag, now as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Names beginning with a prefix, for completing a link as it is typed.
     ///
     /// Slugs and aliases together, because they share one namespace and one

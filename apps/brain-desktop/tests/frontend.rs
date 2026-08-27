@@ -432,6 +432,27 @@ fn a_mention_is_followable_where_it_was_written() {
 }
 
 #[test]
+fn all_three_sigils_go_to_a_page() {
+    // `@sarah` and `^acme` were followable and `#reading` was a coloured span,
+    // which is an inconsistency the reader has to learn rather than one they
+    // can see. One page, from two tables, because the difference between an
+    // OR-Set tag and a sigil in the text is not theirs to keep track of.
+    let code = ui_code("app.js");
+    assert!(
+        code.contains(r##"showMentions("#""##),
+        "a tag does not navigate anywhere"
+    );
+    assert!(
+        code.contains(r#"call("tagged""#),
+        "the tag page does not ask for tags added after the fact"
+    );
+    assert!(
+        code.contains(r#"call("mentioning""#),
+        "the page does not ask for sigils written in the text"
+    );
+}
+
+#[test]
 fn nothing_creates_an_entity() {
     // A page exists for every name the moment it is written, which is what
     // makes the layer usable on the first day rather than after months of

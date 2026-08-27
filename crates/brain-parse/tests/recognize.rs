@@ -521,9 +521,10 @@ fn a_capture_reports_who_and_what_it_names() {
         m,
         [
             ('@', "sarah".to_string()),
-            ('^', "acme-migration".to_string())
+            ('^', "acme-migration".to_string()),
+            ('#', "client".to_string())
         ],
-        "tags belong to their own event kind and table, not to mentions"
+        "a sigil written in the text is part of what the note says"
     );
 }
 

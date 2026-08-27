@@ -98,7 +98,16 @@ h2:first-child { margin-top: 0; }
 .ctx button:hover { color: var(--accent); border-color: var(--accent); }
 
 .tags { display: inline; }
-.tag { color: var(--accent); font-size: .8rem; margin-left: .4rem; }
+/* Followable, like the other two sigils. A tag that is text while `@sarah` is a
+ * link is an inconsistency the reader has to learn rather than one they can
+ * see. */
+.tag {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--accent); font-size: .8rem; margin-left: .4rem; cursor: pointer;
+}
+.tag:hover { text-decoration: underline; }
+.tagline { margin-top: .5rem; }
+.tagline .tag { margin-left: 0; margin-right: .5rem; }
 
 .row { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .8rem; }
 .row button, .act {

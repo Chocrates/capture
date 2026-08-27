@@ -30,6 +30,7 @@ fn main() {
             ipc::search,
             ipc::names,
             ipc::mentioning,
+            ipc::tagged,
             ipc::ambient,
             ipc::filter_by_context,
             ipc::health,

@@ -515,15 +515,24 @@ pub const SHAPES: &[&str] = &["friday 2pm", "every weekday at 7", "aug 1-14", "i
 /// and is never inferred, so there is nothing here to be unsure about and no
 /// reason to make a caller supply a clock to find out.
 ///
-/// Tags are deliberately absent. They have their own event kind and their own
-/// table, because a tag can be added and retracted after the fact — a mention
-/// is part of the text and changes only when the text does.
+/// `#tag` is here too, and that is not a contradiction of the `tag` event kind.
+/// The two are different facts: a tag *event* is an OR-Set membership somebody
+/// or something added after the fact and can retract (§3.7), while a `#` in the
+/// text is part of what the capture says and changes only when the text does. A
+/// note may carry either or both.
+///
+/// Leaving it out was the first version of this, and it meant typing `#reading`
+/// in a capture did nothing at all: the recognizer collected the sigil and
+/// dropped it, so the one organising axis somebody writes by hand was the one
+/// that never appeared anywhere.
 pub fn mentions(text: &str) -> alloc::vec::Vec<(char, alloc::string::String)> {
     use alloc::string::ToString;
     tokenize(text)
         .into_iter()
         .filter_map(|t| match t.class {
-            Class::Sigil(c) if c == '@' || c == '^' => t.sigil_value().map(|v| (c, v.to_string())),
+            Class::Sigil(c) if c == '@' || c == '^' || c == '#' => {
+                t.sigil_value().map(|v| (c, v.to_string()))
+            }
             _ => None,
         })
         .collect()

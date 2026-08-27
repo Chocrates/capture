@@ -301,6 +301,71 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Every note naming a person or a project, or carrying a tag.
+///
+/// §4.3's entity page, in a terminal. One verb for the three sigils: they come
+/// from different tables and mean different things underneath — a tag is an
+/// OR-Set with its own events, a mention is part of the text — and none of that
+/// is the reader's to keep track of while following one.
+///
+/// The sigil is required rather than guessed. `brain mentions sarah` could mean
+/// the person, the project or the tag, and picking one silently would be the
+/// kind of helpfulness that returns the wrong answer confidently.
+pub fn mentions(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let mut chars = name.chars();
+    let sigil = chars.next().unwrap_or(' ');
+    let value: String = chars.collect();
+
+    if value.is_empty() || !matches!(sigil, '@' | '^' | '#') {
+        return Err(Error::Usage(format!(
+            "'{name}' is not a mention; use @person, ^project or #tag"
+        )));
+    }
+
+    let rows = match sigil {
+        '#' => store.tagged(&value, now_ms() as u64)?,
+        _ => store.mentioning(sigil, &value, now_ms() as u64)?,
+    };
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|n| {
+                format!(
+                    "{{\"slug\":{},\"text\":{}}}",
+                    quote(&n.slug),
+                    n.text
+                        .as_deref()
+                        .map(quote)
+                        .unwrap_or_else(|| "null".into())
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        say!("Nothing names {name}.");
+        say!();
+        say!("Pages are not created — they exist for whatever your notes say.");
+        say!("Write {name} in a capture and this one fills itself in.");
+        return Ok(());
+    }
+
+    say!("{name}");
+    say!();
+    for n in &rows {
+        say!(
+            "  {:<40}  {}",
+            n.slug,
+            n.text.as_deref().map(first_line).unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 /// A bounded review session.
 ///
 /// Five items, then it is over and says so. An unbounded queue is a backlog and
