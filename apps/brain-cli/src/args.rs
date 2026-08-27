@@ -47,6 +47,8 @@ pub enum Command {
     Tasks { json: bool },
     /// Every note naming a person, a project, or carrying a tag.
     Mentions { name: String, json: bool },
+    /// Put a page under another in the wiki, or back at the top.
+    Parent { name: String, under: Option<String> },
     /// Assign the task type by hand, with an optional due date.
     Task { name: String, due: Option<String> },
     /// Mark a task done, or open again.
@@ -370,6 +372,27 @@ where
             name,
             json,
         }),
+        // `brain parent <page> <under>` files it; `brain parent <page>` puts it
+        // back at the top. The second form is deliberately the short one: it is
+        // the undo, and an undo that is harder to type than the thing it undoes
+        // is one people do not reach for.
+        "parent" => {
+            let rest = &args[1..];
+            match rest {
+                [name] => Ok(Command::Parent {
+                    name: name.clone(),
+                    under: None,
+                }),
+                [name, under] => Ok(Command::Parent {
+                    name: name.clone(),
+                    under: Some(under.clone()),
+                }),
+                _ => Err(Bad::UnknownFlag {
+                    command: "parent".into(),
+                    flag: "expected a page, and optionally what to put it under".into(),
+                }),
+            }
+        }
         "task" => {
             let rest = &args[1..];
             match rest {
@@ -749,6 +772,8 @@ TIME AND TASKS
   brain tasks                  open tasks, newest first
   brain mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)
+  brain parent <page> <under>  put a page under another in the wiki
+  brain parent <page>          put it back at the top
   brain task <name> [due]      say it is a task, optionally due YYYY-MM-DD
   brain done|undone <name>     finish a task, or open it again
   brain done|undone <name> <occ>   one instance of a series, by its start

@@ -102,6 +102,57 @@ pub fn untag(paths: &StorePaths, name: &str, tag: &str) -> Result<()> {
 ///
 /// Refused here as well as in the fold. The fold's refusal is what makes two
 /// partitioned devices agree; this one is what lets a person be told why.
+/// Put a page under another, or back at the top.
+///
+/// The one thing in this system that files something by hand. §3.7's argument
+/// against filing is not withdrawn — it is why nothing outside the wiki sidebar
+/// reads a parent, so the worst a wrong move can do is misplace a page in one
+/// list. It remains in the timeline, in search, on every entity page that names
+/// it and behind every link pointing at it.
+///
+/// The obvious loop is refused here, where it can be explained. Longer ones
+/// cannot be: two devices can each write half of a cycle without either being
+/// wrong at the time, so the fold breaks those afterwards and identically
+/// everywhere.
+pub fn set_parent(paths: &StorePaths, name: &str, under: Option<&str>) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = find(&s, name)?;
+
+    let parent = match under {
+        None => None,
+        Some(p) => {
+            let id = find(&s, p)?;
+            if id == tgt {
+                return Err(Error::Usage(format!("'{name}' cannot sit under itself")));
+            }
+            // Walking up from the proposed parent: if this note is already an
+            // ancestor of it, the move would close a loop. Refused with the
+            // reason, because this one is a mistake somebody can see — unlike
+            // the concurrent case, which nobody can.
+            let mut at = id;
+            let mut hops = 0;
+            while let Some(next) = s.state.note(&at)?.and_then(|n| n.parent) {
+                if next == tgt {
+                    return Err(Error::Usage(format!(
+                        "'{p}' already sits under '{name}', so this would make a loop"
+                    )));
+                }
+                at = next;
+                hops += 1;
+                if hops > 1000 {
+                    break;
+                }
+            }
+            Some(id)
+        }
+    };
+
+    s.append(Kind::PARENT, Some(tgt), None, |nonce| {
+        encode(&brain_core::body::ParentBody { nonce, parent })
+    })?;
+    Ok(())
+}
+
 pub fn set_alias(paths: &StorePaths, name: &str, alias: Option<&str>) -> Result<()> {
     let mut s = Session::open(paths.clone())?;
     let tgt = find(&s, name)?;

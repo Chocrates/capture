@@ -95,13 +95,23 @@ impl Kind {
     pub const OCC_DONE: Kind = Kind(22);
     /// Un-completing a mistaken tick. Not a pure union, deliberately.
     pub const OCC_UNDONE: Kind = Kind(23);
+    /// Puts one note under another in the wiki, or back at the top.
+    ///
+    /// The one place this design files something by hand. §3.7 argues at
+    /// length that structure should be derived — a hierarchy somebody
+    /// maintains is a hierarchy that stops being maintained, and a note filed
+    /// in the wrong branch is a note that is gone. It is here because it was
+    /// asked for after that argument was put, and the cost is real and
+    /// bounded: nothing else in the system reads it, so a wrong parent misfiles
+    /// a page in one sidebar and loses nothing.
+    pub const PARENT: Kind = Kind(24);
 
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=23).contains(&self.0)
+        (1..=24).contains(&self.0)
     }
 }
 
@@ -182,6 +192,7 @@ mod m2_kinds {
             Kind::OCC_CANCEL,
             Kind::OCC_DONE,
             Kind::OCC_UNDONE,
+            Kind::PARENT,
         ] {
             assert!(k.is_known(), "{k:?} was added and not admitted");
         }
@@ -200,6 +211,7 @@ mod m2_kinds {
         assert_eq!(Kind::OCC_CANCEL.0, 21);
         assert_eq!(Kind::OCC_DONE.0, 22);
         assert_eq!(Kind::OCC_UNDONE.0, 23);
+        assert_eq!(Kind::PARENT.0, 24);
     }
 
     #[test]
@@ -207,7 +219,7 @@ mod m2_kinds {
         // The boundary has to keep working after it moves. An event written by
         // a build that knows kind 24 must be held by this one rather than
         // discarded or misread as something it knows.
-        assert!(!Kind(24).is_known());
+        assert!(!Kind(25).is_known());
         assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }

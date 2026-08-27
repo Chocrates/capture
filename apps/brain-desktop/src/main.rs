@@ -32,6 +32,7 @@ fn main() {
             ipc::mentioning,
             ipc::tagged,
             ipc::wiki_index,
+            ipc::set_parent,
             ipc::ambient,
             ipc::filter_by_context,
             ipc::health,

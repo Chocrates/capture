@@ -609,6 +609,32 @@ pub struct OccBody {
     pub occ: i64,
 }
 
+/// Where a page sits in the wiki tree.
+///
+/// # The one hand-maintained structure here
+///
+/// §3.7's argument stands and is not withdrawn: collections are saved queries
+/// because a filing ritual has an excellent chance of not happening, and a
+/// hierarchy is filing. This exists because it was asked for with that argument
+/// in front of it, and the mitigation is containment — nothing outside the wiki
+/// sidebar reads a parent. A page filed wrongly is in the wrong branch of one
+/// list; it is still in the timeline, still in search, still on every entity
+/// page that names it, and still reachable by every link pointing at it. The
+/// failure mode §3.7 fears is "I filed it and now it is gone", and that cannot
+/// happen to something you cannot remove from anywhere by filing it.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct ParentBody {
+    /// Hiding salt.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub nonce: [u8; 16],
+    /// The note this one sits under. `None` puts it back at the top, which is
+    /// why it is an option rather than an absence — "no longer under anything"
+    /// is a decision somebody made, and it has to be able to beat an earlier
+    /// parent by ordinary last-write-wins.
+    #[n(1)]
+    pub parent: Option<EventId>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

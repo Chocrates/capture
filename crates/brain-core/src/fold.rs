@@ -39,8 +39,8 @@ use minicbor::{Decode, Encode};
 use crate::{
     body::{
         AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, OccBody, OccEditBody, OccMoveBody,
-        Outcome, PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody, ReviewBody,
-        SettingBody, TagBody, UntagBody,
+        Outcome, ParentBody, PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody,
+        ReviewBody, SettingBody, TagBody, UntagBody,
     },
     envelope::Envelope,
     event::Kind,
@@ -227,6 +227,18 @@ pub struct Note {
     /// thing this design could contain for the person it is for.
     #[n(22)]
     pub review: ReviewState,
+    /// The note this one sits under in the wiki, if somebody put it there.
+    ///
+    /// Read by one sidebar and nothing else, which is what makes it a bounded
+    /// departure from §3.7 rather than a filing system: a page under the wrong
+    /// parent is still in the timeline, still in search, still on every entity
+    /// page that names it and still reachable by every link pointing at it.
+    #[n(23)]
+    pub parent: Option<EventId>,
+    /// When the parent was last set, for last-write-wins and for breaking
+    /// cycles by dropping the newest edge in one.
+    #[n(24)]
+    pub parent_at: Option<Hlc>,
     /// Per-occurrence exceptions to this note's series, keyed by original start.
     ///
     /// Only ever populated for a promoted series. An exception naming an
@@ -558,6 +570,7 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::PIN => apply_pin(&mut proj, e),
             Kind::PROMOTE => apply_promote(&mut proj, e),
             Kind::REVIEW => apply_review(&mut proj, e),
+            Kind::PARENT => apply_parent(&mut proj, e),
             Kind::OCC_MOVE => apply_occ_move(&mut proj, e),
             Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
             Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
@@ -579,6 +592,12 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             }
         }
     }
+
+    // After every parent edge is in, and before anything reads the tree. Two
+    // devices can each write half of a loop without either being wrong at the
+    // time, so the loop only exists once both are folded — which is exactly
+    // where it can be broken identically on every replica.
+    break_parent_cycles(&mut proj);
 
     resolve(&mut proj, &texts);
 
@@ -679,6 +698,8 @@ fn apply_capture(
             slug: s.text,
             alias: None,
             alias_at: None,
+            parent: None,
+            parent_at: None,
             credential: crate::slug::looks_like_credential(text.as_deref().unwrap_or("")),
             text,
             ambient,
@@ -1049,6 +1070,98 @@ fn apply_review(proj: &mut Projection, e: &Envelope) {
         Outcome::Engaged => n.review.engaged += 1,
         Outcome::Deferred => n.review.deferred += 1,
         Outcome::Shown => {}
+    }
+}
+
+/// Put a note under another, or back at the top.
+///
+/// Ordinary last-write-wins. `None` is a decision rather than an absence —
+/// "no longer under anything" has to be able to beat an earlier parent — and
+/// the kind is what says so, since a `parent` event with no parent in it can
+/// mean nothing else.
+fn apply_parent(proj: &mut Projection, e: &Envelope) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(p) = minicbor::decode::<ParentBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    let Some(n) = proj.notes.get_mut(&tgt) else {
+        return;
+    };
+    if n.parent_at.is_none_or(|at| e.header.hlc > at) {
+        // A note under itself is refused where it is written, rather than left
+        // for the cycle pass: it is the one loop somebody can make on purpose,
+        // and it has no reading at all.
+        n.parent = p.parent.filter(|q| *q != tgt);
+        n.parent_at = Some(e.header.hlc);
+    }
+}
+
+/// Break any loop in the tree, identically everywhere.
+///
+/// Two devices can each file a page under the other without either being wrong
+/// when it happens: A under B is a fine thing to say, and so is B under A, and
+/// only the pair is a problem. So the loop cannot be refused at the point of
+/// writing — it does not exist yet — and has to be resolved after the fold.
+///
+/// The newest edge in the loop is the one dropped, by HLC and then by note id
+/// so the answer is total. That leaves the older arrangement standing, which is
+/// the same instinct as the rest of the conflict rules here: the surprising
+/// outcome should be the recent one, because it is the one somebody still
+/// remembers making.
+fn break_parent_cycles(proj: &mut Projection) {
+    let ids: Vec<EventId> = proj.notes.keys().copied().collect();
+
+    for start in ids {
+        // Walk up from this note. A chain longer than the number of notes has
+        // to have repeated one, and the bound is also what stops a malformed
+        // set of edges spinning here for ever.
+        let mut seen: Vec<EventId> = Vec::new();
+        let mut at = start;
+        loop {
+            if seen.contains(&at) {
+                break;
+            }
+            seen.push(at);
+            let Some(next) = proj.notes.get(&at).and_then(|n| n.parent) else {
+                // Reached the top: no loop on this path.
+                seen.clear();
+                break;
+            };
+            if !proj.notes.contains_key(&next) {
+                // A parent that is not here — a forward reference, or a note
+                // this replica does not hold. Not a loop, and not an error: the
+                // tree draws it at the top until the parent arrives.
+                seen.clear();
+                break;
+            }
+            at = next;
+        }
+
+        if seen.is_empty() {
+            continue;
+        }
+
+        // `at` is the note the walk came back to, so the loop is the tail of
+        // `seen` from there. Drop its newest edge.
+        let Some(from) = seen.iter().position(|x| *x == at) else {
+            continue;
+        };
+        let loop_members = &seen[from..];
+        let Some(newest) = loop_members
+            .iter()
+            .max_by_key(|id| {
+                let n = &proj.notes[*id];
+                (n.parent_at, **id)
+            })
+            .copied()
+        else {
+            continue;
+        };
+        if let Some(n) = proj.notes.get_mut(&newest) {
+            n.parent = None;
+        }
     }
 }
 
@@ -2954,5 +3067,148 @@ mod tests {
     fn folding_twice_gives_the_same_answer() {
         let s = testing::mixed(6, 2, 3, 12);
         assert_eq!(fold(&s.events).canonical(), fold(&s.events).canonical());
+    }
+
+    // ------------------------------------------------------------- parents ---
+    //
+    // The one hand-made structure here. §3.7's argument against filing stands;
+    // what these pin is that a wrong or conflicting parent costs a branch of
+    // one sidebar and nothing else.
+
+    fn parented(
+        events: &mut Vec<Envelope>,
+        d: &mut testing::Origin,
+        tgt: EventId,
+        under: Option<EventId>,
+        now: u64,
+    ) {
+        let body = testing::encode(&crate::body::ParentBody {
+            nonce: [0u8; 16],
+            parent: under,
+        });
+        events.push(d.author(Kind::PARENT, Some(tgt), None, body, now));
+    }
+
+    #[test]
+    fn a_page_can_be_put_under_another_and_taken_back_out() {
+        let s = testing::mixed(3, 1, 2, 0);
+        let (a, b) = (s.notes[0], s.notes[1]);
+        let mut d = testing::Origin::new(4);
+        let mut set = s.events.clone();
+
+        parented(&mut set, &mut d, a, Some(b), 1_700_000_100_000);
+        assert_eq!(fold(&set).notes[&a].parent, Some(b));
+
+        // `None` is a decision, not an absence: it has to beat the earlier
+        // parent by ordinary last-write-wins, or nothing could ever be taken
+        // back out of a branch it was filed into.
+        parented(&mut set, &mut d, a, None, 1_700_000_200_000);
+        assert_eq!(
+            fold(&set).notes[&a].parent,
+            None,
+            "it could not be moved back to the top"
+        );
+    }
+
+    #[test]
+    fn a_note_cannot_be_its_own_parent() {
+        // The one loop somebody can make on purpose, and it has no reading at
+        // all — so it is refused where it is written rather than left to the
+        // cycle pass.
+        let s = testing::mixed(3, 1, 1, 0);
+        let a = s.notes[0];
+        let mut d = testing::Origin::new(4);
+        let mut set = s.events.clone();
+
+        parented(&mut set, &mut d, a, Some(a), 1_700_000_100_000);
+        assert_eq!(fold(&set).notes[&a].parent, None);
+    }
+
+    #[test]
+    fn a_loop_made_by_two_devices_is_broken_the_same_way_everywhere() {
+        // Neither device is wrong when it writes: "A under B" is a fine thing
+        // to say, and so is "B under A". Only the pair is a problem, and it
+        // only exists once both are folded — which is where it can be resolved
+        // identically on every replica.
+        let s = testing::mixed(3, 2, 2, 0);
+        let (a, b) = (s.notes[0], s.notes[1]);
+        let mut one = testing::Origin::new(7);
+        let mut two = testing::Origin::new(8);
+        let mut set = s.events.clone();
+
+        parented(&mut set, &mut one, a, Some(b), 1_700_000_100_000);
+        parented(&mut set, &mut two, b, Some(a), 1_700_000_200_000);
+
+        let folded = fold(&set);
+        let broken = folded.notes[&a].parent.is_none() || folded.notes[&b].parent.is_none();
+        assert!(broken, "a loop survived the fold");
+
+        // And the same answer whatever order they arrive in, which is the
+        // property the whole log rests on.
+        let mut shuffled = set.clone();
+        shuffled.reverse();
+        let again = fold(&shuffled);
+        assert_eq!(folded.notes[&a].parent, again.notes[&a].parent);
+        assert_eq!(folded.notes[&b].parent, again.notes[&b].parent);
+    }
+
+    #[test]
+    fn breaking_a_loop_keeps_the_older_arrangement() {
+        // The newest edge is the one dropped. Same instinct as the rest of the
+        // conflict rules: the surprising outcome should be the recent one,
+        // because it is the one somebody still remembers making.
+        let s = testing::mixed(3, 2, 2, 0);
+        let (a, b) = (s.notes[0], s.notes[1]);
+        let mut one = testing::Origin::new(7);
+        let mut two = testing::Origin::new(8);
+        let mut set = s.events.clone();
+
+        parented(&mut set, &mut one, a, Some(b), 1_700_000_100_000);
+        parented(&mut set, &mut two, b, Some(a), 1_700_000_900_000);
+
+        let folded = fold(&set);
+        assert_eq!(
+            folded.notes[&a].parent,
+            Some(b),
+            "the older edge was dropped"
+        );
+        assert_eq!(
+            folded.notes[&b].parent, None,
+            "the newer edge survived a loop"
+        );
+    }
+
+    #[test]
+    fn a_longer_loop_is_broken_too() {
+        let s = testing::mixed(3, 2, 3, 0);
+        let (a, b, c) = (s.notes[0], s.notes[1], s.notes[2]);
+        let mut d = testing::Origin::new(7);
+        let mut set = s.events.clone();
+
+        parented(&mut set, &mut d, a, Some(b), 1_700_000_100_000);
+        parented(&mut set, &mut d, b, Some(c), 1_700_000_200_000);
+        parented(&mut set, &mut d, c, Some(a), 1_700_000_300_000);
+
+        let folded = fold(&set);
+        let edges = [a, b, c]
+            .iter()
+            .filter(|n| folded.notes[n].parent.is_some())
+            .count();
+        assert_eq!(edges, 2, "a three-note loop was not opened");
+    }
+
+    #[test]
+    fn a_parent_that_is_not_here_yet_is_not_a_loop() {
+        // A forward reference, or a note this replica does not hold. The tree
+        // draws the page at the top until the parent arrives; treating it as a
+        // loop would drop an edge that is perfectly good.
+        let s = testing::mixed(3, 1, 1, 0);
+        let a = s.notes[0];
+        let mut d = testing::Origin::new(4);
+        let mut set = s.events.clone();
+
+        let absent = EventId([0xAB; 32]);
+        parented(&mut set, &mut d, a, Some(absent), 1_700_000_100_000);
+        assert_eq!(fold(&set).notes[&a].parent, Some(absent));
     }
 }

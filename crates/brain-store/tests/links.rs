@@ -252,7 +252,7 @@ fn the_pages_are_the_notes_somebody_named() {
     let s = Session::open(p.clone()).unwrap();
     let named = s.state.named().unwrap();
     assert_eq!(named.len(), 1, "{named:?}");
-    assert_eq!(named[0].0, "acme-plan");
+    assert_eq!(named[0].alias, "acme-plan");
 }
 
 #[test]
@@ -299,4 +299,118 @@ fn a_muted_note_does_not_put_a_name_in_the_sidebar() {
 
     let s = Session::open(p.clone()).unwrap();
     assert!(s.state.distinct_mentions('@').unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Nesting. §3.7 argues against filing and the argument is not withdrawn; what
+// these pin is that the cost of a wrong parent stays inside one sidebar.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_page_sits_under_another_and_comes_back_out() {
+    let sc = Scratch::new("nest");
+    let p = sc.paths();
+    let parent = capture(&p, "the acme migration");
+    let child = capture(&p, "budget for acme");
+    brain_store::mutate::set_alias(&p, &parent, Some("acme")).unwrap();
+    brain_store::mutate::set_alias(&p, &child, Some("acme-budget")).unwrap();
+
+    brain_store::mutate::set_parent(&p, "acme-budget", Some("acme")).unwrap();
+    let s = Session::open(p.clone()).unwrap();
+    let named = s.state.named().unwrap();
+    let row = named.iter().find(|n| n.alias == "acme-budget").unwrap();
+    assert_eq!(row.parent.as_deref(), Some(parent.as_str()));
+
+    let tgt = s.state.resolve("acme").unwrap().unwrap();
+    assert_eq!(s.state.children_of(&tgt).unwrap().len(), 1);
+    drop(s);
+
+    brain_store::mutate::set_parent(&p, "acme-budget", None).unwrap();
+    let s = Session::open(p.clone()).unwrap();
+    let named = s.state.named().unwrap();
+    let row = named.iter().find(|n| n.alias == "acme-budget").unwrap();
+    assert_eq!(row.parent, None, "it could not be taken back out");
+}
+
+#[test]
+fn filing_a_page_removes_it_from_nothing() {
+    // The whole answer to §3.7's objection, and the reason this was allowed to
+    // exist at all: a page in the wrong branch is misplaced in one sidebar and
+    // is still everywhere else it was. "I filed it and now it is gone" is the
+    // failure being avoided, and it cannot happen if filing removes nothing.
+    let sc = Scratch::new("nest-visible");
+    let p = sc.paths();
+    let parent = capture(&p, "the acme migration");
+    let child = capture(&p, "budget for acme, ask @sarah #money");
+    brain_store::mutate::set_alias(&p, &parent, Some("acme")).unwrap();
+    brain_store::mutate::set_parent(&p, &child, Some("acme")).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let tgt = s.state.resolve(&child).unwrap().unwrap();
+
+    assert!(
+        s.state.timeline(10).unwrap().iter().any(|n| n.tgt == tgt),
+        "filing took it out of the timeline"
+    );
+    assert!(
+        s.state.search("budget", u64::MAX).unwrap().contains(&tgt),
+        "filing took it out of search"
+    );
+    assert_eq!(
+        s.state.mentioning('@', "sarah", u64::MAX).unwrap().len(),
+        1,
+        "filing took it off an entity page"
+    );
+    assert_eq!(
+        s.state.tagged("money", u64::MAX).unwrap().len(),
+        1,
+        "filing took it off a tag page"
+    );
+}
+
+#[test]
+fn a_loop_you_can_see_is_refused_where_you_make_it() {
+    // The concurrent case cannot be refused — two devices each write half of it
+    // and neither is wrong at the time, so the fold breaks those afterwards.
+    // This one is a single mistake with a single author, and it can be
+    // explained instead.
+    let sc = Scratch::new("nest-loop");
+    let p = sc.paths();
+    let a = capture(&p, "the acme migration");
+    let b = capture(&p, "budget for acme");
+    brain_store::mutate::set_parent(&p, &b, Some(&a)).unwrap();
+
+    let e = brain_store::mutate::set_parent(&p, &a, Some(&b)).unwrap_err();
+    assert!(e.to_string().contains("loop"), "unhelpful refusal: {e}");
+
+    let e = brain_store::mutate::set_parent(&p, &a, Some(&a)).unwrap_err();
+    assert!(
+        e.to_string().contains("under itself"),
+        "unhelpful refusal: {e}"
+    );
+}
+
+#[test]
+fn every_note_query_reads_the_columns_it_selected() {
+    // Adding `parent` broke four queries at once, because each wrote its column
+    // list out by hand instead of using the shared one — "Invalid column index:
+    // 14" from a store that was perfectly fine, and nothing caught it, because
+    // a hand-written list still compiles.
+    //
+    // Exercising them is the check. Each of these builds a `NoteRow`, and each
+    // would fail on the first row if its list and `note_row` disagreed.
+    let sc = Scratch::new("columns");
+    let p = sc.paths();
+    let slug = capture(&p, "a note to read every way there is");
+
+    let s = Session::open(p.clone()).unwrap();
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+
+    s.state.note(&tgt).unwrap().expect("note()");
+    s.state.timeline(10).unwrap();
+    s.state.needing_parse(u32::MAX, 10).unwrap();
+    s.state.by_context("repo", "second-brain").unwrap();
+    s.state.review_never_engaged(i64::MAX, 5).unwrap();
+    s.state.mentioning('@', "nobody", u64::MAX).unwrap();
+    s.state.tagged("nothing", u64::MAX).unwrap();
 }

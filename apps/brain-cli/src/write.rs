@@ -248,6 +248,21 @@ pub fn task_done(paths: StorePaths, name: &str, done: bool) -> Result<()> {
     Ok(())
 }
 
+/// Put a page under another in the wiki, or back at the top.
+///
+/// The one hand-made structure here. Nothing outside the wiki sidebar reads it,
+/// which is what keeps §3.7's objection bounded: a page filed wrongly is in the
+/// wrong branch of one list, and is still in the timeline, in search, on every
+/// entity page naming it and behind every link to it.
+pub fn parent(paths: StorePaths, name: &str, under: Option<&str>) -> Result<()> {
+    brain_store::mutate::set_parent(&paths, name, under)?;
+    match under {
+        Some(p) => say!("{name} sits under {p}."),
+        None => say!("{name} is back at the top."),
+    }
+    Ok(())
+}
+
 /// Say that missing an instance of a series leaves something owed.
 ///
 /// Only ever set by a person. §3.6 is explicit that the recognizer must not

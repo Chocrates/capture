@@ -22,7 +22,8 @@ use brain_core::{
     Dev, EventId, Incarnation, SLUG_VERSION,
     body::{
         Ambient, CaptureBody, Cue, EventFields, IntentBody, OccBody, OccEditBody, OccMoveBody,
-        Outcome, PromoteBody, Promoted, ReviewBody, RuleSpec, SeriesFields, TaskFields, When,
+        Outcome, ParentBody, PromoteBody, Promoted, ReviewBody, RuleSpec, SeriesFields, TaskFields,
+        When,
     },
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::Hlc,
@@ -500,4 +501,46 @@ fn every_m2_body_round_trips() {
         },
         OccBody
     );
+}
+
+#[test]
+fn a_parent_encodes_the_same_way_for_ever() {
+    // Frozen before anything writes one, like every other body here. A note
+    // filed under another is a `promote`-shaped decision — small, reversible,
+    // and permanent in the log — so the encoding has to be settled before the
+    // first one exists rather than after.
+    use brain_core::id::EventId;
+
+    let under = ParentBody {
+        nonce: [0x99; 16],
+        parent: Some(EventId([0x11; 32])),
+    };
+    assert_eq!(
+        hex(&canonical_of(&under)),
+        "825099999999999999999999999999999999582011111111111111111111111111111111111111111111111111111111111111\
+11"
+    );
+
+    // Back to the top, and the encoding of it is worth writing down because it
+    // is not what it looks like: a trailing `None` is elided entirely, so this
+    // is a one-element array rather than a two-element one ending in null. The
+    // assertion here was written the other way round first and this test caught
+    // it, which is the reason the vectors are frozen before anything writes
+    // one.
+    //
+    // It is safe *here*, and the reason is specific rather than general. The
+    // meaning lives in the kind: a `parent` event with no parent in it says
+    // "under nothing", because there is no other thing such an event could be
+    // saying. So it still decodes to `None`, still beats an earlier parent by
+    // ordinary last-write-wins, and "moved back to the top" survives the round
+    // trip. A field added after this one would need care — that is true of
+    // every body in this file and is why they are all frozen.
+    let top = ParentBody {
+        nonce: [0x99; 16],
+        parent: None,
+    };
+    let bytes = canonical_of(&top);
+    let back: ParentBody = minicbor::decode(&bytes).unwrap();
+    assert_eq!(back.parent, None, "moving back to the top did not survive");
+    assert_eq!(hex(&bytes), "815099999999999999999999999999999999");
 }

@@ -518,6 +518,10 @@ pub struct Entry {
     /// For a page, the note to open. Absent for a person, project or tag,
     /// which open a page of their own.
     pub slug: Option<String>,
+    /// The page this one sits under, by slug. Only pages nest — a person is
+    /// not under a project, and pretending otherwise would invent a
+    /// relationship nobody wrote.
+    pub parent: Option<String>,
     /// How many notes name it. Absent for a page, which is one note.
     pub count: Option<u32>,
 }
@@ -547,9 +551,10 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
         let pages = s
             .named()?
             .into_iter()
-            .map(|(alias, slug)| Entry {
-                name: alias,
-                slug: Some(slug),
+            .map(|n| Entry {
+                name: n.alias,
+                slug: Some(n.slug),
+                parent: n.parent,
                 count: None,
             })
             .collect();
@@ -560,6 +565,7 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
                 .map(|(name, count)| Entry {
                     name,
                     slug: None,
+                    parent: None,
                     count: Some(count),
                 })
                 .collect())
@@ -571,6 +577,14 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
             projects: listed('^')?,
             tags: listed('#')?,
         })
+    })())
+}
+
+/// Put a page under another, or back at the top.
+#[tauri::command]
+pub fn set_parent(name: String, under: Option<String>) -> std::result::Result<(), String> {
+    wire((|| {
+        brain_store::mutate::set_parent(&paths()?, &name, under.as_deref())
     })())
 }
 
@@ -1227,6 +1241,7 @@ mod tests {
             muted_until: None,
             redacted_at: None,
             redaction_queued: false,
+            parent: None,
             credential: false,
             tags: Vec::new(),
             divergences: 0,

@@ -38,11 +38,14 @@ use crate::{Result, db};
 
 /// Bumped when the shape below changes. A mismatch triggers a rebuild.
 ///
+/// Version 4 adds `notes.parent`, which every existing note has to be re-read
+/// for — a migration would have had nothing to fill it from.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 3;
+pub const PROJECTION_SCHEMA: u32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -66,8 +69,15 @@ CREATE TABLE IF NOT EXISTS notes (
   -- Set at capture by a predicate that deliberately over-flags. Keeps the note
   -- out of exports until someone clears it, because an export directory is
   -- copied offsite where redaction can never reach.
-  credential      INTEGER NOT NULL DEFAULT 0
+  credential      INTEGER NOT NULL DEFAULT 0,
+  -- The page this one sits under in the wiki (§3.7's one exception, and it is
+  -- an exception). Read by the sidebar and by nothing else, so a page under
+  -- the wrong parent is misfiled in one list and is still in the timeline, in
+  -- search, on every entity page naming it and behind every link to it.
+  parent          BLOB
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS notes_parent ON notes(parent);
 
 CREATE INDEX IF NOT EXISTS notes_updated ON notes(updated_wall DESC, updated_counter DESC);
 CREATE INDEX IF NOT EXISTS notes_created ON notes(created_wall DESC, created_counter DESC);
@@ -391,7 +401,8 @@ pub struct OccurrenceRow {
 const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
      n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
      n.redacted_at, n.credential,
-     EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0)";
+     EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0),
+     n.parent";
 
 /// What every review tier excludes, and why.
 ///
@@ -414,6 +425,15 @@ const REVIEW_ELIGIBLE: &str = "n.text IS NOT NULL
 
 fn utc() -> brain_time::Zone {
     brain_time::Zone::new("UTC").expect("UTC is always present")
+}
+
+/// A page in the wiki: a note somebody named, and where it sits.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Named {
+    pub alias: String,
+    pub slug: String,
+    /// The slug of the page it sits under, if any.
+    pub parent: Option<String>,
 }
 
 /// An if-then plan, as the projection stores it.
@@ -479,6 +499,8 @@ pub struct NoteRow {
     /// Kept out of exports until cleared. See the fold's `credential` field.
     pub credential: bool,
     pub tags: Vec<String>,
+    /// The page this one sits under, if somebody filed it there.
+    pub parent: Option<EventId>,
     /// How many unreconciled branches the note has.
     pub divergences: u64,
 }
@@ -1220,19 +1242,16 @@ impl Store {
     /// answer this until the projection learned to store a promotion, which was
     /// fine for hundreds of notes and would not have stayed fine.
     pub fn needing_parse(&self, grammar: u32, limit: usize) -> Result<Vec<NoteRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT n.tgt, n.slug, n.alias, n.text, n.created_wall, n.created_counter,
-                    n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
-                    n.redacted_at, n.credential,
-                    EXISTS (SELECT 1 FROM redact_queue q
-                            WHERE q.tgt = n.tgt AND q.cancelled = 0)
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS}
              FROM notes n
              LEFT JOIN promotions p ON p.tgt = n.tgt
              WHERE n.text IS NOT NULL
                AND (p.tgt IS NULL OR (p.pinned = 0 AND p.grammar IS NOT NULL AND p.grammar < ?1))
              ORDER BY n.created_wall DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        );
+        let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map(params![grammar as i64, limit as i64], note_row)?;
         let mut out = Vec::new();
         for r in rows {
@@ -1349,7 +1368,8 @@ impl Store {
                         created_counter, updated_wall, updated_counter, tz,
                         pinned, muted_until, redacted_at, credential,
                         EXISTS (SELECT 1 FROM redact_queue q
-                                WHERE q.tgt = notes.tgt AND q.cancelled = 0)
+                                WHERE q.tgt = notes.tgt AND q.cancelled = 0),
+                        parent
                  FROM notes WHERE tgt = ?1",
                 params![tgt.0.to_vec()],
                 note_row,
@@ -1443,19 +1463,51 @@ impl Store {
         Ok(out)
     }
 
+    /// The pages sitting directly under one.
+    pub fn children_of(&self, tgt: &EventId) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT COALESCE(alias, slug), slug FROM notes
+             WHERE parent = ?1 AND redacted_at IS NULL
+             ORDER BY COALESCE(alias, slug)",
+        )?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Notes given a name by hand.
     ///
     /// The wiki's pages, and the reason the list is aliases rather than every
     /// note: an alias is the one act in this system that says "this note is a
     /// thing I will come back to" (§4.3). Everything else is a capture, and a
     /// sidebar listing all of them would be the timeline with worse ordering.
-    pub fn named(&self) -> Result<Vec<(String, String)>> {
+    pub fn named(&self) -> Result<Vec<Named>> {
         let mut st = self.conn.prepare(
-            "SELECT alias, slug FROM notes
-             WHERE alias IS NOT NULL AND redacted_at IS NULL
-             ORDER BY alias",
+            "SELECT n.alias, n.slug, p.slug FROM notes n
+             LEFT JOIN notes p ON p.tgt = n.parent
+             WHERE n.alias IS NOT NULL AND n.redacted_at IS NULL
+             ORDER BY n.alias",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let rows = st.query_map([], |r| {
+            Ok(Named {
+                alias: r.get::<_, String>(0)?,
+                slug: r.get::<_, String>(1)?,
+                // The parent by slug rather than by id: the page is addressed
+                // by name everywhere else, and a tree keyed by raw bytes would
+                // need translating at every use.
+                //
+                // A parent that is not itself a named page comes back as its
+                // slug all the same, so the branch is still drawn — filing a
+                // page under an unnamed note is allowed, and hiding the result
+                // would look like the move had not worked.
+                parent: r.get::<_, Option<String>>(2)?,
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1553,7 +1605,8 @@ impl Store {
                     created_counter, updated_wall, updated_counter, tz,
                     pinned, muted_until, redacted_at, credential,
                     EXISTS (SELECT 1 FROM redact_queue q
-                            WHERE q.tgt = notes.tgt AND q.cancelled = 0)
+                            WHERE q.tgt = notes.tgt AND q.cancelled = 0),
+                    parent
              FROM notes
              ORDER BY created_wall DESC, created_counter DESC
              LIMIT ?1",
@@ -1730,7 +1783,8 @@ impl Store {
                     n.created_counter, n.updated_wall, n.updated_counter, n.tz,
                     n.pinned, n.muted_until, n.redacted_at, n.credential,
                     EXISTS (SELECT 1 FROM redact_queue q
-                            WHERE q.tgt = n.tgt AND q.cancelled = 0)
+                            WHERE q.tgt = n.tgt AND q.cancelled = 0),
+                    n.parent
              FROM notes n JOIN ambient a ON a.tgt = n.tgt
              WHERE a.{column} = ?1
              ORDER BY n.created_wall DESC"
@@ -2329,8 +2383,8 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             "INSERT INTO notes
                (tgt, slug, alias, alias_wall, alias_counter, text, head,
                 created_wall, created_counter, updated_wall, updated_counter,
-                tz, pinned, muted_until, redacted_at, credential)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                tz, pinned, muted_until, redacted_at, credential, parent)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 t,
                 n.slug,
@@ -2348,6 +2402,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 n.muted_until.map(|v| v as i64),
                 n.redacted_at.map(|h| h.wall as i64),
                 n.credential as i64,
+                n.parent.map(|p| p.0.to_vec()),
             ],
         )?;
 
@@ -2505,6 +2560,12 @@ fn id_from(b: Vec<u8>) -> Option<EventId> {
     <[u8; 32]>::try_from(b.as_slice()).ok().map(EventId)
 }
 
+/// Reads a row selected by [`NOTE_COLUMNS`], in that order.
+///
+/// Four queries once wrote the column list out by hand instead of using the
+/// constant, and adding `parent` to it broke every one of them at run time —
+/// "Invalid column index: 14", from a store that was perfectly fine. Nothing
+/// caught it, because a hand-written list still compiles.
 fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
     Ok(NoteRow {
         tgt: id_from(r.get::<_, Vec<u8>>(0)?).unwrap_or(EventId([0; 32])),
@@ -2519,6 +2580,7 @@ fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
         redacted_at: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
         credential: r.get::<_, i64>(12)? != 0,
         redaction_queued: r.get::<_, i64>(13)? != 0,
+        parent: r.get::<_, Option<Vec<u8>>>(14)?.and_then(id_from),
         tags: Vec::new(),
         divergences: 0,
     })

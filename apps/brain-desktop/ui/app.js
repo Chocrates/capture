@@ -805,7 +805,7 @@ async function showNote(name, into = view) {
     return li;
   }));
 
-  into.append(actions(n));
+  into.append(actions(n, into));
 }
 
 function linkList(heading, items, render) {
@@ -963,7 +963,7 @@ function editNote(n) {
 /// muting exists so that suppressing something is *cheaper* than destroying it,
 /// and that gradient inverts if suppression needs a shell while destruction is
 /// a documented command.
-function actions(n) {
+function actions(n, into = view) {
   const row = el("div", "row");
 
   const add = (label, fn, cls) => {
@@ -990,6 +990,20 @@ function actions(n) {
       showNote(n.slug);
     });
   }
+
+  // The one filing gesture in the interface, and it says what it costs: a page
+  // moved into the wrong branch is still in the timeline, in search and behind
+  // every link — which is the whole reason this was allowed to exist.
+  add("Move…", async () => {
+    const under = prompt(
+      "Put this under which page?\n\nLeave empty to move it back to the top.",
+      "",
+    );
+    if (under === null) return;
+    await call("set_parent", { name: n.slug, under: under.trim() || null });
+    toast(under.trim() ? `Under ${under.trim()}.` : "Back at the top.");
+    showNote(n.slug, into);
+  });
 
   add("Rename", async () => {
     const alias = prompt("A chosen name (blank clears it):", n.alias || "");
@@ -1180,11 +1194,12 @@ async function showWiki(at) {
   frame.append(side, page);
   view.append(frame);
 
-  const section = (label, entries, open) => {
+  const section = (label, entries, open, depth) => {
     if (!entries.length) return;
     side.append(el("div", "side-label", label));
     for (const e of entries) {
       const b = el("button", "side-item", e.name);
+      if (depth) b.style.paddingLeft = `${0.4 + depth(e) * 0.8}rem`;
       if (e.count !== null && e.count !== undefined) {
         b.append(el("span", "side-count", String(e.count)));
       }
@@ -1194,8 +1209,13 @@ async function showWiki(at) {
     }
   };
 
-  section("pages", index.pages, (e) => ({ kind: "note", name: e.slug }));
+  // Pages nest; the other three do not. A person is not under a project, and
+  // arranging them as though they were would invent a relationship nobody
+  // wrote — where a page under a page is one somebody said out loud.
+  const { ordered, depthOf } = tree(index.pages);
+  section("pages", ordered, (e) => ({ kind: "note", name: e.slug }), (e) => depthOf.get(e.slug) || 0);
   section("people", index.people, (e) => ({ kind: "mentions", sigil: "@", value: e.name }));
+
   section("projects", index.projects, (e) => ({ kind: "mentions", sigil: "^", value: e.name }));
   section("tags", index.tags, (e) => ({ kind: "mentions", sigil: "#", value: e.name }));
 
@@ -1220,6 +1240,50 @@ async function showWiki(at) {
   // rest of the interface as either of them changes.
   if (wikiAt.kind === "note") await showNote(wikiAt.name, page);
   else await showMentions(wikiAt.sigil, wikiAt.value, page);
+}
+
+/// Arrange the pages into the order a tree is read in, with a depth each.
+///
+/// Depth-first from the pages that sit under nothing, alphabetically at every
+/// level, which is what makes the list stable: a page keeps its position until
+/// somebody moves it, and the sidebar is somewhere you can learn by shape.
+///
+/// A page whose parent is not itself a page — filed under an ordinary note, or
+/// under one this replica does not hold — is drawn at the top rather than
+/// hidden. It was moved somewhere, and a move that makes a page disappear from
+/// the list it was moved within is the failure §3.7 warns about.
+function tree(pages) {
+  const byParent = new Map();
+  const known = new Set(pages.map((p) => p.slug));
+  for (const p of pages) {
+    const key = p.parent && known.has(p.parent) ? p.parent : "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(p);
+  }
+
+  const ordered = [];
+  const depthOf = new Map();
+  const walk = (key, depth) => {
+    for (const p of byParent.get(key) || []) {
+      // Guard rather than trust. The fold breaks cycles and refuses the
+      // self-parent, so a loop should not reach here — but a sidebar that can
+      // hang the window if it is wrong is not worth the assumption.
+      if (depthOf.has(p.slug)) continue;
+      depthOf.set(p.slug, depth);
+      ordered.push(p);
+      walk(p.slug, depth + 1);
+    }
+  };
+  walk("", 0);
+
+  // Anything the walk did not reach, for the same reason: a page that is not
+  // drawn is a page somebody cannot find.
+  for (const p of pages) if (!depthOf.has(p.slug)) {
+    depthOf.set(p.slug, 0);
+    ordered.push(p);
+  }
+
+  return { ordered, depthOf };
 }
 
 /// Move within the pane, recording it.

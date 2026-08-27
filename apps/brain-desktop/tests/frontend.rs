@@ -377,6 +377,45 @@ fn the_wiki_remembers_where_you_were() {
 }
 
 #[test]
+fn only_pages_nest() {
+    // A person is not under a project. Arranging the other three sigils as a
+    // tree would invent a relationship nobody wrote, where a page under a page
+    // is one somebody said out loud.
+    let code = ui_code("app.js");
+    let call = code
+        .split(r#"section("people""#)
+        .nth(1)
+        .expect("the people section exists");
+    let line = &call[..call.find('\n').unwrap_or(call.len())];
+    assert!(
+        !line.contains("depthOf"),
+        "people are drawn as a tree, which is a relationship nobody wrote"
+    );
+    assert!(
+        code.contains(r#"section("pages", ordered"#),
+        "pages are not drawn as a tree"
+    );
+}
+
+#[test]
+fn a_page_the_tree_cannot_place_is_still_drawn() {
+    // Filed under an ordinary note, under one this replica does not hold, or
+    // caught in something the walk did not reach. A page that is not drawn is a
+    // page somebody cannot find, which is the failure filing is supposed not to
+    // have.
+    let code = ui_code("app.js");
+    let t = code.split("function tree(").nth(1).expect("tree() exists");
+    assert!(
+        t.contains("if (!depthOf.has(p.slug))"),
+        "a page the walk missed is dropped from the sidebar"
+    );
+    assert!(
+        t.contains("if (depthOf.has(p.slug)) continue;"),
+        "nothing stops the walk if the edges contain a loop"
+    );
+}
+
+#[test]
 fn nothing_in_the_sidebar_is_maintained_by_hand() {
     // Pages are notes somebody aliased; people, projects and tags are whatever
     // the notes say. A control that added an entry would be the filing step
