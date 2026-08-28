@@ -111,3 +111,77 @@ because they are cheap here.
 - **Purity**: `brain-time` must not reach a clock. Recurrence expansion takes
   "now" as a value at the boundary like everything else, or the same log folds
   differently on two machines and §8.3's property test cannot catch it.
+
+## Outcome
+
+Written at close, against what was proposed rather than from memory.
+
+### What shipped beyond the proposal
+
+Four things were built during M2 that this document never asked for, all in the
+browse surface and all in response to using it:
+
+- **The wiki layer.** `[[links]]` were extracted, resolved and indexed both
+  ways, and the note text showed the raw brackets — the layer existed and was
+  unreachable. Links are followable now, with three states rather than two (it
+  resolves, the name moved, or nothing has that name yet), navigation keeps
+  back and forward across every page, and editing happens in place with `[[`
+  completion instead of in a browser dialog.
+- **Entity pages.** `@person`, `^project` and `#tag` reach a page of everything
+  naming them. `#` was the one that mattered: it was collected by the
+  recognizer and dropped, so the single organising axis somebody writes by hand
+  was the only one that never appeared anywhere.
+- **A wiki pane**, with a sidebar built entirely from the store — pages are the
+  notes somebody aliased, and the rest is whatever the notes say.
+- **Nested pages**, which is the one place this design files by hand. §3.7's
+  argument against it is not withdrawn; it was asked for with the argument in
+  view. The containment is that nothing outside the wiki sidebar reads a
+  parent, so a page in the wrong branch is misplaced in one list and is still
+  in the timeline, in search, on every entity page naming it and behind every
+  link to it. That is a test, not a claim.
+
+### What was deferred, and why
+
+- **8.2 — the active-project selection tier.** Needs a notion of an *active*
+  project, which does not exist: `^project` is a sigil the recognizer collects
+  and nothing makes current. Building a guess would put a tier in the review
+  order that fires on the wrong things.
+- **9.2 — the cue types this device cannot observe.** `app_focus` is not
+  observable on GNOME/Wayland at all, and `location` needs a phone. Both are
+  refused at creation rather than accepted and silently never fired, which is
+  the honest half of the requirement.
+- **10.2 / 10.3 — external calendar import.** No feed, no importer, nothing to
+  test an ICS or CalDAV reader against. §3.9's value is the *refusal* to write
+  back, and nothing yet needs it. A parser written against an imaginary feed
+  would have been the most speculative code in the milestone.
+- **11.1 — a test per spec scenario.** Every capability has runnable tests and
+  the load-bearing scenarios are covered. What is not covered is the scenarios
+  of the things above, which do not exist — claiming otherwise would be
+  claiming coverage of absent code.
+- **Entity identity** (§4.3's `ent_id`, `display`, `merged_into`) is not built.
+  Renaming a person forks their page, two people with one name share a page,
+  and there is no merge path. Mentions are derived data, so adding identity
+  later is a projection change rather than a log one — which is what made
+  deferring it safe.
+
+### What the milestone taught, which was not what it set out to teach
+
+Six defects were found in the last stretch and every one came from running the
+software against a real store rather than from reading it:
+
+1. `is_stale()` had no caller, so nothing rebuilt a projection after a schema
+   bump — while this document assumed rebuild-not-migrate throughout.
+2. A reparse re-resolved relative expressions against the sweep's clock, so
+   every grammar bump walked "meeting at 14:00" forward a day.
+3. Review's answers lived in the page, so leaving and returning offered them
+   again — and `deferred` accumulates, which retires an item permanently.
+4. A `#tag` typed into a capture reached nothing.
+5. A link to a name matching nothing was drawn as followable.
+6. Adding a column to `notes` made every existing store unopenable, and the
+   rebuild that would have fixed it starts by opening.
+
+Three of those shared one cause: a query spelling out its columns instead of
+using the shared list. The rule that came out of it — **the schema may add
+tables, never columns** — is now written in the schema itself and pinned by a
+test, because rebuild-not-migrate depends on an old projection staying openable
+long enough to be found stale.
