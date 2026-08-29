@@ -102,6 +102,28 @@ pub fn untag(paths: &StorePaths, name: &str, tag: &str) -> Result<()> {
 ///
 /// Refused here as well as in the fold. The fold's refusal is what makes two
 /// partitioned devices agree; this one is what lets a person be told why.
+/// Preferences this build understands, with the value used when none is chosen.
+///
+/// Compiled in, never written to the log on first run. Materialising defaults as
+/// recorded decisions would freeze today's judgement permanently and destroy the
+/// distinction between a value you picked and one you inherited (§8.9).
+///
+/// Here rather than in the command line because [`set_setting`] validates
+/// against it, and that function is what every surface calls.
+pub const KNOWN_SETTINGS: &[(&str, &str, &str)] = &[(
+    "timeline.limit",
+    "50",
+    "how many notes `brain timeline` shows",
+)];
+
+/// The compiled-in value for a setting, if this build knows the key.
+pub fn default_for(key: &str) -> Option<&'static str> {
+    KNOWN_SETTINGS
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, v, _)| *v)
+}
+
 /// Put a page under another, or back at the top.
 ///
 /// The one thing in this system that files something by hand. §3.7's argument
@@ -213,7 +235,22 @@ pub fn mute_note(paths: &StorePaths, name: &str) -> Result<()> {
 /// Suppress everything matching a rule.
 pub fn mute_scope(paths: &StorePaths, scope: MuteScope, until: Option<u64>) -> Result<()> {
     let mut s = Session::open(paths.clone())?;
-    s.append(Kind::MUTE, None, None, |nonce| {
+
+    // A note-scoped mute names the note it is about.
+    //
+    // The fold does not need it — muting is a rule read from the body, and
+    // which notes it covers is decided when the question is asked. `brain log
+    // <name>` does need it: that view filters on `tgt`, so a mute written
+    // without one works perfectly and is missing from the history of the note
+    // it silenced. "Every event that touched a note" would be false, quietly,
+    // and only for mutes written through this function rather than through
+    // `mute_note`.
+    let tgt = match &scope {
+        MuteScope::Note(t) => Some(*t),
+        _ => None,
+    };
+
+    s.append(Kind::MUTE, tgt, None, |nonce| {
         encode(&MuteBody {
             nonce,
             scope: scope.clone(),
@@ -385,6 +422,18 @@ pub fn retract_intent(paths: &StorePaths, id: &EventId) -> Result<()> {
 
 /// Record a preference.
 pub fn set_setting(paths: &StorePaths, key: &str, value: Option<&str>) -> Result<()> {
+    // Checked here rather than in the command line that used to be the only
+    // caller. A setting is an event: an unknown key written once is in the log
+    // for ever, understood by nothing, and a second surface calling this
+    // without the check would have been able to put one there.
+    if default_for(key).is_none() {
+        let known: Vec<&str> = KNOWN_SETTINGS.iter().map(|(k, _, _)| *k).collect();
+        return Err(Error::Usage(format!(
+            "'{key}' is not a setting this build knows.\n\nKnown: {}",
+            known.join(", ")
+        )));
+    }
+
     let mut s = Session::open(paths.clone())?;
     s.append(Kind::SETTING, None, None, |nonce| {
         encode(&brain_core::body::SettingBody {

@@ -301,6 +301,11 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Enough of an id to name one plan, the way a short commit hash does.
+fn short(id: &[u8]) -> String {
+    id.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
 /// Every note naming a person or a project, or carrying a tag.
 ///
 /// §4.3's entity page, in a terminal. One verb for the three sigils: they come
@@ -582,7 +587,8 @@ pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
             .iter()
             .map(|i| {
                 format!(
-                    "{{\"cue\":{},\"match\":{},\"at\":{},\"then\":{}}}",
+                    "{{\"id\":{},\"cue\":{},\"match\":{},\"at\":{},\"then\":{}}}",
+                    quote(&short(&i.id)),
                     quote(&i.cue_type),
                     i.cue_match
                         .as_deref()
@@ -614,7 +620,9 @@ pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
             (t, Some(m), _) => format!("{t} {m}"),
             (t, None, _) => t.to_string(),
         };
-        say!("  {:<34}  {}", when, i.then_do);
+        // The id, because `brain forget` needs something to name and the whole
+        // one is thirty-two bytes.
+        say!("  {}  {:<30}  {}", short(&i.id), when, i.then_do);
     }
     Ok(())
 }

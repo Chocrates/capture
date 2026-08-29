@@ -26,7 +26,7 @@
 //! anxiety this design exists for, so a status page that manufactures a running
 //! failure signal works directly against its own purpose.
 
-use brain_core::{body::SettingBody, event::Kind};
+use brain_core::event::Kind;
 use brain_store::{
     Error, Result, StorePaths,
     lock::{self, Writer},
@@ -39,23 +39,10 @@ use brain_store::{
 use crate::read;
 use brain_store::session::Session;
 
-/// Preferences this build understands, with the value used when none is chosen.
-///
-/// Compiled in, never written to the log on first run. Materialising defaults
-/// as recorded decisions would freeze today's judgement permanently and destroy
-/// the distinction between a value you picked and one you inherited.
-pub const KNOWN_SETTINGS: &[(&str, &str, &str)] = &[(
-    "timeline.limit",
-    "50",
-    "how many notes `brain timeline` shows",
-)];
-
-fn default_for(key: &str) -> Option<&'static str> {
-    KNOWN_SETTINGS
-        .iter()
-        .find(|(k, _, _)| *k == key)
-        .map(|(_, v, _)| *v)
-}
+// The table and its lookup live in `brain-store`, beside the function that
+// validates against them. Every surface writes a setting through that, and a
+// copy here would be a second answer to "is this a real key".
+use brain_store::mutate::{KNOWN_SETTINGS, default_for};
 
 /// The value in force for a setting, chosen or compiled in.
 pub fn effective(state: &Store, key: &str) -> Result<Option<String>> {
@@ -502,27 +489,11 @@ pub fn exports_pruned(paths: StorePaths) -> Result<()> {
 
 /// Record a preference.
 pub fn set(paths: StorePaths, key: &str, value: Option<&str>) -> Result<()> {
-    if default_for(key).is_none() {
-        let known: Vec<&str> = KNOWN_SETTINGS.iter().map(|(k, _, _)| *k).collect();
-        return Err(Error::Usage(format!(
-            "'{key}' is not a setting this build knows.\n\nKnown: {}",
-            known.join(", ")
-        )));
-    }
-    let mut s = Session::open(paths)?;
-    s.append(Kind::SETTING, None, None, |nonce| {
-        let mut b = Vec::new();
-        minicbor::encode(
-            &SettingBody {
-                nonce,
-                key: key.to_string(),
-                value: value.map(String::from),
-            },
-            &mut b,
-        )
-        .expect("encoding into Vec is infallible");
-        b
-    })?;
+    // The store validates the key and writes the event. This used to do both,
+    // which left `mutate::set_setting` unused and unchecked — so a second
+    // surface calling it could have written a key no build understands into a
+    // log that keeps it for ever.
+    brain_store::mutate::set_setting(&paths, key, value)?;
     match value {
         Some(v) => say!("{key} set to {v}"),
         None => say!("{key} restored to its default"),

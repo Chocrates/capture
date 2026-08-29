@@ -49,6 +49,8 @@ pub enum Command {
     Mentions { name: String, json: bool },
     /// Put a page under another in the wiki, or back at the top.
     Parent { name: String, under: Option<String> },
+    /// Abandon a plan.
+    Forget { id: String },
     /// Assign the task type by hand, with an optional due date.
     Task { name: String, due: Option<String> },
     /// Mark a task done, or open again.
@@ -376,6 +378,16 @@ where
         // back at the top. The second form is deliberately the short one: it is
         // the undo, and an undo that is harder to type than the thing it undoes
         // is one people do not reach for.
+        // §2.4 rates being easy to walk away from as part of the case for
+        // having intents at all — and until now there was no way to walk away
+        // from one from any surface, though the fold has always known how.
+        "forget" => match &args[1..] {
+            [id] => Ok(Command::Forget { id: id.clone() }),
+            _ => Err(Bad::UnknownFlag {
+                command: "forget".into(),
+                flag: "expected the id of a plan, from `brain intents`".into(),
+            }),
+        },
         "parent" => {
             let rest = &args[1..];
             match rest {
@@ -772,6 +784,7 @@ TIME AND TASKS
   brain tasks                  open tasks, newest first
   brain mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)
+  brain forget <id>            abandon a plan, by its id from brain intents
   brain parent <page> <under>  put a page under another in the wiki
   brain parent <page>          put it back at the top
   brain task <name> [due]      say it is a task, optionally due YYYY-MM-DD

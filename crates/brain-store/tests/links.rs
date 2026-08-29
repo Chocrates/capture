@@ -471,3 +471,96 @@ fn a_projection_from_an_older_build_can_still_be_opened() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Operations the store owns and a surface used to reimplement. Each was dead
+// code with a live copy elsewhere, which is how one of them drifted.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_note_scoped_mute_names_the_note_it_silences() {
+    // The fold does not need `tgt` — muting is a rule read from the body, and
+    // which notes it covers is decided when the question is asked. `brain log
+    // <name>` does need it: that view filters on `tgt`, so a mute written
+    // without one worked perfectly and was missing from the history of the note
+    // it silenced.
+    //
+    // It was missing here and present in the command line's own copy, which is
+    // exactly the drift that having two implementations produces.
+    let sc = Scratch::new("mute-tgt");
+    let p = sc.paths();
+    let slug = capture(&p, "something to silence");
+
+    let s = Session::open(p.clone()).unwrap();
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    drop(s);
+
+    brain_store::mutate::mute_scope(&p, brain_core::body::MuteScope::Note(tgt), None).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let touched = s
+        .log
+        .all()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.header.tgt == Some(tgt))
+        .any(|e| e.header.kind == brain_core::event::Kind::MUTE);
+    assert!(
+        touched,
+        "the mute is missing from the history of the note it silenced"
+    );
+
+    // And it still mutes, which is the part that was never broken.
+    assert!(s.state.note(&tgt).unwrap().unwrap().muted_until.is_some());
+}
+
+#[test]
+fn a_setting_this_build_does_not_know_is_refused() {
+    // A setting is an event: an unknown key written once is in the log for
+    // ever, understood by nothing. The check lived in the command line, so the
+    // store function every other surface would call had none.
+    let sc = Scratch::new("setting");
+    let p = sc.paths();
+
+    let e = brain_store::mutate::set_setting(&p, "timeline.colour", Some("green")).unwrap_err();
+    assert!(
+        e.to_string().contains("not a setting"),
+        "unhelpful refusal: {e}"
+    );
+
+    brain_store::mutate::set_setting(&p, "timeline.limit", Some("20")).unwrap();
+    let s = Session::open(p.clone()).unwrap();
+    assert_eq!(
+        s.state.setting("timeline.limit").unwrap().as_deref(),
+        Some("20")
+    );
+}
+
+#[test]
+fn a_plan_can_be_walked_away_from() {
+    // §2.4 rates being easy to walk away from as part of the case for having
+    // intents at all. The fold has always known how; nothing could ask for it,
+    // so an intent once made could not be withdrawn from any surface.
+    let sc = Scratch::new("forget");
+    let p = sc.paths();
+    brain_store::mutate::add_intent(
+        &p,
+        brain_core::body::Cue::GitBranch("main".into()),
+        "do the thing",
+    )
+    .unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let rows = s.state.intents().unwrap();
+    assert_eq!(rows.len(), 1);
+    let id = brain_core::EventId(rows[0].id.clone().try_into().unwrap());
+    drop(s);
+
+    brain_store::mutate::retract_intent(&p, &id).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(
+        s.state.intents().unwrap().is_empty(),
+        "a retracted plan is still offered"
+    );
+}

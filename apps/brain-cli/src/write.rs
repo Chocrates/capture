@@ -23,8 +23,8 @@
 use brain_core::{
     EventId,
     body::{
-        AliasBody, EditBody, MuteBody, MuteScope, PinBody, RedactBody, RedactCancelBody,
-        RedactScope, ResolveBody, TagBody, UnflagBody, UntagBody,
+        AliasBody, EditBody, MuteScope, PinBody, RedactBody, RedactCancelBody, RedactScope,
+        ResolveBody, TagBody, UnflagBody, UntagBody,
     },
     event::Kind,
 };
@@ -248,6 +248,56 @@ pub fn task_done(paths: StorePaths, name: &str, done: bool) -> Result<()> {
     Ok(())
 }
 
+/// Abandon a plan.
+///
+/// The fold has always known how to do this and nothing could ask for it: an
+/// intent, once made, could not be withdrawn from any surface. §2.4 rates being
+/// easy to walk away from as part of the case for having intents at all, and a
+/// plan you cannot cancel is a plan that fires at you for ever.
+///
+/// Named by a prefix of its id, the way a commit is. The whole id is thirty-two
+/// bytes and nobody is going to type one.
+pub fn forget(paths: StorePaths, id: &str) -> Result<()> {
+    let store = crate::read::open(&paths)?;
+    let want = id.trim().to_ascii_lowercase();
+    if want.len() < 4 {
+        return Err(Error::Usage(
+            "give at least four characters of the id, from `brain intents`".into(),
+        ));
+    }
+
+    let matches: Vec<brain_store::projection::IntentRow> = store
+        .intents()?
+        .into_iter()
+        .filter(|i| hex(&i.id).starts_with(&want))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(Error::NotFound(format!("no plan whose id starts {want}"))),
+        [one] => {
+            let id = brain_core::EventId(
+                one.id
+                    .clone()
+                    .try_into()
+                    .map_err(|_| Error::Integrity("a plan has a malformed id".into()))?,
+            );
+            brain_store::mutate::retract_intent(&paths, &id)?;
+            say!("Forgotten: {}", one.then_do);
+            Ok(())
+        }
+        // Refused rather than guessed. Retracting the wrong plan is silent —
+        // the one you meant keeps firing and the one you did not is gone.
+        many => Err(Error::Usage(format!(
+            "{} plans start {want}; give more of the id",
+            many.len()
+        ))),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Put a page under another in the wiki, or back at the top.
 ///
 /// The one hand-made structure here. Nothing outside the wiki sidebar reads it,
@@ -342,31 +392,27 @@ fn local_zone() -> brain_time::Zone {
 /// it. If suppression were harder to reach than redaction, the gradient would
 /// point at the irreversible operation.
 pub fn mute(paths: StorePaths, what: &Muted, until: Option<u64>) -> Result<()> {
-    let mut s = Session::open(paths)?;
-
-    let (scope, tgt, described) = match what {
+    let (scope, described) = match what {
         Muted::Note(name) => {
+            let s = Session::open(paths.clone())?;
             let tgt = find(&s, name)?;
-            (MuteScope::Note(tgt), Some(tgt), name.clone())
+            (MuteScope::Note(tgt), name.clone())
         }
         Muted::Tag(tag) => {
             let tag = tag.trim_start_matches('#').to_string();
-            (MuteScope::Tag(tag.clone()), None, format!("#{tag}"))
+            (MuteScope::Tag(tag.clone()), format!("#{tag}"))
         }
         Muted::Days(from, to) => (
             MuteScope::DateRange(from.clone(), to.clone()),
-            None,
             format!("{from} to {to}"),
         ),
     };
 
-    s.append(Kind::MUTE, tgt, None, |nonce| {
-        encode(&MuteBody {
-            nonce,
-            scope: scope.clone(),
-            until,
-        })
-    })?;
+    // The append is the store's. This wrote its own until now, and the store's
+    // version — the one any other surface would call — forgot to name the note
+    // a note-scoped mute is about, so the mute worked and was missing from
+    // `brain log` for that note.
+    brain_store::mutate::mute_scope(&paths, scope, until)?;
 
     // Says what muting does, because it is easy to read as deletion — and the
     // whole reason it exists is to be the cheap thing you reach for instead.
@@ -506,33 +552,18 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
 /// wider than intended. Separate from cancelling one because the two are
 /// different admissions: one is "not that note", this is "not any of that".
 pub fn redact_cancel_since(paths: StorePaths, since: u64) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    // The store's, rather than a second copy of the same filter. The window
+    // arithmetic — comparing against when the redaction was *issued*, which is
+    // the deadline less the window, because that is the moment a person is
+    // thinking of — was written out twice and is the kind of thing that drifts
+    // in one place and not the other.
+    let n = brain_store::mutate::cancel_redactions_since(&paths, since)?;
 
-    let doomed: Vec<(EventId, EventId)> = s
-        .state
-        .redact_queue()?
-        .into_iter()
-        .filter(|(_, _, execute_after, cancelled)| {
-            // Compared against when the redaction was *issued*, which is the
-            // deadline less the window — the user is thinking about when they
-            // did the thing, not when it lands.
-            !cancelled && execute_after.saturating_sub(brain_core::REDACT_WINDOW_MS) >= since
-        })
-        .map(|(redact, tgt, _, _)| (redact, tgt))
-        .collect();
-
-    if doomed.is_empty() {
-        say!("No redactions were issued after that point.");
+    if n == 0 {
+        say!("Nothing queued since then.");
         return Ok(());
     }
-
-    let n = doomed.len();
-    for (redact, tgt) in doomed {
-        s.append(Kind::REDACT_CANCEL, Some(tgt), None, |nonce| {
-            encode(&RedactCancelBody { nonce, redact })
-        })?;
-    }
-    say!("Cancelled {n} redaction(s). Nothing was destroyed.");
+    say!("{n} redaction(s) cancelled. The content is readable again.");
     Ok(())
 }
 

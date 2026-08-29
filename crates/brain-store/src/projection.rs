@@ -1992,18 +1992,6 @@ impl Store {
         Ok(row.and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()))
     }
 
-    /// Whether membership has been established.
-    ///
-    /// False means ingest must wait. Accepting events while this is false and
-    /// checking them afterwards is not a weaker guarantee but no guarantee:
-    /// by the time the check runs the events hold positions.
-    pub fn roster_is_bootstrapped(&self) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM roster", [], |r| r.get::<_, i64>(0))?
-            > 0)
-    }
-
     /// Set an authentic event aside as currently unusable.
     pub fn quarantine(
         &self,
