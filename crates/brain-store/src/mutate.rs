@@ -102,28 +102,6 @@ pub fn untag(paths: &StorePaths, name: &str, tag: &str) -> Result<()> {
 ///
 /// Refused here as well as in the fold. The fold's refusal is what makes two
 /// partitioned devices agree; this one is what lets a person be told why.
-/// Preferences this build understands, with the value used when none is chosen.
-///
-/// Compiled in, never written to the log on first run. Materialising defaults as
-/// recorded decisions would freeze today's judgement permanently and destroy the
-/// distinction between a value you picked and one you inherited (§8.9).
-///
-/// Here rather than in the command line because [`set_setting`] validates
-/// against it, and that function is what every surface calls.
-pub const KNOWN_SETTINGS: &[(&str, &str, &str)] = &[(
-    "timeline.limit",
-    "50",
-    "how many notes `brain timeline` shows",
-)];
-
-/// The compiled-in value for a setting, if this build knows the key.
-pub fn default_for(key: &str) -> Option<&'static str> {
-    KNOWN_SETTINGS
-        .iter()
-        .find(|(k, _, _)| *k == key)
-        .map(|(_, v, _)| *v)
-}
-
 /// Put a page under another, or back at the top.
 ///
 /// The one thing in this system that files something by hand. §3.7's argument
@@ -423,16 +401,10 @@ pub fn retract_intent(paths: &StorePaths, id: &EventId) -> Result<()> {
 /// Record a preference.
 pub fn set_setting(paths: &StorePaths, key: &str, value: Option<&str>) -> Result<()> {
     // Checked here rather than in the command line that used to be the only
-    // caller. A setting is an event: an unknown key written once is in the log
-    // for ever, understood by nothing, and a second surface calling this
+    // caller. A setting is an event: a key or a value this build cannot use,
+    // written once, is in the log for ever — and a second surface calling this
     // without the check would have been able to put one there.
-    if default_for(key).is_none() {
-        let known: Vec<&str> = KNOWN_SETTINGS.iter().map(|(k, _, _)| *k).collect();
-        return Err(Error::Usage(format!(
-            "'{key}' is not a setting this build knows.\n\nKnown: {}",
-            known.join(", ")
-        )));
-    }
+    crate::settings::validate(key, value)?;
 
     let mut s = Session::open(paths.clone())?;
     s.append(Kind::SETTING, None, None, |nonce| {

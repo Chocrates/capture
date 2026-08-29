@@ -122,11 +122,40 @@ impl Waker {
 }
 
 /// Run the overlay until the process is asked to stop.
+/// How much bigger than the drawn sizes everything is.
+///
+/// Read once, here, and never again. The gesture's budget is spent on the
+/// window already existing when the chord is pressed (§3.1), so a preference
+/// consulted per frame — or worse, per keystroke — would be paying for
+/// legibility out of exactly the wrong pocket.
+///
+/// A store that cannot be read gives the compiled-in default rather than an
+/// error. An overlay that refused to open because a preference was unavailable
+/// would have traded a legible window for no window.
+fn text_scale(paths: &StorePaths) -> f32 {
+    let store = brain_store::ops::Ops::open_read(&paths.ops)
+        .and_then(|ops| ops.generation())
+        .and_then(|g| {
+            brain_store::projection::Store::open_read(&brain_store::projection::generation_path(
+                &paths.state,
+                g,
+            ))
+        })
+        .ok();
+
+    brain_store::settings::number(store.as_ref(), "capture.text_scale")
+}
+
 pub fn run(paths: StorePaths, shows: Receiver<()>, waker: Waker) -> eframe::Result {
+    let scale = text_scale(&paths);
     let options = eframe::NativeOptions {
         event_loop_builder: Some(Box::new(force_x11)),
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WIDTH, HEIGHT])
+            // Scaled with the text. The reference below the field scrolls, so
+            // nothing is lost if it does not fit — but a field whose text has
+            // grown and whose box has not is a field you cannot see the end of
+            // what you are typing in.
+            .with_inner_size([WIDTH * scale, HEIGHT * scale])
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false)
@@ -151,7 +180,7 @@ pub fn run(paths: StorePaths, shows: Receiver<()>, waker: Waker) -> eframe::Resu
         Box::new(move |cc| {
             install_a_font(&cc.egui_ctx);
             waker.hold(&cc.egui_ctx);
-            Ok(Box::new(App::new(paths, shows)))
+            Ok(Box::new(App::new(paths, shows, scale)))
         }),
     )
 }
@@ -274,6 +303,9 @@ struct App {
     pending: Option<String>,
     /// How many logic passes are left in which to undo eframe's opening reveal.
     settling: u8,
+    /// How much bigger than the drawn sizes everything is. Read once at
+    /// startup, so nothing on the gesture's path consults a preference.
+    scale: f32,
 }
 
 /// How many passes to spend taking the window back off the screen at startup.
@@ -287,12 +319,13 @@ struct App {
 const SETTLING: u8 = 3;
 
 impl App {
-    fn new(paths: StorePaths, shows: Receiver<()>) -> App {
+    fn new(paths: StorePaths, shows: Receiver<()>, scale: f32) -> App {
         App {
             overlay: Overlay::new(paths, shows),
             focus: false,
             pending: None,
             settling: SETTLING,
+            scale,
         }
     }
 }
@@ -304,6 +337,17 @@ impl eframe::App for App {
     /// passes on a hidden window, so anything that has to keep watching — the
     /// socket, here — has to live somewhere that still gets called.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The scale, applied where egui takes it: one call that grows the text,
+        // the spacing and the widgets together. The alternative was threading a
+        // factor through every draw function and multiplying each of four
+        // hardcoded sizes by hand, which is four chances to forget one and no
+        // way to see that it happened except by looking.
+        //
+        // Idempotent, and egui only rebuilds fonts when the value changes.
+        if ctx.zoom_factor() != self.scale {
+            ctx.set_zoom_factor(self.scale);
+        }
+
         // Nothing is polled here, and that is the point. An earlier version
         // asked for a repaint every hundred milliseconds so it could check the
         // channel — ten wakeups a second, forever, on a process whose whole

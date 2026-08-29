@@ -34,6 +34,7 @@ pub mod purge;
 pub mod ratelimit;
 pub mod review;
 pub mod session;
+pub mod settings;
 pub mod spool;
 pub mod startup;
 pub mod store;

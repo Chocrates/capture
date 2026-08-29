@@ -39,22 +39,15 @@ use brain_store::{
 use crate::read;
 use brain_store::session::Session;
 
-// The table and its lookup live in `brain-store`, beside the function that
-// validates against them. Every surface writes a setting through that, and a
-// copy here would be a second answer to "is this a real key".
-use brain_store::mutate::{KNOWN_SETTINGS, default_for};
+// The table, its lookup and the value in force all live in `brain-store`,
+// beside the function that validates against them. Every surface writes a
+// setting through that, and a copy here would be a second answer to "is this a
+// real key" — which is what it was.
+use brain_store::settings;
 
 /// The value in force for a setting, chosen or compiled in.
 pub fn effective(state: &Store, key: &str) -> Result<Option<String>> {
-    for (k, v, _) in state.settings()? {
-        if k == key {
-            // An explicit revert is stored as a choice with no value, and takes
-            // the default — which is why this falls through rather than
-            // returning `None` as "unset".
-            return Ok(v.or_else(|| default_for(key).map(String::from)));
-        }
-    }
-    Ok(default_for(key).map(String::from))
+    settings::effective(state, key)
 }
 
 // ------------------------------------------------------------------ log ----
@@ -357,7 +350,8 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     say!();
     say!("Settings");
     let chosen = state.settings()?;
-    for (key, default, what) in KNOWN_SETTINGS {
+    for s in settings::KNOWN {
+        let (key, default, what) = (s.key, s.default, s.what);
         let picked = chosen.iter().find(|(k, _, _)| k == key);
         match picked {
             Some((_, Some(v), _)) => say!("  {key:<18} {v:<10} set by you — {what}"),
@@ -530,15 +524,19 @@ mod tests {
     fn every_known_setting_has_a_default() {
         // The compiled-in value is what makes "never chosen" a usable state
         // rather than an absence the caller has to handle.
-        for (k, v, what) in KNOWN_SETTINGS {
-            assert!(!v.is_empty(), "{k} has no default");
-            assert!(!what.is_empty(), "{k} has no description");
+        for s in settings::KNOWN {
+            assert!(!s.default.is_empty(), "{} has no default", s.key);
+            assert!(!s.what.is_empty(), "{} has no description", s.key);
         }
+        assert!(
+            !settings::KNOWN.is_empty(),
+            "there are no settings, so this checks nothing"
+        );
     }
 
     #[test]
     fn an_unknown_setting_has_no_default() {
-        assert_eq!(default_for("nonsense.key"), None);
+        assert_eq!(settings::default_for("nonsense.key"), None);
     }
 
     #[test]
