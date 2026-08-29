@@ -154,8 +154,35 @@ fn series_start(at_minute: Option<u32>, zone: Zone, now: i64) -> Option<BodyWhen
 /// whole point of the pin is that no later parse displaces it (§6).
 pub fn needs_parse(note: &Note, grammar: u32) -> bool {
     match &note.promotion {
+        // Never read, so read it.
         None => true,
-        Some(p) => !p.pinned && p.grammar.is_some_and(|g| g < grammar),
+        // Somebody's correction. §6 rates a reparse silently displacing one as
+        // the failure worth preventing above all others here.
+        Some(p) if p.pinned => false,
+        Some(p) => {
+            // A better grammar than the one that read it.
+            let older_grammar = p.grammar.is_some_and(|g| g < grammar);
+
+            // Or the text has changed since it was read.
+            //
+            // This was missing, and the milestone that recorded it as done
+            // shipped without it. Editing "dentist thursday 2pm" into "dentist
+            // friday 3pm" left the promotion saying Thursday at two: the note
+            // said one thing, the agenda showed another, and nothing reparsed
+            // because nothing was watching the text.
+            //
+            // §3.1.4 keeps text and fields apart deliberately and shows both,
+            // so *deliberate* drift is visible. An edit that silently did not
+            // take is not that — it is the fields going stale, which is the
+            // thing that separation was supposed to make impossible to miss.
+            //
+            // `updated` moves only on a capture or an edit; a promotion is not
+            // a version and does not touch it. So this settles instead of
+            // re-firing on the promotion it just wrote.
+            let older_than_the_text = p.at < note.updated;
+
+            older_grammar || older_than_the_text
+        }
     }
 }
 

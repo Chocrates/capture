@@ -162,7 +162,13 @@ pub fn tokenize(text: &str) -> Vec<Token<'_>> {
 
         if i == start {
             // A lone punctuation character that is neither a sigil nor a break.
-            i += 1;
+            //
+            // By characters rather than by bytes. Only an ASCII terminator can
+            // stop the loop above without advancing, so a single byte is right
+            // today — and would stop being right the moment anything non-ASCII
+            // joined that list, with the failure being a panic in the middle of
+            // a commit rather than a wrong token.
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
         }
 
         let text_of = &text[start..i];
@@ -268,7 +274,15 @@ fn quarter(s: &str) -> Option<u32> {
 
 /// `1st`, `2nd`, `3rd`, `14th`.
 fn ordinal(s: &str) -> Option<u32> {
-    let (digits, suffix) = s.split_at(s.len().checked_sub(2)?);
+    // `split_at_checked`, because the index is in bytes and the text is not.
+    //
+    // `split_at` panics when the cut lands inside a character, and the last two
+    // bytes of a word are inside one whenever it ends in anything wider than
+    // ASCII: an em dash, an ellipsis, an emoji, an arrow. A capture containing
+    // one killed the process during commit — after the event was durable, so
+    // nothing was lost, but the writer died and the projection was left behind
+    // the log. Found by writing an ordinary sentence with a dash in it.
+    let (digits, suffix) = s.split_at_checked(s.len().checked_sub(2)?)?;
     if !matches!(
         suffix.to_ascii_lowercase().as_str(),
         "st" | "nd" | "rd" | "th"

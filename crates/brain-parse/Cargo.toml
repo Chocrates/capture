@@ -18,3 +18,10 @@ publish.workspace = true
 # instant arrives as an argument, so a parse is reproducible.
 brain-core = { path = "../brain-core" }
 brain-time = { path = "../brain-time" }
+
+[dev-dependencies]
+# Only for the property test that hands the parser arbitrary text. A capture is
+# stored verbatim and may contain anything, and the parser runs inside a commit
+# — so "does not panic on any input" is a correctness property here rather than
+# a robustness nicety.
+proptest = { workspace = true }

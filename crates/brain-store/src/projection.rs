@@ -41,11 +41,15 @@ use crate::{Result, db};
 /// Version 4 adds `notes.parent`, which every existing note has to be re-read
 /// for — a migration would have had nothing to fill it from.
 ///
+/// Version 5 adds `promotion_at`, so the sweep can tell that a note's text has
+/// changed since it was last read. Without it an edit never reparsed, and the
+/// fields went stale while the text moved.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 4;
+pub const PROJECTION_SCHEMA: u32 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -299,6 +303,20 @@ CREATE TABLE IF NOT EXISTS promotions (
   end_date   TEXT,
   due        TEXT,
   done       INTEGER
+) STRICT;
+
+-- When a promotion was written, which is how the sweep knows the text has
+-- changed under it.
+--
+-- A table rather than two more columns on `promotions`, for the reason written
+-- above `parents`: the schema is applied to an existing projection before its
+-- version is read, and `CREATE TABLE IF NOT EXISTS` does nothing to a table
+-- that is already there. Columns added this way never appear, and anything
+-- selecting one fails on every store that predates it.
+CREATE TABLE IF NOT EXISTS promotion_at (
+  tgt     BLOB PRIMARY KEY,
+  wall    INTEGER NOT NULL,
+  counter INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS promotions_start ON promotions(start_ms);
@@ -655,7 +673,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
-             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM held;
+             DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM promotion_at; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
              DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;",
         )?;
@@ -681,6 +699,7 @@ impl Store {
             tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM parents WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM promotion_at WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
@@ -1277,8 +1296,17 @@ impl Store {
             "SELECT {NOTE_COLUMNS}
              FROM notes n
              LEFT JOIN promotions p ON p.tgt = n.tgt
+             LEFT JOIN promotion_at pa ON pa.tgt = n.tgt
              WHERE n.text IS NOT NULL
-               AND (p.tgt IS NULL OR (p.pinned = 0 AND p.grammar IS NOT NULL AND p.grammar < ?1))
+               AND (p.tgt IS NULL
+                    OR (p.pinned = 0
+                        AND ((p.grammar IS NOT NULL AND p.grammar < ?1)
+                             -- Or the text has moved since it was read. The
+                             -- same predicate `needs_parse` applies in the
+                             -- fold, and it has to be the same or the queue
+                             -- and the decision disagree about what is stale.
+                             OR pa.wall IS NULL
+                             OR (pa.wall, pa.counter) < (n.updated_wall, n.updated_counter))))
              ORDER BY n.created_wall DESC
              LIMIT ?2"
         );
@@ -2102,6 +2130,11 @@ fn write_promotion(
     let mut fields = Vec::new();
     minicbor::encode(&p.as_, &mut fields)
         .map_err(|e| crate::Error::Integrity(format!("a promotion could not be stored: {e}")))?;
+
+    tx.execute(
+        "INSERT OR REPLACE INTO promotion_at (tgt, wall, counter) VALUES (?1,?2,?3)",
+        params![tgt.0.to_vec(), p.at.wall as i64, p.at.counter as i64],
+    )?;
 
     tx.execute(
         "INSERT OR REPLACE INTO promotions

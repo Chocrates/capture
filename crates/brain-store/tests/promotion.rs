@@ -245,3 +245,97 @@ fn a_reparse_reads_a_note_again_rather_than_rescheduling_it() {
         other => panic!("expected a timed event, got {other:?}"),
     }
 }
+
+#[test]
+fn editing_the_text_reads_it_again() {
+    // The milestone recorded this as done and it was not. Editing "dentist
+    // thursday 2pm" into "dentist friday 3pm" left the promotion saying
+    // Thursday at two — the note said one thing, the agenda showed another, and
+    // nothing reparsed because nothing was watching the text.
+    //
+    // §3.1.4 keeps text and fields apart deliberately and shows both, so
+    // *deliberate* drift is visible. Fields that silently failed to follow an
+    // edit are not that.
+    let sc = Scratch::new("reparse-edit");
+    let p = sc.paths();
+    let slug = capture(&p, "dentist thursday 2pm");
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    let first = descriptor_of(&p, &slug);
+    assert!(!first.is_empty(), "it never promoted at all");
+
+    brain_store::mutate::edit(&p, &slug, "dentist friday 3pm").unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    let written = promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    assert_eq!(written, 1, "an edited note was not read again");
+    assert_ne!(
+        descriptor_of(&p, &slug),
+        first,
+        "the fields still describe the text that was replaced"
+    );
+}
+
+#[test]
+fn reading_it_again_does_not_start_a_loop() {
+    // `updated` moves only on a capture or an edit — a promotion is not a
+    // version and must not touch it. If it did, every sweep would see a
+    // promotion older than the text it had just written and reparse for ever.
+    let sc = Scratch::new("reparse-settles");
+    let p = sc.paths();
+    let slug = capture(&p, "dentist thursday 2pm");
+    brain_store::mutate::edit(&p, &slug, "dentist friday 3pm").unwrap();
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    assert_eq!(
+        promote::sweep(&mut s).unwrap(),
+        1,
+        "it did not read the note"
+    );
+    assert_eq!(
+        promote::sweep(&mut s).unwrap(),
+        0,
+        "it read the same note twice, which is a sweep that never settles"
+    );
+}
+
+#[test]
+fn an_edit_does_not_displace_a_correction() {
+    // §6 rates a reparse silently reverting somebody's correction as the
+    // failure worth preventing above all others here — and an edit is exactly
+    // the moment a reparse now happens, so the pin has to hold across one.
+    let sc = Scratch::new("reparse-pinned");
+    let p = sc.paths();
+    let slug = capture(&p, "dentist thursday 2pm");
+
+    promote::correct(&p, &slug, promote::task(false, Some("2026-12-01"))).unwrap();
+    brain_store::mutate::edit(&p, &slug, "dentist monday 9am").unwrap();
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    let s = Session::open_for_capture(p.clone()).unwrap();
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    let promotion = s.state.promotion_of(&tgt).unwrap().unwrap();
+    assert!(promotion.pinned, "the correction lost its pin");
+    assert_eq!(
+        promotion.kind, "task",
+        "an edit displaced a human correction"
+    );
+}
+
+/// The one-line rendering of what a note currently is.
+fn descriptor_of(p: &StorePaths, slug: &str) -> String {
+    let s = Session::open_for_capture(p.clone()).unwrap();
+    let tgt = s.state.resolve(slug).unwrap().unwrap();
+    s.state
+        .promotion_of(&tgt)
+        .unwrap()
+        .map(|x| x.descriptor)
+        .unwrap_or_default()
+}
