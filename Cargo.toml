@@ -95,6 +95,26 @@ clap = { version = "4", features = ["derive"] }
 # --- dev ---
 proptest = "1"
 
+# Optimised, but not at any price in build time.
+#
+# This was `lto = true` with `codegen-units = 1` — the slowest configuration
+# there is — and nothing recorded why. Measured on one changed line in
+# `brain-store`, rebuilding the three binaries:
+#
+#     lto = true,   codegen-units = 1     220 s
+#     lto = "thin", codegen-units = 16    120 s
+#     the same, plus the gold linker       94 s
+#
+# Nothing here is waiting on the optimiser. The one budget this project
+# measures is the capture gesture — 150 ms in §3.1, met in 2 ms — and it is
+# identical under both settings: 95% within 2 ms either way. The real work is
+# SQLite and a webview. Fat LTO was buying optimisation nothing was short of
+# and charging a hundred seconds an iteration for it.
+#
+# What it costs is size: `brain-capture` goes from 16 MB to 21.5 MB. Nothing is
+# distributed yet, so that is cheap — and if it ever matters, the answer is a
+# separate profile with `lto = true` for the build that ships, rather than
+# paying for it on every rebuild during development.
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16

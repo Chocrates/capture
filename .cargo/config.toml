@@ -1,0 +1,10 @@
+# The gold linker, which is already installed here.
+#
+# Worth 26 seconds of the 120 the release profile costs after its own change —
+# see the note above `[profile.release]` in Cargo.toml for the measurements.
+# `mold` or `lld` would be faster still and neither is present; this needs no
+# installation and no privileges.
+#
+# Applies to every profile, so `cargo test` and the debug builds get it too.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=gold"]
