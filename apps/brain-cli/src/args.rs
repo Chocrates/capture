@@ -270,17 +270,17 @@ where
                     arg: arg.clone(),
                     then: then.join(" "),
                 }),
-                _ => Err(Bad::UnknownFlag {
+                _ => Err(Bad::Value {
                     command: "intent".into(),
-                    flag: "expected: brain intent <at|branch> <value> <what to do>".into(),
+                    problem: "expected: brain intent <at|branch> <value> <what to do>".into(),
                 }),
             }
         }
         "carries-forward" => match &args[1..] {
             [name] => Ok(Command::CarriesForward { name: name.clone() }),
-            _ => Err(Bad::UnknownFlag {
+            _ => Err(Bad::Value {
                 command: "carries-forward".into(),
-                flag: "expected one series".into(),
+                problem: "expected one series".into(),
             }),
         },
         "read" => {
@@ -320,9 +320,9 @@ where
             }
         }
         "engaged" | "deferred" | "shown" => Ok(Command::Reviewed {
-            name: args.get(1).cloned().ok_or_else(|| Bad::UnknownFlag {
+            name: args.get(1).cloned().ok_or_else(|| Bad::Value {
                 command: args[0].clone(),
-                flag: "no note name".into(),
+                problem: "no note name".into(),
             })?,
             outcome: args[0].clone(),
         }),
@@ -360,9 +360,9 @@ where
                         command: args[0].clone(),
                         flag: occ.clone(),
                     }),
-                _ => Err(Bad::UnknownFlag {
+                _ => Err(Bad::Value {
                     command: args[0].clone(),
-                    flag: "expected a task, or a series and an occurrence".into(),
+                    problem: "expected a task, or a series and an occurrence".into(),
                 }),
             }
         }
@@ -383,9 +383,9 @@ where
         // from one from any surface, though the fold has always known how.
         "forget" => match &args[1..] {
             [id] => Ok(Command::Forget { id: id.clone() }),
-            _ => Err(Bad::UnknownFlag {
+            _ => Err(Bad::Value {
                 command: "forget".into(),
-                flag: "expected the id of a plan, from `brain intents`".into(),
+                problem: "expected the id of a plan, from `brain intents`".into(),
             }),
         },
         "parent" => {
@@ -399,9 +399,9 @@ where
                     name: name.clone(),
                     under: Some(under.clone()),
                 }),
-                _ => Err(Bad::UnknownFlag {
+                _ => Err(Bad::Value {
                     command: "parent".into(),
-                    flag: "expected a page, and optionally what to put it under".into(),
+                    problem: "expected a page, and optionally what to put it under".into(),
                 }),
             }
         }
@@ -416,9 +416,9 @@ where
                     name: name.clone(),
                     due: Some(due.clone()),
                 }),
-                _ => Err(Bad::UnknownFlag {
+                _ => Err(Bad::Value {
                     command: "task".into(),
-                    flag: "expected a note, and optionally a due date".into(),
+                    problem: "expected a note, and optionally a due date".into(),
                 }),
             }
         }
@@ -435,9 +435,9 @@ where
             let json = has_json(rest);
             let terms: Vec<String> = rest.iter().filter(|a| *a != "--json").cloned().collect();
             if terms.is_empty() {
-                return Err(Bad::UnknownFlag {
+                return Err(Bad::Value {
                     command: "search".into(),
-                    flag: "no search terms".into(),
+                    problem: "no search terms".into(),
                 });
             }
             Ok(Command::Search {
@@ -468,9 +468,9 @@ where
                     name: name.clone(),
                     alias: Some(alias.clone()),
                 }),
-                _ => Err(Bad::UnknownFlag {
+                _ => Err(Bad::Value {
                     command: "alias".into(),
-                    flag: "expected a note and an optional new name".into(),
+                    problem: "expected a note and an optional new name".into(),
                 }),
             }
         }
@@ -610,16 +610,16 @@ where
                 key: key.clone(),
                 value: Some(rest.join(" ")),
             }),
-            _ => Err(Bad::UnknownFlag {
+            _ => Err(Bad::Value {
                 command: "set".into(),
-                flag: "expected a setting and an optional value".into(),
+                problem: "expected a setting and an optional value".into(),
             }),
         },
         "shell-init" => match args.get(1) {
             Some(shell) => Ok(Command::ShellInit(shell.clone())),
-            None => Err(Bad::UnknownFlag {
+            None => Err(Bad::Value {
                 command: "shell-init".into(),
-                flag: "no shell (try: bash, zsh)".into(),
+                problem: "no shell (try: bash, zsh)".into(),
             }),
         },
         "help" | "--help" | "-h" => Ok(Command::Help),
@@ -705,9 +705,9 @@ fn one_name(
     let names: Vec<&String> = rest.iter().filter(|a| *a != "--json").collect();
     match names.as_slice() {
         [name] => Ok(build((*name).clone(), json)),
-        [] => Err(Bad::UnknownFlag {
+        [] => Err(Bad::Value {
             command: verb.into(),
-            flag: "no note name".into(),
+            problem: "no note name".into(),
         }),
         [_, extra, ..] => Err(Bad::UnknownFlag {
             command: verb.into(),
@@ -727,9 +727,9 @@ fn name_and_rest(
     build: impl Fn(String, &[String]) -> Command,
 ) -> Result<Command, Bad> {
     match rest {
-        [] => Err(Bad::UnknownFlag {
+        [] => Err(Bad::Value {
             command: verb.into(),
-            flag: "no note name".into(),
+            problem: "no note name".into(),
         }),
         [_] => Err(Bad::UnknownFlag {
             command: verb.into(),
@@ -858,6 +858,40 @@ mod tests {
             Ok(Command::Capture(Source::Words(w))) => w,
             other => panic!("expected captured words, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_arguments_read_as_a_sentence() {
+        // Thirteen sites reported "you gave me a flag I do not take" when they
+        // meant "you did not give me enough", so the message came out as
+        // "'show' does not take no note name" — and then offered to capture
+        // the words "no note name", which is nonsense twice over.
+        //
+        // `Value` exists for exactly this and the difference is in the advice:
+        // an unknown flag is often text somebody meant to capture, and a
+        // missing argument is not.
+        for (args, want) in [
+            (vec!["show"], "brain show: no note name"),
+            (vec!["search"], "brain search: no search terms"),
+            (vec!["forget"], "brain forget: expected the id of a plan"),
+        ] {
+            let msg = p(&args).unwrap_err().message();
+            assert!(msg.starts_with(want), "{args:?} still reads badly: {msg}");
+            assert!(
+                !msg.contains("does not take"),
+                "{args:?} reports a missing argument as an unknown flag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_that_really_is_unknown_still_offers_capture() {
+        // The other half, so the fix above did not simply delete a good
+        // message. A word this command does not know is often something
+        // somebody meant to write down.
+        let msg = p(&["tasks", "--wat"]).unwrap_err().message();
+        assert!(msg.contains("does not take --wat"), "{msg}");
+        assert!(msg.contains("brain + --wat"), "{msg}");
     }
 
     #[test]
