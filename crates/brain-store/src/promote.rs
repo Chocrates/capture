@@ -240,8 +240,25 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
         let captured = note.created.0 as i64;
 
         let r = brain_parse::recognize(text, captured, zone);
-        let Some(as_) = promoted_from(&r, zone, captured) else {
-            continue;
+        let as_ = match promoted_from(&r, zone, captured) {
+            Some(as_) => as_,
+
+            // Nothing temporal in it any more, and something used to be.
+            //
+            // A reparse could promote and never demote, so editing "budget 40k
+            // every friday" down to "budget 40k" left the series standing: an
+            // agenda entry whose own text no longer says a time, which is the
+            // staleness the reparse exists to prevent, in the other direction.
+            //
+            // Only where a promotion is already there. A note that has never
+            // been anything stays nothing — writing `note` for every ordinary
+            // capture would put an event in the log for each one to record that
+            // the recognizer found what it usually finds.
+            // One indexed read per note the sweep was already going to write,
+            // which is bounded and rare.
+            None if s.state.promotion_of(&note.tgt)?.is_some() => Promoted::Note,
+
+            None => continue,
         };
 
         s.append(Kind::PROMOTE, Some(note.tgt), None, |nonce| {

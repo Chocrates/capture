@@ -339,3 +339,60 @@ fn descriptor_of(p: &StorePaths, slug: &str) -> String {
         .map(|x| x.descriptor)
         .unwrap_or_default()
 }
+
+#[test]
+fn taking_the_time_out_of_a_note_takes_it_off_the_calendar() {
+    // A reparse could promote and never demote. Editing "team sync every friday
+    // at 11" down to prose left the series standing — an agenda entry whose own
+    // text no longer says a time, which is the staleness the reparse exists to
+    // prevent, arriving from the other direction.
+    let sc = Scratch::new("demote");
+    let p = sc.paths();
+    let slug = capture(&p, "team sync every friday at 11");
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+    assert_eq!(kind_of(&p, &slug), "series", "it never promoted");
+
+    brain_store::mutate::edit(&p, &slug, "the team sync question, still unresolved").unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    assert_eq!(
+        kind_of(&p, &slug),
+        "note",
+        "the series outlived the text that described it"
+    );
+}
+
+#[test]
+fn an_ordinary_note_is_not_promoted_to_being_ordinary() {
+    // The other half. A note that has never been anything stays nothing:
+    // writing `note` for every non-temporal capture would put an event in the
+    // log for each one, recording that the recognizer found what it usually
+    // finds.
+    let sc = Scratch::new("no-demote-churn");
+    let p = sc.paths();
+    let slug = capture(&p, "the argument against a second index");
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    assert_eq!(promote::sweep(&mut s).unwrap(), 0, "prose was promoted");
+    drop(s);
+
+    let s = Session::open_for_capture(p.clone()).unwrap();
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    assert!(s.state.promotion_of(&tgt).unwrap().is_none());
+}
+
+/// What a note currently is, or the empty string.
+fn kind_of(p: &StorePaths, slug: &str) -> String {
+    let s = Session::open_for_capture(p.clone()).unwrap();
+    let tgt = s.state.resolve(slug).unwrap().unwrap();
+    s.state
+        .promotion_of(&tgt)
+        .unwrap()
+        .map(|x| x.kind)
+        .unwrap_or_default()
+}
