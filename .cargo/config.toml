@@ -1,10 +1,24 @@
 # mold, which links this workspace's binaries.
 #
-# The release profile's own settings are the larger lever and are measured in
-# the note above `[profile.release]` in Cargo.toml: 220 s for a one-line change
-# became 120 s there, and 94 s once the gold linker was added. mold replaces
-# gold here and is expected to take more off again — expected rather than
-# measured, and it should be measured before that claim is repeated anywhere.
+# Measured on one changed line in `brain-store`, rebuilding the three binaries,
+# against the same profile settings:
+#
+#     gold   91.7  91.4  92.4  93.9      mean 92.3, spread 2.5
+#     mold   88.0  81.5  91.1            mean 86.9, spread 9.5
+#
+# So: about 5% on average, up to 10% at its best, and never slower than gold
+# typically manages. Worth having and not worth much — which is the honest
+# summary and not the one that was expected. "mold is several times faster than
+# gold" is true of *link time*, and once fat LTO was gone linking stopped being
+# the dominant term here: most of ninety seconds is compiling four crates and
+# running thin-LTO codegen over them. The linker is a tail.
+#
+# The larger lever by far is the release profile itself — see the note above
+# `[profile.release]` in Cargo.toml, where 220 s became 120 s.
+#
+# mold's spread is wider than gold's and it is not clear why; it is
+# multithreaded and may be contending with a sixteen-way compile, which is a
+# guess rather than a measurement and is written down as one.
 #
 # Applies to every profile, so `cargo test` and the debug builds get it too.
 [target.x86_64-unknown-linux-gnu]

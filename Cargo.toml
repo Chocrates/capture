@@ -103,7 +103,7 @@ proptest = "1"
 #
 #     lto = true,   codegen-units = 1     220 s
 #     lto = "thin", codegen-units = 16    120 s
-#     the same, plus the gold linker       94 s
+#     the same, plus a faster linker        87 s  (see .cargo/config.toml)
 #
 # Nothing here is waiting on the optimiser. The one budget this project
 # measures is the capture gesture — 150 ms in §3.1, met in 2 ms — and it is
