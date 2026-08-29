@@ -564,6 +564,26 @@ mod tests {
     }
 
     #[test]
+    fn the_vocabulary_is_actually_there() {
+        // The precondition every other check in this module leaves unstated.
+        //
+        // `each_sigil_is_used_once`, `a_sigil_is_punctuation...`, the lowercase
+        // check and the shapes check are all loops over these tables, and every
+        // one of them passes on an empty table. Empty the vocabulary and the
+        // guard tests go green while the recognizer recognises nothing — which
+        // is exactly the shape of test that reports coverage it does not have.
+        for (name, table) in tables() {
+            assert!(
+                !table.is_empty(),
+                "{name} is empty, so every check over it is vacuous"
+            );
+        }
+        assert!(!SIGILS.is_empty(), "there are no sigils to check");
+        assert!(!SHAPES.is_empty(), "there are no example shapes to check");
+        assert!(!BANDS.is_empty(), "there are no confidence bands");
+    }
+
+    #[test]
     fn every_word_is_lowercase_and_not_blank() {
         // The parser will fold input to lowercase before looking anything up,
         // so an uppercase entry here is an entry that can never match.
