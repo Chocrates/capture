@@ -593,3 +593,126 @@ fn a_finished_task_does_not_follow_you_to_tomorrow() {
         "a finished task became overdue"
     );
 }
+
+#[test]
+fn ticking_a_one_off_event_does_not_double_it() {
+    // Found in a screenshot of a real day: "standup at 9am" drawn twice side by
+    // side, and "workshop at 1pm" drawn twice with only one of them ticked.
+    //
+    // A one-off event lives in `promotions`. It gains a row in `occurrences`
+    // only when somebody writes an exception against it — ticking it done is
+    // the usual way — and from that moment `happening_between` reported it
+    // twice: once from the expansion carrying the completion, and once from the
+    // promotions fallback with `done: false` hardcoded, so the tick looked as
+    // though it had not taken.
+    //
+    // Only the events somebody had actually interacted with doubled, which is
+    // exactly why no test caught it: every one of them ticked a series.
+    let scratch = Scratch::new("one-off-tick");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("standup at 9am").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    promote::correct(
+        &paths,
+        &slug,
+        Promoted::Event(brain_core::body::EventFields {
+            when: When::Timed {
+                start_ms: NOW,
+                end_ms: None,
+                tz: "America/Denver".into(),
+            },
+            location: None,
+            attendees: Vec::new(),
+        }),
+    )
+    .unwrap();
+
+    let day = |s: &Session| {
+        s.state
+            .happening_between(NOW - 3_600_000, NOW + 3_600_000)
+            .unwrap()
+    };
+
+    let s = Session::open(paths.clone()).unwrap();
+    assert_eq!(day(&s).len(), 1, "an untouched event was already doubled");
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    drop(s);
+
+    // Tick it, the way the window does.
+    let mut s = Session::open(paths.clone()).unwrap();
+    s.append(Kind::OCC_DONE, Some(tgt), None, |nonce| {
+        let mut b = Vec::new();
+        minicbor::encode(&brain_core::body::OccBody { nonce, occ: NOW }, &mut b).unwrap();
+        b
+    })
+    .unwrap();
+    drop(s);
+
+    let s = Session::open(paths.clone()).unwrap();
+    let rows = day(&s);
+    assert_eq!(rows.len(), 1, "ticking it drew it twice: {rows:?}");
+    assert!(
+        rows[0].1.done,
+        "the tick did not show on the row that survived"
+    );
+}
+
+#[test]
+fn ticking_an_event_does_not_shorten_it() {
+    // The second half of the same screenshot, and a bug the first fix exposed
+    // rather than caused: with the duplicate gone, the row that survived was
+    // the exception's, and that row was written with no end at all. A two-hour
+    // workshop became a mark on the grid the moment it was ticked.
+    let scratch = Scratch::new("one-off-span");
+    let paths = scratch.paths();
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    let body = brain_store::session::capture_body("workshop at 1pm").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    let ends = NOW + 2 * 3_600_000;
+    promote::correct(
+        &paths,
+        &slug,
+        Promoted::Event(brain_core::body::EventFields {
+            when: When::Timed {
+                start_ms: NOW,
+                end_ms: Some(ends),
+                tz: "America/Denver".into(),
+            },
+            location: None,
+            attendees: Vec::new(),
+        }),
+    )
+    .unwrap();
+
+    let s = Session::open(paths.clone()).unwrap();
+    let tgt = s.state.resolve(&slug).unwrap().unwrap();
+    drop(s);
+
+    let mut s = Session::open(paths.clone()).unwrap();
+    s.append(Kind::OCC_DONE, Some(tgt), None, |nonce| {
+        let mut b = Vec::new();
+        minicbor::encode(&brain_core::body::OccBody { nonce, occ: NOW }, &mut b).unwrap();
+        b
+    })
+    .unwrap();
+    drop(s);
+
+    let s = Session::open(paths.clone()).unwrap();
+    let rows = s
+        .state
+        .happening_between(NOW - 3_600_000, NOW + 3_600_000)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].1.end_ms,
+        Some(ends),
+        "ticking it threw away how long it was"
+    );
+}

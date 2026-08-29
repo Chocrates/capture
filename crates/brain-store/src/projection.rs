@@ -926,6 +926,19 @@ impl Store {
     pub fn happening_between(&self, from: i64, to: i64) -> Result<Vec<(EventId, OccurrenceRow)>> {
         let mut out = self.occurring_between(from, to)?;
 
+        // What the expansion already accounts for, so the fallback below does
+        // not say it a second time.
+        //
+        // A one-off event lives in `promotions` and gains a row in
+        // `occurrences` only once somebody writes an exception against it —
+        // ticking it done is the usual way. From that moment it was in both,
+        // and the agenda drew it twice: once carrying the completion and once
+        // from here with `done: false` hardcoded, so the tick appeared not to
+        // have taken. Only the events somebody had actually interacted with
+        // doubled, which is why no test caught it — they all ticked series.
+        let seen: std::collections::BTreeSet<(EventId, i64)> =
+            out.iter().map(|(id, o)| (*id, o.occ)).collect();
+
         let mut st = self.conn.prepare(
             "SELECT tgt, start_ms, end_ms FROM promotions
              WHERE kind = 'event' AND start_ms IS NOT NULL
@@ -941,6 +954,9 @@ impl Store {
         for r in timed {
             let (id, start, end) = r?;
             if let Some(id) = id_from(id) {
+                if seen.contains(&(id, start)) {
+                    continue;
+                }
                 out.push((
                     id,
                     OccurrenceRow {
@@ -2256,11 +2272,33 @@ fn expand_occurrences(
     // Exceptions the expansion did not reach. Kept rather than dropped: the
     // rule can be edited later, and a completion recorded against an occurrence
     // the schedule has since moved is still something somebody did.
+    // What an exception falls back to when it did not move the occurrence.
+    //
+    // A series occurrence the expansion did not reach has no length to recover.
+    // A one-off event does: its promotion carries the start and the end, and an
+    // exception written against it — a tick is the usual one — must not throw
+    // the duration away. It did, so ticking a two-hour workshop shrank it to a
+    // mark on the grid, which is what the agenda drew once the duplicate row
+    // carrying the real span was removed.
+    //
+    // Only where the exception names the promotion's own start. If the two have
+    // parted company the promotion's span says nothing about this occurrence.
+    let one_off_span = match &promotion.as_ {
+        brain_core::body::Promoted::Event(e) => match &e.when {
+            brain_core::body::When::Timed {
+                start_ms, end_ms, ..
+            } => Some((*start_ms, *end_ms)),
+            _ => None,
+        },
+        _ => None,
+    };
+
     for (occ, state) in &note.occurrences {
         if written.contains(occ) {
             continue;
         }
-        let (shown, end) = state.moved_to.unwrap_or((*occ, None));
+        let inherited = one_off_span.filter(|(start, _)| start == occ);
+        let (shown, end) = state.moved_to.or(inherited).unwrap_or((*occ, None));
         tx.execute(
             "INSERT OR REPLACE INTO occurrences
                (tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done, title, location, notes)

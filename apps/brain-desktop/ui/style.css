@@ -46,6 +46,14 @@ nav {
   display: flex; gap: .5rem; align-items: center;
   padding: .6rem .9rem; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg);
+  /* Above the page it sticks over.
+   *
+   * Without this the calendar grid painted straight through it: `position:
+   * sticky` with `z-index: auto` does not lift anything, and the grid's blocks
+   * and hour labels are positioned elements that come later in the document,
+   * so they win the paint order. Scrolling an agenda drew "08:00" and a block
+   * on top of the navigation. */
+  z-index: 10;
 }
 nav button {
   background: none; border: 1px solid transparent; color: var(--dim);
