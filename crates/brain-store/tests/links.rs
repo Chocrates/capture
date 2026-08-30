@@ -603,3 +603,56 @@ fn when_a_device_last_wrote_comes_from_the_log() {
     let other = brain_core::Dev([0xAB; 32]);
     assert_eq!(s.log.last_wall(&other).unwrap(), None);
 }
+
+#[test]
+fn a_name_another_note_holds_is_still_refused() {
+    // The risk in seeding an incremental fold with only the names its events
+    // mention. The fold asks its seed two questions, and this is the one with
+    // teeth: is this alias already taken? Seed it too narrowly and a name
+    // another note holds looks free — and "one name always means one note" is
+    // the promise §4.3 builds links on.
+    //
+    // The collision here is deliberately invisible to the events being folded:
+    // the second note's own events never mention `taken`, so a seed built only
+    // from them would not contain it.
+    let sc = Scratch::new("collision");
+    let p = sc.paths();
+    let first = capture(&p, "the note that holds the name");
+    brain_store::mutate::set_alias(&p, &first, Some("taken")).unwrap();
+
+    let second = capture(&p, "a different note entirely");
+    let e = brain_store::mutate::set_alias(&p, &second, Some("taken")).unwrap_err();
+    assert!(
+        e.to_string().contains("already names"),
+        "a name another note holds was handed out again: {e}"
+    );
+
+    // And the first note kept it.
+    let s = Session::open(p.clone()).unwrap();
+    let tgt = s.state.resolve("taken").unwrap().unwrap();
+    assert_eq!(tgt, s.state.resolve(&first).unwrap().unwrap());
+}
+
+#[test]
+fn a_link_to_an_older_note_still_resolves_after_an_edit() {
+    // The other question the seed answers. A note edited today may link to one
+    // captured long ago, whose events are not part of this fold — so the seed
+    // has to carry that name or the link resolves to nothing, and the note
+    // renders perfectly in every other respect while quietly losing its link.
+    let sc = Scratch::new("seeded-link");
+    let p = sc.paths();
+    let old = capture(&p, "the older note");
+    brain_store::mutate::set_alias(&p, &old, Some("older")).unwrap();
+
+    let recent = capture(&p, "nothing links anywhere yet");
+    brain_store::mutate::edit(&p, &recent, "now it points at [[older]]").unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    let tgt = s.state.resolve(&recent).unwrap().unwrap();
+    let links = s.state.links_from(&tgt).unwrap();
+    assert_eq!(links.len(), 1, "the link was not recorded");
+    assert!(
+        !links[0].is_broken() && links[0].target_slug.is_some(),
+        "a link to a note outside this fold did not resolve: {links:?}"
+    );
+}

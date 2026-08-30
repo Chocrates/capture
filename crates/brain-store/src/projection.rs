@@ -1395,6 +1395,67 @@ impl Store {
     ///
     /// Feeds an incremental fold, which sees only the events of the notes that
     /// changed and would otherwise resolve every link to nothing.
+    /// The names among these that the projection knows.
+    ///
+    /// The bounded form of [`known_names`]. An incremental fold asks its seed
+    /// two questions — what a `[[link]]` in these events points at, and whether
+    /// an alias being assigned is already taken — so it needs those names and
+    /// no others. Reading every name in the archive to answer them made a write
+    /// cost more as the archive grew.
+    pub fn names_matching(&self, wanted: &std::collections::BTreeSet<String>) -> Result<Names> {
+        let mut out = Names::new();
+        if wanted.is_empty() {
+            return Ok(out);
+        }
+
+        let holes = std::iter::repeat_n("?", wanted.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let list: Vec<&String> = wanted.iter().collect();
+
+        // Slugs and aliases both, because they share one namespace and a link
+        // may be written against either. Each carries the moment it started
+        // denoting its note, so a link written earlier does not resolve
+        // through it.
+        for sql in [
+            format!(
+                "SELECT slug, tgt, created_wall, created_counter FROM notes
+                 WHERE slug IN ({holes})"
+            ),
+            format!(
+                "SELECT alias, tgt, alias_wall, alias_counter FROM notes
+                 WHERE alias IN ({holes})"
+            ),
+        ] {
+            let mut st = self.conn.prepare(&sql)?;
+            let args: Vec<&dyn rusqlite::ToSql> =
+                list.iter().map(|v| *v as &dyn rusqlite::ToSql).collect();
+            let rows = st.query_map(args.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    id_from(r.get::<_, Vec<u8>>(1)?).unwrap_or(EventId([0; 32])),
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)? as u32,
+                ))
+            })?;
+            for row in rows {
+                let (name, tgt, wall, counter) = row?;
+                out.insert(
+                    name,
+                    (
+                        tgt,
+                        brain_core::hlc::Hlc {
+                            wall,
+                            counter,
+                            origin: Dev([0; 32]),
+                        },
+                    ),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     pub fn known_names(&self) -> Result<Names> {
         // Slugs and aliases both, because they share one namespace and a link
         // may be written against either. Each carries the moment it started

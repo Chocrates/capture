@@ -33,7 +33,7 @@ use crate::{Result, projection::Store};
 /// not only the part that just turned up.
 pub fn apply(
     store: &mut Store,
-    all: &[Envelope],
+    log: &crate::log::Log,
     arriving: &[Envelope],
     now: i64,
 ) -> Result<usize> {
@@ -46,7 +46,7 @@ pub fn apply(
     // applied while the notes it governs are untouched, which is invisible
     // until somebody notices a muted tag still turning up in searches.
     if arriving.iter().any(is_global) {
-        let whole = fold::fold(all);
+        let whole = fold::fold(&log.all()?);
         store.write(&whole, now)?;
         return Ok(whole.notes.len());
     }
@@ -63,27 +63,74 @@ pub fn apply(
     // now fall under a mute written weeks ago, and a partial fold that left the
     // rule out would produce a note the mute plainly covers and that is not
     // muted. There are few of them and they are cheap to carry.
-    let relevant: Vec<Envelope> = all
-        .iter()
-        .filter(|e| {
-            is_global(e)
-                || e.header
-                    .tgt
-                    .map(|t| touched.contains(&t))
-                    .unwrap_or_else(|| touched.contains(&e.header.id()))
-        })
-        .cloned()
-        .collect();
+    //
+    // Asked of the log rather than filtered out of every event it holds. This
+    // read the whole log and discarded nearly all of it, on the path a write
+    // waits on — two milliseconds at a hundred and fifty events, and growing
+    // with the archive for ever.
+    let relevant = log.events_touching(&touched)?;
 
     // Links resolve against every note that existed when they were written, and
     // `relevant` holds only the touched notes' events. Without the names the
     // projection already has, every link in a re-folded note would resolve to
     // nothing — and the note would render perfectly in every other respect, so
     // nothing would look wrong.
-    let known = store.known_names()?;
+    // Only the names these events could ask about, rather than every name in
+    // the archive.
+    //
+    // `known_names` reads every slug and every alias — two rows a note — and it
+    // ran on every write. At eight thousand notes that is sixteen thousand rows
+    // to build a map from, to answer at most a handful of questions.
+    //
+    // The fold consults the seed in exactly two places: resolving a `[[link]]`
+    // written in one of these events, and refusing an alias that another note
+    // already holds. The first needs the names those texts mention; the second
+    // needs the name being assigned. Nothing else looks anything up, so
+    // anything else in the map was carried for nothing.
+    //
+    // The alias case is the one with teeth: seed it too narrowly and a name
+    // another note holds would look free, and "one name always means one note"
+    // is the promise §4.3 makes links out of. It is a test.
+    let known = store.names_matching(&referenced(&relevant))?;
     let partial = fold::fold_seeded(&relevant, &known);
     store.merge(&partial, now)?;
     Ok(touched.len())
+}
+
+/// Every name these events could ask the projection about.
+///
+/// The links their texts mention, and the aliases they assign. Those are the
+/// only two questions the fold puts to its seed.
+fn referenced(events: &[Envelope]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for e in events {
+        let Some(body) = e.body.as_ref() else {
+            continue;
+        };
+        match e.header.kind {
+            Kind::CAPTURE => {
+                if let Ok(b) = minicbor::decode::<brain_core::body::CaptureBody>(body) {
+                    out.extend(brain_core::link::extract(&b.text));
+                }
+            }
+            Kind::EDIT => {
+                if let Ok(b) = minicbor::decode::<brain_core::body::EditBody>(body) {
+                    out.extend(brain_core::link::extract(&b.text));
+                }
+            }
+            // Both the name being taken and, so the fold can see it is this
+            // note's own, the one being given up.
+            Kind::ALIAS => {
+                if let Ok(b) = minicbor::decode::<brain_core::body::AliasBody>(body)
+                    && let Some(a) = b.alias
+                {
+                    out.insert(a);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether an event changes notes it does not name.
@@ -120,6 +167,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.join("state.db")
+    }
+
+    /// A real log holding these events, because `apply` now asks one for what
+    /// it needs rather than being handed everything.
+    ///
+    /// Feeding it a slice was simpler and tested less: the queries behind
+    /// `events_touching` are part of the rule now, and a test that bypassed
+    /// them would agree with a full rebuild while the running code did not.
+    fn logged(near: &Path, events: &[Envelope]) -> crate::log::Log {
+        // Its own file every time. Sharing one across calls re-appends events
+        // that are already in it, and the log says so — "local append out of
+        // sequence" — which is the integrity check working rather than a
+        // problem to route around.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = near.with_extension(format!("events-{n}"));
+
+        let mut log = crate::log::Log::open(&path).unwrap();
+        for e in events {
+            log.append(e).unwrap();
+        }
+        log
     }
 
     fn clean(p: &Path) {
@@ -198,10 +267,12 @@ mod tests {
             // Incremental: the same events, in batches, applied one at a time.
             let incr_path = generation_path(&b, 2);
             let mut incr = Store::open(&incr_path).unwrap();
-            let mut seen: Vec<Envelope> = Vec::new();
+            let mut log = logged(&b.with_extension("events"), &[]);
             for chunk in s.events.chunks(3) {
-                seen.extend(chunk.iter().cloned());
-                apply(&mut incr, &seen, chunk, 1_800_000_000_000).unwrap();
+                for e in chunk {
+                    log.append(e).unwrap();
+                }
+                apply(&mut incr, &log, chunk, 1_800_000_000_000).unwrap();
             }
 
             assert_eq!(
@@ -237,10 +308,12 @@ mod tests {
 
             let incr_path = generation_path(&b, 2);
             let mut incr = Store::open(&incr_path).unwrap();
-            let mut seen: Vec<Envelope> = Vec::new();
+            let mut log = logged(&b.with_extension("events"), &[]);
             for chunk in s.events.chunks(2) {
-                seen.extend(chunk.iter().cloned());
-                apply(&mut incr, &seen, chunk, 1_800_000_000_000).unwrap();
+                for e in chunk {
+                    log.append(e).unwrap();
+                }
+                apply(&mut incr, &log, chunk, 1_800_000_000_000).unwrap();
             }
 
             let snaps = snapshot(&full, &s.notes);
@@ -289,9 +362,10 @@ mod tests {
             1_700_000_000_000,
         );
         let first_id = first.header.id();
+        let mut log = logged(&b.with_extension("events"), std::slice::from_ref(&first));
         apply(
             &mut store,
-            std::slice::from_ref(&first),
+            &log,
             std::slice::from_ref(&first),
             1_800_000_000_000,
         )
@@ -309,9 +383,10 @@ mod tests {
         );
         let second_id = second.header.id();
         let all = vec![first, second.clone()];
+        log.append(&second).unwrap();
         apply(
             &mut store,
-            &all,
+            &log,
             std::slice::from_ref(&second),
             1_800_000_000_000,
         )
@@ -372,9 +447,10 @@ mod tests {
         let early_id = early.header.id();
 
         let all = vec![early.clone(), later.clone()];
+        let log = logged(&b.with_extension("events"), &all);
         apply(
             &mut store,
-            &all,
+            &log,
             std::slice::from_ref(&later),
             1_800_000_000_000,
         )
@@ -382,7 +458,7 @@ mod tests {
         // Now re-fold the earlier note with the later name already known.
         apply(
             &mut store,
-            &all,
+            &log,
             std::slice::from_ref(&early),
             1_800_000_000_000,
         )
@@ -441,7 +517,7 @@ mod tests {
         let mut all = vec![cap.clone()];
         apply(
             &mut store,
-            &all,
+            &logged(&b.with_extension("events"), &all),
             std::slice::from_ref(&cap),
             1_800_000_000_000,
         )
@@ -450,7 +526,7 @@ mod tests {
         all.push(named.clone());
         apply(
             &mut store,
-            &all,
+            &logged(&b.with_extension("events"), &all),
             std::slice::from_ref(&named),
             1_800_000_000_000,
         )
@@ -465,7 +541,7 @@ mod tests {
         all.push(tagged.clone());
         apply(
             &mut store,
-            &all,
+            &logged(&b.with_extension("events"), &all),
             std::slice::from_ref(&tagged),
             1_800_000_000_000,
         )
@@ -527,14 +603,20 @@ mod tests {
         );
 
         let mut all = vec![cap.clone(), tag.clone()];
-        apply(&mut store, &all, &all.clone(), 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &all),
+            &all.clone(),
+            1_800_000_000_000,
+        )
+        .unwrap();
         assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
 
         let mute = tag_mute(&mut d, "noise", 1_700_000_002_000);
         all.push(mute.clone());
         apply(
             &mut store,
-            &all,
+            &logged(&b.with_extension("events"), &all),
             std::slice::from_ref(&mute),
             1_800_000_000_000,
         )
@@ -569,7 +651,13 @@ mod tests {
         let mute = tag_mute(&mut d, "noise", 1_700_000_001_000);
 
         let mut all = vec![cap.clone(), mute.clone()];
-        apply(&mut store, &all, &all.clone(), 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &all),
+            &all.clone(),
+            1_800_000_000_000,
+        )
+        .unwrap();
         assert!(store.note(&tgt).unwrap().unwrap().muted_until.is_none());
 
         // Now it qualifies.
@@ -583,7 +671,7 @@ mod tests {
         all.push(tag.clone());
         apply(
             &mut store,
-            &all,
+            &logged(&b.with_extension("events"), &all),
             std::slice::from_ref(&tag),
             1_800_000_000_000,
         )
@@ -615,19 +703,33 @@ mod tests {
 
         let a_path = generation_path(&b, 1);
         let mut a = Store::open(&a_path).unwrap();
-        let mut seen = Vec::new();
+        let mut alog = logged(&b.with_extension("events-a"), &[]);
         for chunk in s.events.chunks(4) {
-            seen.extend(chunk.iter().cloned());
-            apply(&mut a, &seen, chunk, 1_800_000_000_000).unwrap();
+            for e in chunk {
+                alog.append(e).unwrap();
+            }
+            apply(&mut a, &alog, chunk, 1_800_000_000_000).unwrap();
         }
 
         let shuffled = s.shuffled(777);
         let c_path = generation_path(&b, 2);
         let mut c = Store::open(&c_path).unwrap();
-        let mut seen2 = Vec::new();
+        // Ingested rather than appended, because that is what an out-of-order
+        // arrival is. `append` is the local path and requires the next sequence
+        // number — shuffled events do not have it, and the log is right to
+        // refuse them there.
+        let mut clog = logged(&b.with_extension("events-c"), &[]);
         for chunk in shuffled.chunks(4) {
-            seen2.extend(chunk.iter().cloned());
-            apply(&mut c, &seen2, chunk, 1_800_000_000_000).unwrap();
+            for e in chunk {
+                let key = s
+                    .keys
+                    .iter()
+                    .find(|(d, _)| *d == e.header.dev)
+                    .map(|(_, k)| *k)
+                    .expect("the scenario names every origin it wrote with");
+                clog.ingest(e, &key).unwrap();
+            }
+            apply(&mut c, &clog, chunk, 1_800_000_000_000).unwrap();
         }
 
         assert_eq!(snapshot(&a, &s.notes), snapshot(&c, &s.notes));
@@ -650,12 +752,14 @@ mod tests {
         // conflict that no longer exists.
         let mut early = s.events.clone();
         let late = early.remove(2);
-        apply(&mut store, &early, &early, 1_800_000_000_000).unwrap();
+        let mut log = logged(&b.with_extension("events"), &early);
+        apply(&mut store, &log, &early, 1_800_000_000_000).unwrap();
         let before = snapshot(&store, &s.notes);
 
         let mut all = early.clone();
         all.push(late.clone());
-        apply(&mut store, &all, &[late], 1_800_000_000_000).unwrap();
+        log.append(&late).unwrap();
+        apply(&mut store, &log, &[late], 1_800_000_000_000).unwrap();
         let after = snapshot(&store, &s.notes);
 
         let full_path = generation_path(&b, 2);
@@ -678,11 +782,23 @@ mod tests {
         let s = testing::mixed(11, 1, 2, 4);
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
-        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &s.events),
+            &s.events,
+            1_800_000_000_000,
+        )
+        .unwrap();
         let before = snapshot(&store, &s.notes);
 
         assert_eq!(
-            apply(&mut store, &s.events, &[], 1_800_000_000_000).unwrap(),
+            apply(
+                &mut store,
+                &logged(&b.with_extension("events"), &s.events),
+                &[],
+                1_800_000_000_000
+            )
+            .unwrap(),
             0
         );
         assert_eq!(snapshot(&store, &s.notes), before);
@@ -696,11 +812,23 @@ mod tests {
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
 
-        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &s.events),
+            &s.events,
+            1_800_000_000_000,
+        )
+        .unwrap();
         let once = snapshot(&store, &s.notes);
         let count = store.note_count().unwrap();
 
-        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &s.events),
+            &s.events,
+            1_800_000_000_000,
+        )
+        .unwrap();
         assert_eq!(snapshot(&store, &s.notes), once);
         assert_eq!(store.note_count().unwrap(), count, "no duplicated rows");
         clean(&b);
@@ -712,7 +840,13 @@ mod tests {
         let s = testing::mixed(13, 2, 4, 16);
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
-        apply(&mut store, &s.events, &s.events, 1_800_000_000_000).unwrap();
+        apply(
+            &mut store,
+            &logged(&b.with_extension("events"), &s.events),
+            &s.events,
+            1_800_000_000_000,
+        )
+        .unwrap();
 
         // One further event against one note.
         let target = s.notes[0];
@@ -728,7 +862,13 @@ mod tests {
         all.push(e.clone());
 
         assert_eq!(
-            apply(&mut store, &all, &[e], 1_800_000_000_000).unwrap(),
+            apply(
+                &mut store,
+                &logged(&b.with_extension("events"), &all),
+                &[e],
+                1_800_000_000_000
+            )
+            .unwrap(),
             1,
             "one event against one note must re-fold exactly one note"
         );
@@ -751,9 +891,10 @@ mod tests {
         let tgt = cap.header.id();
         let path = generation_path(&b, 1);
         let mut store = Store::open(&path).unwrap();
+        let mut log = logged(&b.with_extension("events"), std::slice::from_ref(&cap));
         apply(
             &mut store,
-            std::slice::from_ref(&cap),
+            &log,
             std::slice::from_ref(&cap),
             1_800_000_000_000,
         )
@@ -770,8 +911,8 @@ mod tests {
             testing::edit_body(2, "pangolin replacement"),
             1_700_000_001_000,
         );
-        let all = vec![cap, edit.clone()];
-        apply(&mut store, &all, &[edit], 1_800_000_000_000).unwrap();
+        log.append(&edit).unwrap();
+        apply(&mut store, &log, &[edit], 1_800_000_000_000).unwrap();
 
         assert_eq!(
             store.search("pangolin", 1_800_000_000_000).unwrap().len(),

@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_tgt ON events(tgt, hlc_wall, hlc_counter);
 CREATE INDEX IF NOT EXISTS events_dev ON events(dev, seq);
 
+-- The rules: events that change notes they do not name, which today is a mute
+-- written against a tag or a span of days. There are very few and an
+-- incremental fold has to carry all of them, so they are worth finding without
+-- reading the log to do it.
+CREATE INDEX IF NOT EXISTS events_rules ON events(kind) WHERE tgt IS NULL;
+
 -- Highest CONTIGUOUS sequence per origin. Never a maximum.
 CREATE TABLE IF NOT EXISTS heads (
   dev TEXT PRIMARY KEY,
@@ -264,6 +270,98 @@ impl Log {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Everything an incremental fold needs for a set of notes.
+    ///
+    /// Two queries against indexes, in place of reading the whole log and
+    /// filtering it in memory. `commit` did the latter on every write: at a
+    /// hundred and fifty events that was two milliseconds and invisible, and it
+    /// grows with the archive for ever, on the path a capture waits on.
+    ///
+    /// What comes back is every event belonging to one of these notes, plus
+    /// every rule. The rules have to come along: a note that has just been
+    /// given a tag may fall under a mute written weeks ago, and a fold that
+    /// left the rule out would produce a note the mute plainly covers and that
+    /// is not muted.
+    ///
+    /// A capture is its own note and cannot name itself — the identity is
+    /// computed over the target field, so writing it in would change the value
+    /// being computed — which is why the identifiers are looked for in `id` as
+    /// well as in `tgt`.
+    pub fn events_touching(
+        &self,
+        targets: &std::collections::BTreeSet<brain_core::EventId>,
+    ) -> Result<Vec<Envelope>> {
+        let mut out = Vec::new();
+        if targets.is_empty() {
+            return Ok(out);
+        }
+
+        let ids: Vec<Vec<u8>> = targets.iter().map(|t| t.0.to_vec()).collect();
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut st = self.conn.prepare(&format!(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events
+             WHERE tgt IN ({holes}) OR id IN ({holes})
+             ORDER BY hlc_wall, hlc_counter, hlc_origin"
+        ))?;
+        let both: Vec<&dyn rusqlite::ToSql> = ids
+            .iter()
+            .chain(ids.iter())
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+        for r in st.query_map(both.as_slice(), row_to_envelope)? {
+            out.push(r?);
+        }
+
+        for r in self.rules()? {
+            out.push(r);
+        }
+        out.sort_by_key(|e| (e.header.hlc.wall, e.header.hlc.counter));
+        Ok(out)
+    }
+
+    /// Events that change notes they do not name.
+    pub fn rules(&self) -> Result<Vec<Envelope>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events WHERE tgt IS NULL AND kind = ?1
+             ORDER BY hlc_wall, hlc_counter, hlc_origin",
+        )?;
+        let mut out = Vec::new();
+        for r in st.query_map(
+            params![brain_core::event::Kind::MUTE.0 as i64],
+            row_to_envelope,
+        )? {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The most recent event this origin wrote, by sequence.
+    ///
+    /// One indexed lookup. This was done by reading every event in the log and
+    /// taking the maximum in memory — on every event *authored*, not merely
+    /// every commit, so a capture paid for the whole archive twice over.
+    pub fn chain_tip(&self, dev: &brain_core::Dev) -> Result<Option<brain_core::EventId>> {
+        let id: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT id FROM events WHERE dev = ?1 ORDER BY seq DESC LIMIT 1",
+                params![dev_key(dev)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id.and_then(|v| {
+            let a: [u8; 32] = v.try_into().ok()?;
+            Some(brain_core::EventId(a))
+        }))
     }
 
     /// How many events are held.

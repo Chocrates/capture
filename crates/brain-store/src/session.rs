@@ -292,8 +292,7 @@ impl Session {
         };
 
         if !authored.is_empty() {
-            let all = self.log.all()?;
-            incremental::apply(&mut self.state, &all, &authored, now_ms() as i64)?;
+            incremental::apply(&mut self.state, &self.log, &authored, now_ms() as i64)?;
             if let Some(last) = authored.last() {
                 let (wall, counter) = self.clock.persist();
                 self.identity
@@ -521,8 +520,7 @@ impl Session {
     /// several before appending any gives them all the same number, and the
     /// integrity check says so.
     fn settle(&mut self, events: &[Envelope]) -> Result<()> {
-        let all = self.log.all()?;
-        incremental::apply(&mut self.state, &all, events, now_ms() as i64)?;
+        incremental::apply(&mut self.state, &self.log, events, now_ms() as i64)?;
 
         if let Some(last) = events.last() {
             let (wall, counter) = self.clock.persist();
@@ -560,12 +558,7 @@ fn next_seq(log: &Log, dev: &brain_core::Dev) -> Result<u64> {
 }
 
 fn chain_tip(log: &Log, dev: &brain_core::Dev) -> Result<Option<brain_core::EventId>> {
-    Ok(log
-        .all()?
-        .into_iter()
-        .filter(|e| e.header.dev == *dev)
-        .max_by_key(|e| e.header.seq)
-        .map(|e| e.header.id()))
+    log.chain_tip(dev)
 }
 
 /// What a capture turned into.
