@@ -428,6 +428,46 @@ impl Session {
         Ok(id)
     }
 
+    /// Author several events of one kind and make them durable together.
+    ///
+    /// One commit rather than one per event, which matters because a commit is
+    /// not cheap: it appends to the log, re-folds what the arrivals touched,
+    /// advances the identity and marks the device active — several durable
+    /// writes across three databases, about seventy milliseconds of them.
+    ///
+    /// The review session is what asked for this. Offering five notes writes
+    /// five `shown` events, and doing that one at a time cost a third of a
+    /// second before the pane could draw — a delay on opening a tab, which is
+    /// exactly where somebody notices one.
+    pub fn append_all<F>(
+        &mut self,
+        kind: Kind,
+        targets: &[brain_core::EventId],
+        body: F,
+    ) -> Result<Vec<brain_core::EventId>>
+    where
+        F: Fn([u8; 16], brain_core::EventId) -> Vec<u8>,
+    {
+        let mut events = Vec::with_capacity(targets.len());
+        for tgt in targets {
+            let nonce = entropy::nonce()?;
+            let e = self.author(kind, Some(*tgt), None, body(nonce.0, *tgt))?;
+
+            // Appended as it is authored. The next event's sequence and chain
+            // are read back from the log, so they are only right once this one
+            // is in it.
+            self.log.append(&e)?;
+            events.push(e);
+        }
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The expensive half, once for the batch.
+        self.settle(&events)?;
+        Ok(events.iter().map(|e| e.header.id()).collect())
+    }
+
     /// Author an event under this device's origin.
     fn author(
         &mut self,
@@ -469,7 +509,18 @@ impl Session {
         for e in events {
             self.log.append(e)?;
         }
+        self.settle(events)
+    }
 
+    /// Everything a commit does after the events are in the log.
+    ///
+    /// Split out because it is the expensive half and it does not have to be
+    /// paid per event: the re-fold, the identity advance and the activity mark
+    /// are each once-per-batch work. What cannot be shared is appending, since
+    /// an event's sequence and chain are read back from the log — authoring
+    /// several before appending any gives them all the same number, and the
+    /// integrity check says so.
+    fn settle(&mut self, events: &[Envelope]) -> Result<()> {
         let all = self.log.all()?;
         incremental::apply(&mut self.state, &all, events, now_ms() as i64)?;
 

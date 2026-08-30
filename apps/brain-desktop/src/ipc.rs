@@ -1166,10 +1166,11 @@ pub fn review() -> std::result::Result<ReviewSession, String> {
             .collect::<Result<Vec<_>>>()?;
 
         // Written after everything above has succeeded, so a failure to read
-        // cannot spend a session nobody got to see.
-        for i in &chosen {
-            brain_store::review::write(&mut s, i.note.tgt, brain_core::body::Outcome::Shown)?;
-        }
+        // cannot spend a session nobody got to see — and in one commit, because
+        // five of them is a third of a second and the pane cannot draw until
+        // they are done.
+        let tgts: Vec<_> = chosen.iter().map(|i| i.note.tgt).collect();
+        brain_store::review::shown(&mut s, &tgts)?;
 
         Ok(ReviewSession { items, nagging })
     })())

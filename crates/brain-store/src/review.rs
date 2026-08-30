@@ -120,6 +120,21 @@ pub fn record(paths: &StorePaths, name: &str, outcome: Outcome) -> Result<()> {
     write(&mut s, tgt, outcome)
 }
 
+/// Record that several notes were offered, in one commit.
+///
+/// A session offers five notes and each is a `shown` event. Written one at a
+/// time that is five commits — about a third of a second — and it happens
+/// before the pane can draw, so it lands as a delay on opening a tab.
+pub fn shown(s: &mut Session, tgts: &[EventId]) -> Result<()> {
+    s.append_all(Kind::REVIEW, tgts, |nonce, _| {
+        encode(&ReviewBody {
+            nonce,
+            outcome: Outcome::Shown,
+        })
+    })?;
+    Ok(())
+}
+
 /// The same, on a session that is already open.
 pub fn write(s: &mut Session, tgt: EventId, outcome: Outcome) -> Result<()> {
     s.append(Kind::REVIEW, Some(tgt), None, |nonce| {

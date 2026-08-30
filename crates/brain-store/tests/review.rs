@@ -212,3 +212,50 @@ fn nothing_accumulates_into_a_judgement() {
     // And that is the whole of it: there is no third number, and nothing
     // derives one. The type has three fields and none of them is a verdict.
 }
+
+#[test]
+fn a_batch_of_offers_keeps_the_sequence_gap_free() {
+    // Writing the five `shown` events one at a time cost five commits — about
+    // four hundred milliseconds before the pane could draw, which lands as a
+    // delay on opening a tab.
+    //
+    // The first attempt at batching authored all five and then appended them,
+    // which is wrong: an event's sequence and chain are read back from the log,
+    // so five authored before any was appended all claimed the same number. The
+    // store's own integrity check caught it — "local append out of sequence" —
+    // and this is that check as a test rather than as a lucky console message.
+    let sc = Scratch::new("batch");
+    let p = sc.paths();
+    let slugs: Vec<String> = (0..5).map(|i| capture(&p, &format!("note {i}"))).collect();
+
+    let mut s = Session::open(p.clone()).unwrap();
+    let tgts: Vec<_> = slugs
+        .iter()
+        .map(|x| s.state.resolve(x).unwrap().unwrap())
+        .collect();
+    review::shown(&mut s, &tgts).unwrap();
+    drop(s);
+
+    // Every sequence used once, with no gaps, for every origin.
+    let s = Session::open(p.clone()).unwrap();
+    let mut by_dev: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+    for e in s.log.all().unwrap() {
+        let dev = e.header.dev.0.iter().map(|b| format!("{b:02x}")).collect();
+        by_dev.entry(dev).or_default().push(e.header.seq);
+    }
+    for (dev, mut seqs) in by_dev {
+        seqs.sort_unstable();
+        let wanted: Vec<u64> = (1..=seqs.len() as u64).collect();
+        assert_eq!(seqs, wanted, "{dev} has a gap or a repeat in its sequence");
+    }
+    // The writer lock is held for as long as the session is, and `offered`
+    // opens its own.
+    drop(s);
+
+    // And all five were recorded, not just the last one to win a collision.
+    let offered = offered(&p, now());
+    assert!(
+        offered.is_empty(),
+        "notes just offered are still on offer, so the writes did not land: {offered:?}"
+    );
+}

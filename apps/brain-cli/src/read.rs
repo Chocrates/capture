@@ -457,9 +457,8 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     // Being offered is itself the outcome `shown`. Recorded after the items are
     // printed, so a failure to write cannot lose the session somebody is
     // already reading.
-    for i in &items {
-        brain_store::review::write(&mut s, i.note.tgt, brain_core::body::Outcome::Shown)?;
-    }
+    let tgts: Vec<_> = items.iter().map(|i| i.note.tgt).collect();
+    brain_store::review::shown(&mut s, &tgts)?;
     Ok(())
 }
 
