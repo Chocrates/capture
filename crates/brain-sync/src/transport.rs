@@ -1,0 +1,170 @@
+//! What a message travels over, stated as a trait so it need not be a socket.
+//!
+//! # Every protocol test runs without a network
+//!
+//! This is the point of the trait, and it is worth more than the abstraction.
+//! A suite that opens sockets is slow, is flaky on a laptop that changes
+//! networks, and fails for reasons that have nothing to do with the protocol —
+//! so it gets marked ignored, and then it is not a suite. The protocol logic
+//! here talks to [`Transport`]; the tests hand it [`Pair`], which is two queues
+//! and no operating system.
+//!
+//! What the trait deliberately does not model is the handshake. A `Transport`
+//! is a channel that already exists and is already authenticated: by the time
+//! anything here has one, Noise_KK has completed and the peer is on the roster
+//! (§5.2). Nothing in this crate can send a byte before that, because there is
+//! no way to express it.
+
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+
+/// Why a message could not be sent or received.
+///
+/// Deliberately small. The protocol's answer to almost every failure is the
+/// same — the session is over, anti-entropy will try again later — and a
+/// taxonomy of socket errors would invite handling them differently, which is
+/// how a retry loop that should not exist gets written.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TransportError {
+    /// The peer is gone, or the channel was closed under us.
+    Closed,
+    /// A frame arrived that this build cannot read.
+    Malformed,
+}
+
+/// An authenticated, ordered, message-oriented channel to one peer.
+///
+/// Ordered and reliable within a session, because that is what TCP inside a
+/// Noise session gives. Sessions themselves are unreliable: one can end at any
+/// point, and the protocol above must never depend on having finished
+/// anything.
+pub trait Transport {
+    /// Hand one message to the peer.
+    fn send(&mut self, frame: &[u8]) -> Result<(), TransportError>;
+
+    /// Take the next message, or `None` if none is waiting.
+    ///
+    /// Non-blocking, so a caller can serve both directions without threads and
+    /// a test can drive both ends by hand.
+    fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
+}
+
+/// Two ends of an in-memory channel, for tests.
+///
+/// Not a mock: it is a real implementation of the same contract, and the
+/// protocol cannot tell it from a socket. What it removes is the operating
+/// system, which is the part that makes a test slow and unreliable rather than
+/// the part that makes it meaningful.
+///
+/// The two ends share their queues rather than borrowing them, because they
+/// are held at once and each one's inbox is the other's outbox — which no
+/// arrangement of `&mut` can express.
+#[derive(Default)]
+pub struct Pair {
+    a: Queue,
+    b: Queue,
+    closed: Rc<Cell<bool>>,
+}
+
+type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
+impl Pair {
+    pub fn new() -> Pair {
+        Pair::default()
+    }
+
+    /// The channel is over, in both directions.
+    ///
+    /// A session ending mid-exchange is ordinary rather than exceptional — a
+    /// laptop closing, a network changing — so the tests have to be able to
+    /// cause one, including part-way through a conversation.
+    pub fn close(&self) {
+        self.closed.set(true);
+    }
+
+    /// The two ends. Each writes to the other's queue and reads its own.
+    pub fn ends(&self) -> (End, End) {
+        (
+            End {
+                inbox: Rc::clone(&self.a),
+                outbox: Rc::clone(&self.b),
+                closed: Rc::clone(&self.closed),
+            },
+            End {
+                inbox: Rc::clone(&self.b),
+                outbox: Rc::clone(&self.a),
+                closed: Rc::clone(&self.closed),
+            },
+        )
+    }
+}
+
+/// One side of a [`Pair`].
+pub struct End {
+    inbox: Queue,
+    outbox: Queue,
+    closed: Rc<Cell<bool>>,
+}
+
+impl Transport for End {
+    fn send(&mut self, frame: &[u8]) -> Result<(), TransportError> {
+        if self.closed.get() {
+            return Err(TransportError::Closed);
+        }
+        self.outbox.borrow_mut().push_back(frame.to_vec());
+        Ok(())
+    }
+
+    fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        if self.closed.get() {
+            return Err(TransportError::Closed);
+        }
+        Ok(self.inbox.borrow_mut().pop_front())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_one_end_sends_the_other_receives() {
+        let pair = Pair::new();
+        {
+            let (mut a, mut b) = pair.ends();
+            a.send(b"first").unwrap();
+            a.send(b"second").unwrap();
+            // In order, because a session is ordered even though sessions are
+            // not reliable.
+            assert_eq!(b.recv().unwrap().as_deref(), Some(&b"first"[..]));
+            assert_eq!(b.recv().unwrap().as_deref(), Some(&b"second"[..]));
+            assert_eq!(
+                b.recv().unwrap(),
+                None,
+                "nothing was sent, so nothing waits"
+            );
+        }
+    }
+
+    #[test]
+    fn each_end_reads_only_what_the_other_wrote() {
+        // The mistake this catches is one shared queue, where a side receives
+        // its own message and a protocol test passes without a peer.
+        let pair = Pair::new();
+        let (mut a, mut b) = pair.ends();
+        a.send(b"mine").unwrap();
+        assert_eq!(a.recv().unwrap(), None, "an end received its own message");
+        assert_eq!(b.recv().unwrap().as_deref(), Some(&b"mine"[..]));
+    }
+
+    #[test]
+    fn a_closed_session_refuses_both_directions() {
+        let pair = Pair::new();
+        pair.close();
+        let (mut a, mut b) = pair.ends();
+        assert_eq!(a.send(b"x"), Err(TransportError::Closed));
+        assert_eq!(b.recv(), Err(TransportError::Closed));
+    }
+}

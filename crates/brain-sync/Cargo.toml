@@ -1,0 +1,25 @@
+[package]
+name = "brain-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The wire, and nothing else (DESIGN.md §5).
+#
+# This crate owns the protocol and the socket. It hands `brain-store` verified
+# envelopes; it does not fold, does not decide what an event means, and never
+# touches the projection. The boundary is where an unreproducible bug becomes a
+# reproducible one: everything on this side of it can be exercised over an
+# in-memory transport, and everything on the other side already could be.
+
+[dependencies]
+# Without `std`, which brain-core's own manifest reserves for tests and benches:
+# "no non-test code may depend on it".
+brain-core = { path = "../brain-core" }
+minicbor = { workspace = true }
+
+[dev-dependencies]
+brain-core = { path = "../brain-core", features = ["std", "testing"] }
+proptest = { workspace = true }

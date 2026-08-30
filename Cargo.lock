@@ -557,6 +557,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-sync"
+version = "0.1.0"
+dependencies = [
+ "brain-core",
+ "minicbor",
+ "proptest",
+]
+
+[[package]]
 name = "brain-time"
 version = "0.1.0"
 dependencies = [

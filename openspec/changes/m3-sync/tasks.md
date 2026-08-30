@@ -1,8 +1,8 @@
 ## 1. The crate, and the boundary around the socket
 
-- [ ] 1.1 Create `crates/brain-sync`. It owns the wire and nothing else: it hands `brain-store` verified envelopes and never folds, never decides, never touches the projection. The boundary is where an unreproducible bug becomes a reproducible one.
-- [ ] 1.2 Define every message — `HELLO`, `RANGE`, `EVENT`, `REDACT`, `REDACT_ACK`, `WANT_TGT` — and their encoding, with the same frozen-encoding discipline as `brain-core`: golden vectors before anything writes one. A protocol message is as permanent as an event body once two versions exist in the world.
-- [ ] 1.3 Write the protocol against a transport trait, with an in-memory implementation. **Every protocol test must run without a socket.** A test suite that needs the network is one that gets skipped, and this is the milestone where skipped tests cost the most.
+- [x] 1.1 Create `crates/brain-sync`. It owns the wire and nothing else: it hands `brain-store` verified envelopes and never folds, never decides, never touches the projection. The boundary is where an unreproducible bug becomes a reproducible one.
+- [x] 1.2 Define every message — `HELLO`, `RANGE`, `EVENT`, `REDACT`, `REDACT_ACK`, `WANT_TGT` — and their encoding, with the same frozen-encoding discipline as `brain-core`: golden vectors before anything writes one. A protocol message is as permanent as an event body once two versions exist in the world.
+- [x] 1.3 Write the protocol against a transport trait, with an in-memory implementation. **Every protocol test must run without a socket.** A test suite that needs the network is one that gets skipped, and this is the milestone where skipped tests cost the most. **Done**: `Pair` is two queues and no operating system, and it is a real implementation of the trait rather than a mock — the protocol cannot tell it from a socket. The trait deliberately cannot express a pre-handshake message: a `Transport` is a channel that already exists and is already authenticated, so §5.2's absolute is a thing this crate has no way to violate rather than a rule it remembers to follow.
 
 ## 2. Transport — Noise_KK
 

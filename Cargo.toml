@@ -5,6 +5,7 @@ members = [
     "crates/brain-parse",
     "crates/brain-time",
     "crates/brain-store",
+    "crates/brain-sync",
     "apps/brain-cli",
     "apps/brain-capture",
     "apps/brain-desktop",
