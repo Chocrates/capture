@@ -187,7 +187,9 @@ pub fn status(paths: &StorePaths) -> Result<()> {
         mechanism != brain_store::hotkey::Mechanism::None,
         jiff::Timestamp::now().as_millisecond().max(0) as u64,
         ops.gesture_last_fired()?,
-        ops.last_active()?,
+        // Derived from the log rather than read from a counter kept beside it:
+        // every event names the device that wrote it and when.
+        log.last_wall(&brain_store::identity::Identity::load(paths)?.dev())?,
     );
     if let Some(m) = health.message(&chord) {
         attention.push(m);

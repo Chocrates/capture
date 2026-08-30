@@ -564,3 +564,42 @@ fn a_plan_can_be_walked_away_from() {
         "a retracted plan is still offered"
     );
 }
+
+#[test]
+fn when_a_device_last_wrote_comes_from_the_log() {
+    // It used to be a timestamp written to `ops.db` on every commit, which
+    // cost a disk sync — thirteen milliseconds of every write — for a copy of
+    // something the log already held one column away. Every event names the
+    // device that authored it and the moment it was authored.
+    //
+    // The health check that consumes it compares against a fortnight, so the
+    // stored copy was buying precision nothing could use.
+    let sc = Scratch::new("last-wall");
+    let p = sc.paths();
+
+    let before = {
+        let s = Session::open_for_capture(p.clone()).unwrap();
+        let dev = s.identity.dev();
+        s.log.last_wall(&dev).unwrap()
+    };
+
+    capture(&p, "something, which is a write");
+
+    let s = Session::open_for_capture(p.clone()).unwrap();
+    let dev = s.identity.dev();
+    let after = s.log.last_wall(&dev).unwrap();
+
+    assert!(
+        after.is_some(),
+        "a device that has written has no last write"
+    );
+    assert!(
+        before.is_none() || after > before,
+        "writing did not move when the device last wrote"
+    );
+
+    // A device that has never written has no answer, rather than a zero that
+    // would read as 1970 and make a silent chord look like a used machine.
+    let other = brain_core::Dev([0xAB; 32]);
+    assert_eq!(s.log.last_wall(&other).unwrap(), None);
+}

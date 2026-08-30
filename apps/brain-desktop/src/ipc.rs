@@ -965,7 +965,10 @@ pub fn health() -> std::result::Result<Health, String> {
             mechanism != brain_store::hotkey::Mechanism::None,
             now,
             ops.gesture_last_fired()?,
-            ops.last_active()?,
+            // Derived from the log rather than kept beside it: every event
+            // names the device that wrote it and when.
+            brain_store::log::Log::open_read(&p.events)?
+                .last_wall(&brain_store::identity::Identity::load(&p)?.dev())?,
         )
         .message(&chord)
         {

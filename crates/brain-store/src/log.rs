@@ -199,6 +199,30 @@ impl Log {
     /// can say "everything up to 41,822" and nothing else — in particular it
     /// cannot say "everything up to 41,822 except 41,700", which is why a gap
     /// must never be created in the first place.
+    /// When this origin last wrote something.
+    ///
+    /// The answer to "was anybody here", derived rather than stored. Every
+    /// event carries the device that authored it and the wall clock it was
+    /// authored at, so the log already holds this — and it was additionally
+    /// being written to `ops.db` on every commit, costing a disk sync for a
+    /// copy of a fact one column away.
+    ///
+    /// Only writes count, which is what the stored version counted too: it was
+    /// set from `commit` and nowhere else, so browsing has never marked a
+    /// device active and deriving it changes nothing.
+    pub fn last_wall(&self, dev: &brain_core::Dev) -> Result<Option<u64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT MAX(hlc_wall) FROM events WHERE dev = ?1",
+                rusqlite::params![dev_key(dev)],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|v| v as u64))
+    }
+
     pub fn heads(&self) -> Result<BTreeMap<String, u64>> {
         let mut st = self.conn.prepare("SELECT dev, seq FROM heads")?;
         let rows = st.query_map([], |r| {

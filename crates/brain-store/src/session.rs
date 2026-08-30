@@ -530,13 +530,14 @@ impl Session {
                 .advance(&self.paths, last.header.seq, wall, counter)?;
         }
 
-        // The device was used. Recorded on every write rather than only on
-        // captures, because the question this answers is "was anybody here" —
-        // and a week of tagging and editing is as much evidence of use as a
-        // week of capturing.
-        if let Ok(ops) = Ops::open(&self.paths.ops) {
-            let _ = ops.was_active(now_ms());
-        }
+        // Nothing records "the device was used" here any more.
+        //
+        // It used to: a timestamp written to `ops.db` on every commit, which
+        // cost a disk sync — thirteen milliseconds of every write — for a copy
+        // of something the log had already stored one column away. Every event
+        // carries the device that wrote it and the moment it was written, so
+        // `Log::last_wall` derives the same answer when the question is asked,
+        // which is rarely, instead of paying for it on every write.
         Ok(())
     }
 

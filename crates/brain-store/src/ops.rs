@@ -107,9 +107,6 @@ fn id_from(b: Vec<u8>) -> Option<EventId> {
 /// When the capture gesture last reached the application.
 const GESTURE_FIRED: &str = "gesture_last_fired";
 
-/// When this device last did anything at all.
-const LAST_ACTIVE: &str = "device_last_active";
-
 /// How long a pre-redaction copy is kept.
 ///
 /// Long enough to notice a redaction fired at the wrong note and act on it;
@@ -413,21 +410,6 @@ impl Ops {
     /// Remember that one was delivered.
     pub fn mark_intent_fired(&self, id: &[u8], at: u64) -> Result<()> {
         self.set(&intent_key(id), &at.to_string())
-    }
-
-    /// Note that the user did something. Anything.
-    ///
-    /// The comparison the dead-gesture check needs. A chord that has not fired
-    /// in a fortnight means nothing on a machine that has been switched off for
-    /// a fortnight; it means a great deal on one that has been capturing all
-    /// week by other means.
-    pub fn was_active(&self, at: u64) -> Result<()> {
-        self.set(LAST_ACTIVE, &at.to_string())
-    }
-
-    /// When this device was last used.
-    pub fn last_active(&self) -> Result<Option<u64>> {
-        Ok(self.get(LAST_ACTIVE)?.and_then(|v| v.parse().ok()))
     }
 
     /// Add one overlay-appearance measurement.
