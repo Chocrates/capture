@@ -42,6 +42,7 @@ pub mod discovery;
 pub mod mdns;
 pub mod message;
 pub mod pairing;
+pub mod push;
 pub mod session;
 pub mod transport;
 

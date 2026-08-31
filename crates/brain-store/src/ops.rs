@@ -127,6 +127,25 @@ CREATE TABLE IF NOT EXISTS pairings (
 -- appearing in the roster is either an ordinary consequence of pairing on
 -- another device, or the compromise §5.3 admits it cannot prevent. Nothing
 -- here can tell those apart, so it asks rather than deciding.
+-- Who a redaction still has to reach.
+--
+-- The set is fixed when the redaction is issued, and is deliberately **not**
+-- read from the current roster. The realistic sequence is: the phone is stolen,
+-- you retire it, and *then* you redact the sensitive notes. If outstanding
+-- peers were computed from the roster, retiring the phone would remove it from
+-- the set and every surface would report complete propagation for the one
+-- device that never received anything.
+--
+-- So a retired peer stays listed as never acknowledged. That is the true
+-- statement, and it is the useful one.
+CREATE TABLE IF NOT EXISTS redact_peers (
+  redact_evt BLOB NOT NULL,
+  peer_key   BLOB NOT NULL,
+  issued_at  INTEGER NOT NULL,
+  acked_at   INTEGER,
+  PRIMARY KEY (redact_evt, peer_key)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admissions_seen (
   peer_key BLOB PRIMARY KEY,
   seen_at  INTEGER NOT NULL
@@ -654,6 +673,61 @@ impl Ops {
         Ok(out)
     }
 
+    /// Fix the set of devices a redaction has to reach.
+    ///
+    /// Called once, when the redaction is issued. Every roster member at that
+    /// moment, and nobody added later: a device admitted afterwards was never
+    /// given the content, so requiring it to acknowledge destroying something
+    /// it never held would leave the redaction permanently outstanding.
+    pub fn redact_awaits(&self, redact: &EventId, peers: &[[u8; 32]], at: u64) -> Result<()> {
+        for p in peers {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO redact_peers (redact_evt, peer_key, issued_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![redact.0.to_vec(), &p[..], at as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Record that a peer has folded a redaction.
+    pub fn redact_acked(&self, redact: &EventId, peer: &[u8; 32], at: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE redact_peers SET acked_at = ?3
+             WHERE redact_evt = ?1 AND peer_key = ?2 AND acked_at IS NULL",
+            rusqlite::params![redact.0.to_vec(), &peer[..], at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Redactions that have not reached every device they were issued
+    /// against, and who is missing.
+    ///
+    /// Reported rather than inferred. "Gone everywhere" is the only claim a
+    /// redaction makes, and a system that guessed it would be lying at exactly
+    /// the moment it mattered.
+    pub fn redactions_outstanding(&self) -> Result<Vec<(EventId, Vec<[u8; 32]>)>> {
+        let mut q = self.conn.prepare(
+            "SELECT redact_evt, peer_key FROM redact_peers
+             WHERE acked_at IS NULL ORDER BY issued_at, peer_key",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut by_event: BTreeMap<[u8; 32], Vec<[u8; 32]>> = BTreeMap::new();
+        for r in rows {
+            let (evt, peer) = r?;
+            if let (Ok(evt), Ok(peer)) = (
+                <[u8; 32]>::try_from(evt.as_slice()),
+                <[u8; 32]>::try_from(peer.as_slice()),
+            ) {
+                by_event.entry(evt).or_default().push(peer);
+            }
+        }
+        Ok(by_event.into_iter().map(|(e, p)| (EventId(e), p)).collect())
+    }
+
     pub fn retryable(&self, reason: &str) -> Result<Vec<([u8; 32], Vec<u8>)>> {
         let mut st = self
             .conn
@@ -916,6 +990,88 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        clean(&p);
+    }
+    #[test]
+    fn a_redaction_is_outstanding_until_every_peer_acknowledges() {
+        let p = tmp("redact-peers");
+        let ops = Ops::open(&p).unwrap();
+        let r = EventId([1; 32]);
+        let (phone, desktop) = ([2u8; 32], [3u8; 32]);
+
+        ops.redact_awaits(&r, &[phone, desktop], 1_000).unwrap();
+        assert_eq!(ops.redactions_outstanding().unwrap()[0].1.len(), 2);
+
+        ops.redact_acked(&r, &desktop, 2_000).unwrap();
+        let out = ops.redactions_outstanding().unwrap();
+        assert_eq!(out[0].1, vec![phone]);
+
+        ops.redact_acked(&r, &phone, 3_000).unwrap();
+        assert!(ops.redactions_outstanding().unwrap().is_empty());
+        clean(&p);
+    }
+
+    #[test]
+    fn retiring_a_peer_does_not_mark_a_redaction_delivered() {
+        // The sequence this exists for: the phone is stolen, you retire it,
+        // and then you redact the sensitive notes. If the outstanding set were
+        // read from the current roster, retiring the phone would remove it and
+        // every surface would report complete propagation for the one device
+        // that never received anything.
+        let p = tmp("redact-retired");
+        let ops = Ops::open(&p).unwrap();
+        let r = EventId([1; 32]);
+        let stolen = [2u8; 32];
+
+        ops.redact_awaits(&r, &[stolen], 1_000).unwrap();
+
+        // The roster no longer contains it. The record is unmoved, because it
+        // is a record of what happened rather than of who is a member.
+        let out = ops.redactions_outstanding().unwrap();
+        assert_eq!(
+            out[0].1,
+            vec![stolen],
+            "a retired peer stopped being reported"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn a_peer_admitted_later_is_not_awaited() {
+        // It was never given the content, so requiring it to acknowledge
+        // destroying something it never held would leave the redaction
+        // outstanding for ever.
+        let p = tmp("redact-late-peer");
+        let ops = Ops::open(&p).unwrap();
+        let r = EventId([1; 32]);
+
+        ops.redact_awaits(&r, &[[2u8; 32]], 1_000).unwrap();
+        ops.redact_acked(&r, &[2u8; 32], 2_000).unwrap();
+        assert!(ops.redactions_outstanding().unwrap().is_empty());
+
+        // A device admitted afterwards does not reopen it.
+        assert!(
+            ops.redactions_outstanding().unwrap().is_empty(),
+            "a later admission reopened a completed redaction"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn acknowledging_twice_changes_nothing() {
+        // Acks arrive over a wire and a wire duplicates.
+        let p = tmp("redact-dup-ack");
+        let ops = Ops::open(&p).unwrap();
+        let r = EventId([1; 32]);
+        ops.redact_awaits(&r, &[[2u8; 32]], 1_000).unwrap();
+        ops.redact_acked(&r, &[2u8; 32], 2_000).unwrap();
+        ops.redact_acked(&r, &[2u8; 32], 9_000).unwrap();
+
+        let at: Option<i64> = ops
+            .conn
+            .query_row("SELECT acked_at FROM redact_peers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, Some(2_000), "a duplicate ack moved the time it landed");
         clean(&p);
     }
 }

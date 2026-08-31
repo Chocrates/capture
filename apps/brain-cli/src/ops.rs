@@ -272,6 +272,27 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     if brain_store::spool::in_use(&paths.spool)? {
         attention.push("captures are being spooled — the store could not be written".into());
     }
+    // Redactions that have not reached every device they were issued against.
+    //
+    // The pending set was fixed when the redaction was issued and is not read
+    // from the roster, so a device retired since then is still listed as never
+    // acknowledged. That is deliberate: the realistic order is that the phone
+    // is stolen, you retire it, and *then* you redact — and reporting
+    // completion because the phone is no longer a member would be reporting
+    // success for the one device that never received anything.
+    let outstanding = ops.redactions_outstanding()?;
+    if !outstanding.is_empty() {
+        let peers: std::collections::BTreeSet<_> =
+            outstanding.iter().flat_map(|(_, p)| p.clone()).collect();
+        attention.push(format!(
+            "{} redaction(s) have not been acknowledged by {} device(s): {}.\n\
+             Until they are, the content may still exist on those devices.",
+            outstanding.len(),
+            peers.len(),
+            peers.iter().map(short_key).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
     let identity = brain_store::identity::Identity::load(paths)?;
 
     // A device in the roster that this one neither paired nor admitted itself.

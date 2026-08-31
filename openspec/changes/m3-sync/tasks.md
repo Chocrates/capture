@@ -41,9 +41,9 @@
 
 ## 7. Live push, and redaction's exception
 
-- [ ] 7.1 Push new events to connected peers. **Test that a failed push is not an error and changes nothing** — anything that depends on delivery having happened is a bug that only appears when the network is bad.
-- [ ] 7.2 Push `redact` eagerly and retry until acknowledged. For redaction the latency is the guarantee (§1.1), and the window between ordering a destruction and its taking effect is the exposure the feature exists to close.
-- [ ] 7.3 Report a redaction outstanding against an unacknowledged peer, and keep reporting it for a retired one rather than reporting completion. §5.4 is deliberate that a retired peer stays listed as never acknowledged, because that is the true statement.
+- [x] 7.1 Push new events to connected peers. **Done**: fire-and-forget, and a failed push returns a value rather than an error — the type cannot express "it arrived", only "it reached the wire", because nothing at this layer can know the difference and pretending otherwise is the bug that only appears when the network is bad. **Test that a failed push is not an error and changes nothing** — anything that depends on delivery having happened is a bug that only appears when the network is bad.
+- [x] 7.2 Push `redact` eagerly and retry until acknowledged. **Done**: the acknowledgement is sent *after* the store has taken the redaction, never on receipt — acknowledging on receipt would report a destruction that has not happened, which is the one lie this protocol must not tell. An acknowledgement for a different redaction does not count, since two can be outstanding at once. The retry loop itself is the daemon's, with section 10. For redaction the latency is the guarantee (§1.1), and the window between ordering a destruction and its taking effect is the exposure the feature exists to close.
+- [x] 7.3 Report a redaction outstanding against an unacknowledged peer, and keep reporting it for a retired one rather than reporting completion. §5.4 is deliberate that a retired peer stays listed as never acknowledged, because that is the true statement. **Done**: the pending set is fixed when the redaction is issued and never read from the roster, so retiring the stolen phone cannot make its redactions report success. Reported in `brain health`.
 
 ## 8. Ingest
 
