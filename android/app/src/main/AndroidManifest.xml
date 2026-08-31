@@ -13,5 +13,38 @@
           on restore for exactly this reason, and a silent cloud copy would
           bypass it.
         -->
+
+        <!--
+          The capture window. A dialog rather than a full screen: it is meant
+          to feel like something that appeared over what you were doing, not
+          somewhere you navigated to — and it is shown over the lock screen,
+          because the tile that opens it is reachable from there and demanding
+          an unlock afterwards would put the gesture behind the thing it was
+          avoiding.
+        -->
+        <activity
+            android:name=".CaptureActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="stateVisible|adjustResize" />
+
+        <service
+            android:name=".CaptureTile"
+            android:exported="true"
+            android:icon="@android:drawable/ic_menu_edit"
+            android:label="capture"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <!-- Offered on the lock screen. The point of the surface. -->
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="false" />
+        </service>
     </application>
 </manifest>

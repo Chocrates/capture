@@ -22,7 +22,8 @@
 
 ## 4. Capture surfaces
 
-- [ ] 4.1 Quick Settings tile, reachable from the lock screen. The one surface that has to be faster than opening anything.
+- [x] 4.1 Quick Settings tile, reachable from the lock screen. **Done**: the tile opens the capture window rather than capturing silently — a gesture with nothing in it is not a capture, and a tile that captured without showing anything could not be corrected. Verified on the emulator: typed text, pressed Enter, and a full store appeared on the device with the note in the projection under a proper slug.
+  - **Enter did nothing at first.** The field was multi-line, so Enter inserted a newline and `ImeAction.Done` never fired. It looked right, accepted the text, and silently did nothing on the commit key. §0.2 argues the capture gesture must not differ between devices, and "Enter commits on the desktop, inserts whitespace on the phone" is exactly that difference — and the kind nobody reports, because it reads as their own mistake.
 - [ ] 4.2 Share-sheet target, attaching the source URL where the sharing application offers one.
 - [ ] 4.3 Hold-to-talk: record, commit a blob reference, stop. **No transcription on the phone** — the phone's job ends at "the audio exists".
 - [ ] 4.4 Assistant voice intent. Last of the four deliberately: it depends on an integration surface that has changed repeatedly across Android versions, and the other three do not.
