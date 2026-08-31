@@ -78,6 +78,12 @@ private fun App(model: Model) {
                     onSync = { SyncWorker.now(context) },
                     onPair = { model.go(Screen.Pairing) },
                 )
+                is Screen.Review -> ReviewSession(
+                    model.offered,
+                    model.nagging,
+                    onOutcome = model::reviewed,
+                    onOpen = { model.go(Screen.Note(it)) },
+                )
                 is Screen.Pairing -> Pairing(
                     model.pairing,
                     onOffer = { model.offerPairing(model.addresses()) },
@@ -118,7 +124,14 @@ private fun Bar(model: Model) {
             label = { Text("Search") },
         )
         NavigationBarItem(
-            selected = here is Screen.Health,
+            selected = here is Screen.Review,
+            onClick = { model.go(Screen.Review) },
+            icon = {},
+            label = { Text("Review") },
+        )
+        NavigationBarItem(
+            // Pairing lives behind Health, which is where the devices are.
+            selected = here is Screen.Health || here is Screen.Pairing,
             onClick = { model.go(Screen.Health) },
             icon = {},
             label = { Text("Health") },

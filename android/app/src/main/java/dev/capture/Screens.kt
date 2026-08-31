@@ -285,7 +285,7 @@ fun Health(
 }
 
 @Composable
-private fun Empty(what: String) {
+fun Empty(what: String) {
     Column(Modifier.fillMaxSize().padding(24.dp)) {
         Text(what, style = MaterialTheme.typography.bodyMedium)
     }

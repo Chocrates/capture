@@ -206,3 +206,115 @@ mod tests {
         assert!(Because::Never < Because::Context);
     }
 }
+
+/// A session, assembled and marked as offered.
+///
+/// The whole of what a surface needs to draw one. It lives here rather than in
+/// each surface because it is more than a query: it picks the items, works out
+/// which of them carry a reading worth mentioning, gathers what has lapsed
+/// repeatedly, and *writes* that the items were shown — and the order of those
+/// matters. The shown-marking goes last, so a failure to read cannot spend a
+/// session nobody saw.
+///
+/// A second copy of that sequence on the phone would be a phone that spent
+/// sessions differently from the desktop, on the same archive, with no test
+/// able to notice.
+#[derive(Debug)]
+pub struct Offered {
+    pub items: Vec<Suggested>,
+    /// Notes that have lapsed repeatedly. Named rather than counted, because
+    /// "three things keep slipping" is not actionable and their names are.
+    pub nagging: Vec<String>,
+}
+
+/// One offered note, with a reading where the archive has one worth showing.
+#[derive(Debug)]
+pub struct Suggested {
+    pub slug: String,
+    pub text: Option<String>,
+    pub because: Because,
+    /// What this might be, where a parse was confident enough to be worth
+    /// saying and not confident enough to have acted on its own.
+    pub suggestion: Option<String>,
+}
+
+/// Open a review session: choose, read, and record that it was offered.
+pub fn open(paths: &StorePaths, now: i64) -> Result<Offered> {
+    let mut s = Session::open(paths.clone())?;
+    let chosen = session(&s, now)?;
+
+    let items: Vec<Suggested> = chosen
+        .iter()
+        .map(|i| Suggested {
+            slug: i.note.slug.clone(),
+            // Only where nothing was promoted: once a note has a type, a
+            // competing reading is noise rather than an offer.
+            suggestion: match (
+                s.state.promotion_of(&i.note.tgt).ok().flatten(),
+                i.note.text.as_deref(),
+            ) {
+                (None, Some(text)) => suggestion_for(text, i.note.tz.as_deref(), now),
+                _ => None,
+            },
+            text: i.note.text.clone(),
+            because: i.because,
+        })
+        .collect();
+
+    let nagging = s
+        .state
+        .repeatedly_lapsed(now, 3)?
+        .into_iter()
+        .map(|tgt| Ok(s.state.slug_of(&tgt)?.unwrap_or_default()))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Written after everything above has succeeded, so a failure to read
+    // cannot spend a session nobody got to see — and in one commit, because
+    // five of them is a third of a second and no surface can draw until they
+    // are done.
+    let tgts: Vec<_> = chosen.iter().map(|i| i.note.tgt).collect();
+    shown(&mut s, &tgts)?;
+
+    Ok(Offered { items, nagging })
+}
+
+/// What the parser thinks this might be, when that is worth saying.
+///
+/// Nothing at all below any confidence, and nothing at or above the promotion
+/// floor — at that point the archive has already acted, and repeating it as a
+/// suggestion invites somebody to confirm a decision that was not theirs to
+/// make.
+///
+/// Derived rather than stored: a suggestion is a guess, and writing one into
+/// the log would make an event out of it.
+pub fn suggestion_for(text: &str, tz: Option<&str>, now: i64) -> Option<String> {
+    let zone = tz
+        .and_then(capture_time::Zone::new)
+        .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
+
+    let r = capture_parse::recognize(text, now, zone);
+    if r.confidence == 0 || r.confidence >= crate::promote::FLOOR {
+        return None;
+    }
+
+    let what = match &r.shape {
+        capture_parse::Shape::Task { due: None } => String::from("a task"),
+        capture_parse::Shape::Task { due: Some(d) } => format!("a task due {d}"),
+        capture_parse::Shape::Point(capture_parse::When::Date(d)) => format!("something on {d}"),
+        capture_parse::Shape::Point(capture_parse::When::Moment(ms)) => {
+            let (h, m) = capture_time::civil_clock(*ms, zone);
+            format!(
+                "something on {} at {h:02}:{m:02}",
+                capture_time::civil_date(*ms, zone)
+            )
+        }
+        capture_parse::Shape::Range { from, to } => format!("something from {from} to {to}"),
+        capture_parse::Shape::Recurring { .. } => String::from("something recurring"),
+        capture_parse::Shape::Nothing => return None,
+    };
+
+    Some(format!(
+        "This might be {what} — {}% sure, which is under the bar for deciding on its own.",
+        r.confidence
+    ))
+}

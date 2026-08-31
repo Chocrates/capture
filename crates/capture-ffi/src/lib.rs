@@ -178,6 +178,33 @@ pub struct SyncReport {
     pub trouble: Option<String>,
 }
 
+/// A review session: what is offered, and what keeps slipping.
+#[derive(Debug, uniffi::Record)]
+pub struct Review {
+    pub items: Vec<Resurfaced>,
+    /// Notes that have lapsed repeatedly, by name.
+    ///
+    /// Named rather than counted, because "three things keep slipping" is not
+    /// something a person can act on and their names are.
+    pub nagging: Vec<String>,
+}
+
+/// One note offered for review.
+#[derive(Debug, uniffi::Record)]
+pub struct Resurfaced {
+    pub slug: String,
+    pub text: Option<String>,
+    /// Why this one: `forward`, `never-engaged` or `context`.
+    ///
+    /// Said out loud on every card. A resurfacing whose reason is invisible is
+    /// indistinguishable from a random one, and §2.7 removed the grade
+    /// precisely so that the schedule is not something to be second-guessed.
+    pub because: String,
+    /// What the archive thinks this might be, where it was unsure enough not
+    /// to have acted.
+    pub suggestion: Option<String>,
+}
+
 #[derive(Debug, uniffi::Record)]
 pub struct AgendaEntry {
     pub slug: String,
@@ -725,6 +752,61 @@ impl Archive {
         let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
         let grant = capture_store::pairing::accept_code(&self.paths, code.as_bytes(), &addr, now)?;
         Ok(named(&grant.pubkey))
+    }
+
+    /// Open a review session.
+    ///
+    /// Writes as well as reads: the archive records that these were offered,
+    /// which is what makes the interval expand. So opening one twice in a row
+    /// is not free, and the surface should open one when a person goes to
+    /// review rather than when they happen to land near it.
+    pub fn review(&self) -> Result<Review> {
+        let _writing = self.write_lock()?;
+        let now = jiff::Timestamp::now().as_millisecond().max(0);
+        let offered = capture_store::review::open(&self.paths, now)?;
+        Ok(Review {
+            items: offered
+                .items
+                .into_iter()
+                .map(|i| Resurfaced {
+                    slug: i.slug,
+                    text: i.text,
+                    because: match i.because {
+                        capture_store::review::Because::Forward => "forward".into(),
+                        capture_store::review::Because::Never => "never-engaged".into(),
+                        capture_store::review::Because::Context => "context".into(),
+                    },
+                    suggestion: i.suggestion,
+                })
+                .collect(),
+            nagging: offered.nagging,
+        })
+    }
+
+    /// What became of an offered note.
+    ///
+    /// `engaged` or `deferred`. Two, and not a grade — §2.7 removed the graded
+    /// outcome deliberately, and the reason bears repeating at every surface
+    /// that might be tempted to add one back: a permanent, repeating record of
+    /// memory failures, delivered on a schedule the person did not set, to
+    /// somebody whose stated difficulty is memory.
+    ///
+    /// `shown` is not accepted. That one is written by the archive when a
+    /// session is opened, and a surface able to write it could inflate an
+    /// interval without anybody having seen anything.
+    pub fn reviewed(&self, name: String, outcome: String) -> Result<()> {
+        let _writing = self.write_lock()?;
+        let outcome = match outcome.as_str() {
+            "engaged" => capture_core::body::Outcome::Engaged,
+            "deferred" => capture_core::body::Outcome::Deferred,
+            other => {
+                return Err(CaptureError::Refused {
+                    reason: format!("'{other}' is not an outcome a surface may record"),
+                });
+            }
+        };
+        capture_store::review::record(&self.paths, &name, outcome)?;
+        Ok(())
     }
 
     /// Carry out whatever has come due — redactions past their window,

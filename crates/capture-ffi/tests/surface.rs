@@ -471,3 +471,45 @@ fn the_address_offered_for_pairing_can_actually_be_dialled() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn a_review_session_is_offered_and_marked_as_offered() {
+    // Opening a session writes. The interval expands because the archive
+    // recorded that these were shown, so a surface that opened one on every
+    // navigation would push notes away without anybody having read them.
+    let root = scratch("review");
+    let a = Archive::open(root.clone()).unwrap();
+    for i in 0..3 {
+        a.capture(format!("something worth resurfacing {i}"))
+            .unwrap();
+    }
+
+    let first = a.review().unwrap();
+    assert!(!first.items.is_empty(), "fresh notes are offered");
+    for item in &first.items {
+        assert!(
+            ["forward", "never-engaged", "context"].contains(&item.because.as_str()),
+            "every card says why it is here, not just that it is: {}",
+            item.because,
+        );
+    }
+
+    // Nothing is graded. The only two a surface may record.
+    a.reviewed(first.items[0].slug.clone(), "engaged".into())
+        .unwrap();
+    a.reviewed(first.items[1].slug.clone(), "deferred".into())
+        .unwrap();
+
+    let refused = a.reviewed(first.items[2].slug.clone(), "forgotten".into());
+    assert!(refused.is_err(), "there is no grade to record");
+
+    // Not even the one the archive writes for itself: a surface able to write
+    // `shown` could spend a session nobody saw.
+    assert!(
+        a.reviewed(first.items[2].slug.clone(), "shown".into())
+            .is_err(),
+        "`shown` is the archive's to write"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

@@ -22,6 +22,7 @@
 //! multicast lock it must hold or receive nothing. Neither belongs here.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "mdns")]
 use std::time::Duration;
 
 use capture_core::roster::Roster;

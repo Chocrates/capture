@@ -442,7 +442,9 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
         // event out of a guess. Only offered where nothing was promoted: once a
         // note has a type, a competing reading is noise rather than an offer.
         let suggestion = match (&promotion, row.text.as_deref()) {
-            (None, Some(text)) => suggestion_for(text, row.tz.as_deref()),
+            (None, Some(text)) => {
+                capture_store::review::suggestion_for(text, row.tz.as_deref(), now_ms() as i64)
+            }
             _ => None,
         };
 
@@ -808,44 +810,6 @@ pub fn split_series(name: String, from: String, rule: String) -> std::result::Re
             .map(|_| ())
     })())
 }
-
-/// What the recognizer saw, when it was not sure enough to act.
-///
-/// Deliberately says how sure it was. A suggestion the reader cannot calibrate
-/// is one they either always take or always ignore, and §3.1.3 wants it to cost
-/// a glance either way.
-fn suggestion_for(text: &str, tz: Option<&str>) -> Option<String> {
-    let zone = tz
-        .and_then(capture_time::Zone::new)
-        .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
-
-    let r = capture_parse::recognize(text, now_ms() as i64, zone);
-    if r.confidence == 0 || r.confidence >= capture_store::promote::FLOOR {
-        return None;
-    }
-
-    let what = match &r.shape {
-        capture_parse::Shape::Task { due: None } => String::from("a task"),
-        capture_parse::Shape::Task { due: Some(d) } => format!("a task due {d}"),
-        capture_parse::Shape::Point(capture_parse::When::Date(d)) => format!("something on {d}"),
-        capture_parse::Shape::Point(capture_parse::When::Moment(ms)) => {
-            let (h, m) = capture_time::civil_clock(*ms, zone);
-            format!(
-                "something on {} at {h:02}:{m:02}",
-                capture_time::civil_date(*ms, zone)
-            )
-        }
-        capture_parse::Shape::Range { from, to } => format!("something from {from} to {to}"),
-        capture_parse::Shape::Recurring { .. } => String::from("something recurring"),
-        capture_parse::Shape::Nothing => return None,
-    };
-
-    Some(format!(
-        "This might be {what} — {}% sure, which is under the bar for deciding on its own.",
-        r.confidence
-    ))
-}
-
 /// Occurrences and one-off events on a day.
 #[tauri::command]
 pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
@@ -1418,52 +1382,39 @@ pub fn acknowledge_exports() -> std::result::Result<(), String> {
 #[tauri::command]
 pub fn review() -> std::result::Result<ReviewSession, String> {
     wire((|| {
-        let mut s = Session::open(paths()?)?;
-        let now = now_ms() as i64;
-        let chosen = capture_store::review::session(&s, now)?;
+        // Assembled in the store, because it is more than a query: it picks,
+        // reads, gathers what keeps lapsing, and records that the items were
+        // shown — in that order, so a failure to read cannot spend a session
+        // nobody saw. The phone runs the same sequence.
+        let offered = capture_store::review::open(&paths()?, now_ms() as i64)?;
 
-        let items: Vec<ReviewItem> = chosen
-            .iter()
-            .map(|i| ReviewItem {
-                slug: i.note.slug.clone(),
-                // Only where nothing was promoted: once a note has a type, a
-                // competing reading is noise rather than an offer.
-                suggestion: match (
-                    s.state.promotion_of(&i.note.tgt).ok().flatten(),
-                    i.note.text.as_deref(),
-                ) {
-                    (None, Some(text)) => suggestion_for(text, i.note.tz.as_deref()),
-                    _ => None,
-                },
-                text: i.note.text.clone(),
-                because: match i.because {
-                    capture_store::review::Because::Forward => "forward",
-                    capture_store::review::Because::Never => "never-engaged",
-                    capture_store::review::Because::Context => "context",
-                },
-            })
-            .collect();
-
-        let nagging = s
-            .state
-            .repeatedly_lapsed(now, 3)?
-            .into_iter()
-            .map(|tgt| {
-                Ok(Nagging {
-                    slug: s.state.slug_of(&tgt)?.unwrap_or_default(),
+        Ok(ReviewSession {
+            items: offered
+                .items
+                .into_iter()
+                .map(|i| ReviewItem {
+                    slug: i.slug,
+                    suggestion: i.suggestion,
+                    text: i.text,
+                    because: because(i.because),
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        // Written after everything above has succeeded, so a failure to read
-        // cannot spend a session nobody got to see — and in one commit, because
-        // five of them is a third of a second and the pane cannot draw until
-        // they are done.
-        let tgts: Vec<_> = chosen.iter().map(|i| i.note.tgt).collect();
-        capture_store::review::shown(&mut s, &tgts)?;
-
-        Ok(ReviewSession { items, nagging })
+                .collect(),
+            nagging: offered
+                .nagging
+                .into_iter()
+                .map(|slug| Nagging { slug })
+                .collect(),
+        })
     })())
+}
+
+/// Why a note was offered, as the window names it.
+fn because(b: capture_store::review::Because) -> &'static str {
+    match b {
+        capture_store::review::Because::Forward => "forward",
+        capture_store::review::Because::Never => "never-engaged",
+        capture_store::review::Because::Context => "context",
+    }
 }
 
 /// What became of one offered note.

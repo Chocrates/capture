@@ -14,6 +14,7 @@ import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
+import uniffi.capture_ffi.Resurfaced
 import uniffi.capture_ffi.Pending
 
 /** Which surface is showing. */
@@ -25,6 +26,7 @@ sealed interface Screen {
     data object Health : Screen
     data class Note(val name: String) : Screen
     data object Pairing : Screen
+    data object Review : Screen
 }
 
 /**
@@ -56,6 +58,10 @@ class Model(private val archive: Archive) : ViewModel() {
     var conditions by mutableStateOf<List<Condition>>(emptyList())
         private set
     var peers by mutableStateOf<List<Peer>>(emptyList())
+        private set
+    var offered by mutableStateOf<List<Resurfaced>>(emptyList())
+        private set
+    var nagging by mutableStateOf<List<String>>(emptyList())
         private set
     var note by mutableStateOf<NoteSummary?>(null)
         private set
@@ -91,6 +97,14 @@ class Model(private val archive: Archive) : ViewModel() {
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
+            // Opening a session writes — the archive records that these were
+            // offered, which is what expands the interval. So it happens when
+            // somebody goes to review, and not on every navigation past it.
+            is Screen.Review -> load {
+                val session = archive.review()
+                offered = session.items
+                nagging = session.nagging
+            }
         }
     }
 
@@ -187,6 +201,14 @@ class Model(private val archive: Archive) : ViewModel() {
                 PairingState.Failed(e.message ?: e.toString())
             }
         }
+    }
+
+    /** What became of an offered note. Two outcomes, and neither is a grade. */
+    fun reviewed(name: String, outcome: String) = load {
+        archive.reviewed(name, outcome)
+        // Taken off the list, because it has been answered. Not re-opened:
+        // that would spend another session.
+        offered = offered.filterNot { it.slug == name }
     }
 
     /** Where this device can be reached, for the other one to dial. */
