@@ -852,7 +852,7 @@ fn flagless(name: &str, rest: &[String], cmd: Command) -> Result<Command, Bad> {
 }
 
 /// The usage text.
-pub const USAGE: &str = r#"brain — capture first, organise later
+pub const USAGE: &str = r#"capture — capture first, organise later
 
 CAPTURE
   capture + <text>          store it, exactly as given

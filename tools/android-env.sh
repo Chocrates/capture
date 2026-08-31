@@ -38,7 +38,11 @@ note() { missing="${missing}  - $1\n"; }
 
 # --- the SDK -----------------------------------------------------------------
 
-for candidate in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "$HOME/Android/Sdk" "/usr/lib/android-sdk"; do
+# Expanded with `:-` throughout. A caller running under `set -u` — which any
+# careful script does — aborted here on the first unset variable, before this
+# file could report anything, which is the opposite of its whole purpose.
+SDK=""
+for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "/usr/lib/android-sdk"; do
     if [ -n "$candidate" ] && [ -d "$candidate/platform-tools" ]; then
         SDK="$candidate"
         break
