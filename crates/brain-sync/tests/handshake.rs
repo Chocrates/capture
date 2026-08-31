@@ -3,7 +3,7 @@
 //! Every one of these runs over `Pair` — two queues and no operating system.
 //! A suite that needs sockets gets marked ignored, and then it is not a suite.
 
-use brain_sync::session::{HandshakeError, MAX_PAYLOAD, Session};
+use brain_sync::session::{HandshakeError, MAX_PAYLOAD, REKEY_AFTER, Session};
 use brain_sync::transport::Pair;
 
 /// A device's static keypair, as the roster would hold it.
@@ -159,4 +159,44 @@ fn a_payload_too_large_for_one_message_is_refused() {
         a.send(&vec![0u8; MAX_PAYLOAD + 1]).is_err(),
         "a payload that cannot fit in a Noise message was accepted"
     );
+}
+
+/// A device catching up after a week off sends thousands of events and
+/// receives nothing back. If rekeying were driven by each side's own send
+/// count, the quiet side would never rotate its incoming key and the
+/// catch-up would die exactly at the rekey boundary — a failure that a
+/// short test never reaches and a real sync hits every time.
+#[test]
+fn a_long_one_way_transfer_survives_rekeying() {
+    let (a_sec, a_pub) = keypair(1);
+    let (b_sec, b_pub) = keypair(2);
+    let (a, b) = handshake(a_sec, b_pub, b_sec, a_pub);
+    let (mut a, mut b) = (a.unwrap(), b.unwrap());
+
+    for i in 0..(REKEY_AFTER * 2 + 1) {
+        let payload = i.to_le_bytes();
+        a.send(&payload).expect("send");
+        let got = b.recv().expect("recv").expect("a payload");
+        assert_eq!(got, payload, "message {i} did not survive the crossing");
+    }
+}
+
+/// And the same in both directions at once, since each direction keeps its
+/// own count and they must not interfere.
+#[test]
+fn rekeying_is_per_direction() {
+    let (a_sec, a_pub) = keypair(1);
+    let (b_sec, b_pub) = keypair(2);
+    let (a, b) = handshake(a_sec, b_pub, b_sec, a_pub);
+    let (mut a, mut b) = (a.unwrap(), b.unwrap());
+
+    // One direction crosses the boundary; the other stays well short of it.
+    for i in 0..(REKEY_AFTER + 5) {
+        a.send(&i.to_le_bytes()).expect("send");
+        assert_eq!(b.recv().expect("recv").expect("payload"), i.to_le_bytes());
+        if i % 1000 == 0 {
+            b.send(b"ack").expect("send");
+            assert_eq!(a.recv().expect("recv").expect("payload"), b"ack");
+        }
+    }
 }

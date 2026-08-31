@@ -6,10 +6,10 @@
 
 ## 2. Transport — Noise_KK
 
-- [ ] 2.1 Implement the handshake using the static keys already in the roster. No PKI, no certificates, no CA to operate on a device that may be off for a month.
-- [ ] 2.2 Implement framing at 65519 usable bytes, and rekeying on the standard interval so a long transfer cannot exhaust nonces.
-- [ ] 2.3 **Test that a non-member gets nothing**: no handshake, no message accepted, no change to the archive, and nothing learned beyond connection metadata.
-- [ ] 2.4 **Test the absolute**: no message of any type is sent or accepted outside an established session, and a failed handshake closes the connection rather than falling back. This is the rule violated by convenience, so it is tested rather than trusted.
+- [x] 2.1 Implement the handshake using the static keys already in the roster. No PKI, no certificates, no CA to operate on a device that may be off for a month.
+- [x] 2.2 Implement framing at 65519 usable bytes, and rekeying on the standard interval so a long transfer cannot exhaust nonces. **Done**: each direction is rekeyed by the count of messages in *that* direction — sender on send, receiver on recv. Driving both from a side's own send count looked symmetric and was not: a device catching up after a week off sends thousands and receives none, so the quiet side would never rotate its incoming key and the transfer would die at the boundary. Tested by a one-way transfer past it, which fails on the earlier version.
+- [x] 2.3 **Test that a non-member gets nothing**: no handshake, no message accepted, no change to the archive, and nothing learned beyond connection metadata.
+- [x] 2.4 **Test the absolute**: no message of any type is sent or accepted outside an established session, and a failed handshake closes the connection rather than falling back. This is the rule violated by convenience, so it is tested rather than trusted.
 
 ## 3. Discovery
 

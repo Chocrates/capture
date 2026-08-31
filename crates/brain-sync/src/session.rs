@@ -82,6 +82,7 @@ pub struct Session<T: Transport> {
     noise: snow::TransportState,
     inner: T,
     sent: u64,
+    recvd: u64,
 }
 
 impl<T: Transport> Session<T> {
@@ -155,6 +156,7 @@ impl<T: Transport> Session<T> {
                 .map_err(|_| HandshakeError::Refused)?,
             inner,
             sent: 0,
+            recvd: 0,
         })
     }
 
@@ -172,11 +174,12 @@ impl<T: Transport> Session<T> {
 
         self.sent += 1;
         if self.sent.is_multiple_of(REKEY_AFTER) {
-            // Both directions, because both sides count their own sends and a
-            // one-sided rekey would leave the peer decrypting with a key that
-            // has moved on.
+            // Only outgoing. Each direction is rotated by the count of
+            // messages in that direction, so the sender's outgoing and the
+            // receiver's incoming move together even when the traffic is
+            // entirely one-way — which, for a device catching up after a week
+            // off, it is.
             self.noise.rekey_outgoing();
-            self.noise.rekey_incoming();
         }
         Ok(())
     }
@@ -192,6 +195,11 @@ impl<T: Transport> Session<T> {
             .read_message(&frame, &mut out)
             .map_err(|_| TransportError::Malformed)?;
         out.truncate(n);
+
+        self.recvd += 1;
+        if self.recvd.is_multiple_of(REKEY_AFTER) {
+            self.noise.rekey_incoming();
+        }
         Ok(Some(out))
     }
 }
