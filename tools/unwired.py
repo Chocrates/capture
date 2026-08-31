@@ -12,10 +12,28 @@ The check is deliberately crude — names, not a call graph. A real call graph
 would need rustc's own resolution, and the crude version already finds the
 things that matter while staying something anybody can read and correct.
 
-What counts as a caller: a mention of the name anywhere in the workspace that
-is not the definition itself. Tests count as callers only for items the
-allowlist says are test-only on purpose; otherwise "used only by its own test"
-is precisely the state being looked for.
+What counts as a caller: a mention of the name in code — comments stripped —
+that is not itself a declaration. Tests count separately, because "used only
+by its own test" is precisely the state being looked for rather than a milder
+version of it.
+
+What it catches, verified by breaking each on purpose: an inherent method
+whose only call site is removed, a trait method whose only call site is
+removed, and a free function that nothing calls.
+
+What it misses, stated because a check whose limits are unknown gets trusted
+too far:
+
+  - Two functions sharing a name. A caller of either satisfies both, so both
+    are skipped and counted in the "not checked" line.
+  - A function whose name collides with a field, variable, or type. `cosign`
+    is both a command and a field of `ReadmitBody`, so the field keeps the
+    command looking reachable.
+  - Public types, constants, and enum variants. Only functions are examined.
+
+Fixing the first two properly needs rustc's own name resolution rather than a
+regex. That is worth doing if this ever stops earning its place; it found five
+real things on its first run, and none of them needed a call graph.
 """
 
 import re
@@ -49,6 +67,16 @@ DEF = re.compile(r"^\s*pub(?:\(crate\))?\s+fn\s+(\w+)")
 # not a caller either.
 CODE = re.compile(r"//.*$")
 
+# A trait declaration, and the methods inside it. `pub` is implied on a
+# trait's own methods and never written, so the ordinary pattern never saw
+# them.
+PUB_TRAIT = re.compile(r"^pub(?:\(crate\))?\s+trait\s+\w+")
+TRAIT_FN = re.compile(r"^\s*fn\s+(\w+)")
+
+# Any function declaration at all, public or not, including a trait
+# implementation's.
+ANY_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+
 # Names a crude scan cannot resolve, and why each is exempt. Anything here is
 # a claim somebody made in writing, which is the point of the file.
 def allowed():
@@ -78,16 +106,32 @@ def main() -> int:
     # which made the check pass while retirement was unreachable.
     defined: dict[tuple[str, bool], list[Path]] = {}
     for path in SOURCES:
+        # Depth is stored as column + 1, because a top-level `impl` or `trait`
+        # sits at column zero and zero is falsy — which silently disabled both
+        # of these until a trait method that plainly existed failed to appear.
         in_impl = 0
+        in_trait = 0
         for line in path.read_text().splitlines():
             stripped = line.strip()
             if stripped.startswith("impl ") or stripped.startswith("impl<"):
-                in_impl = line.index("impl")
-            elif in_impl and stripped == "}" and line.index("}") == in_impl:
+                in_impl = line.index("impl") + 1
+            elif in_impl and stripped == "}" and line.index("}") + 1 == in_impl:
                 in_impl = 0
+
+            # A trait's methods are public without saying so, which is why the
+            # first version of this missed them entirely — and a trait method
+            # nobody calls is exactly the shape of `Archive::owed_redactions`,
+            # which was declared, implemented, and unreachable.
+            if PUB_TRAIT.match(stripped):
+                in_trait = line.index("pub") + 1
+            elif in_trait and stripped == "}" and line.index("}") + 1 == in_trait:
+                in_trait = 0
+
             m = DEF.match(line)
+            if not m and in_trait:
+                m = TRAIT_FN.match(line)
             if m:
-                defined.setdefault((m.group(1), bool(in_impl)), []).append(path)
+                defined.setdefault((m.group(1), bool(in_impl or in_trait)), []).append(path)
 
     src = {p: p.read_text() for p in SOURCES}
     tests = {p: p.read_text() for p in CALLERS if p not in set(SOURCES)}
@@ -98,9 +142,14 @@ def main() -> int:
             for line in body.splitlines():
                 if name not in line:
                     continue
-                m = DEF.match(line)
-                if m and m.group(1) == name:
-                    continue  # the definition itself
+                # A declaration is not a caller, and neither is an
+                # implementation of one. `impl Archive for StoreArchive` names
+                # every method it implements, which made each of them look
+                # called by the very code that was supposed to be called *by*
+                # something else.
+                d = DEF.match(line) or ANY_FN.match(line)
+                if d and d.group(1) == name:
+                    continue
                 # Comments do not call anything. Counting them was the first
                 # version's mistake and it made the check useless on exactly
                 # the names it was written for: `retire` appears in a dozen
