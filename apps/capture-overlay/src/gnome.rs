@@ -69,35 +69,55 @@ pub trait Settings {
     /// The path is what identifies *our* entry. Trying to recognise it by its
     /// command instead is how the conflict check ends up asking whether our own
     /// command is ours — which it always is — and reporting nothing, ever.
-    fn existing_bindings(&self) -> Result<Vec<(String, String, String)>>;
+    /// Every custom keybinding, as `(path, name, binding, command)`.
+    fn existing_bindings(&self) -> Result<Vec<(String, String, String, String)>>;
 }
 
 /// Install the keybinding, replacing any earlier one of ours.
 pub fn register(s: &dyn Settings, chord: &Chord, command: &str) -> Result<Registration> {
     let binding = chord.gnome();
 
-    // Reported, not resolved. Taking a chord away from something the user
+    let existing = s.existing_bindings()?;
+
+    // Ours, under some earlier path — a rename, or an install that used a
+    // different binary name. Not something the user chose, and not something
+    // to warn about: two entries claiming one chord means the settings daemon
+    // grants the grab to one of them, and if it picks the stale one the chord
+    // silently does nothing. That is exactly what happened when this project
+    // was renamed, and the previous version *reported* it and then added the
+    // duplicate anyway.
+    let ours_elsewhere: Vec<String> = existing
+        .iter()
+        .filter(|(path, _, b, cmd)| *b == binding && path != OUR_PATH && is_ours(cmd))
+        .map(|(path, _, _, _)| path.clone())
+        .collect();
+
+    // Reported, not resolved. Taking a chord away from something the *user*
     // deliberately set would be worse than not registering: they would lose a
     // binding they rely on and be told nothing.
-    //
-    // Our own earlier registration is excluded by **path**, which is the only
-    // thing that reliably identifies it. An earlier version compared commands
-    // and got the direction wrong — it asked whether the command being
-    // registered was ours, which it always is, so no conflict was ever
-    // reported. The unit test passed because it supplied a command no real
-    // caller ever passes.
-    let conflict = s
-        .existing_bindings()?
-        .into_iter()
-        .find(|(path, _, b)| *b == binding && path != OUR_PATH)
-        .map(|(_, name, _)| name);
+    let conflict = existing
+        .iter()
+        .find(|(path, _, b, cmd)| *b == binding && path != OUR_PATH && !is_ours(cmd))
+        .map(|(_, name, _, _)| name.clone());
 
     let list = s.get(LIST_KEY)?;
-    let mut paths = parse_list(&list);
+    let mut paths: Vec<String> = parse_list(&list)
+        .into_iter()
+        .filter(|p| !ours_elsewhere.contains(p))
+        .collect();
     if !paths.iter().any(|p| p == OUR_PATH) {
         // Appending to what is there. Writing a fresh list would delete every
         // keybinding the user already had.
         paths.push(OUR_PATH.to_string());
+    }
+
+    // Written twice, empty in between, and this is not superstition. Removing
+    // an entry does not make the settings daemon re-take the grab for whoever
+    // is left: after the rename the stale binding was dropped from the list
+    // and the chord stayed dead until the list was cleared and rewritten. One
+    // extra write is cheap; a chord that does nothing is the whole product.
+    if !ours_elsewhere.is_empty() {
+        s.set(LIST_KEY, "[]")?;
     }
     s.set(LIST_KEY, &render_list(&paths))?;
 
@@ -121,6 +141,25 @@ pub fn unregister(s: &dyn Settings) -> Result<()> {
         .filter(|p| p != OUR_PATH)
         .collect();
     s.set(LIST_KEY, &render_list(&paths))
+}
+
+/// Whether a command is one of ours, under any name this project has had.
+///
+/// Matched on the binary's file name rather than the whole path, because the
+/// path differs between a system install and a build directory, and on the
+/// *set* of names because the point is to recognise a leftover from before a
+/// rename. `brain-capture` is here for exactly that reason and should stay
+/// until it is certain nobody has one.
+fn is_ours(command: &str) -> bool {
+    const NAMES: [&str; 2] = ["capture-overlay", "brain-capture"];
+    command
+        .split_whitespace()
+        .next()
+        .map(|bin| {
+            let file = bin.rsplit('/').next().unwrap_or(bin);
+            NAMES.contains(&file)
+        })
+        .unwrap_or(false)
 }
 
 /// Read GNOME's list-of-strings form: `['a', 'b']`.
@@ -185,7 +224,7 @@ impl Settings for Gsettings {
         Ok(())
     }
 
-    fn existing_bindings(&self) -> Result<Vec<(String, String, String)>> {
+    fn existing_bindings(&self) -> Result<Vec<(String, String, String, String)>> {
         // Only the custom ones. GNOME's built-in shortcuts live across dozens of
         // schemas, and enumerating them all to report a conflict would be slow
         // and still incomplete — the confirmation step is what actually proves
@@ -203,8 +242,13 @@ impl Settings for Gsettings {
                 .unwrap_or_default()
                 .trim_matches('\'')
                 .to_string();
+            let command = self
+                .get(&format!("{entry} command"))
+                .unwrap_or_default()
+                .trim_matches('\'')
+                .to_string();
             if !binding.is_empty() {
-                out.push((path, name, binding));
+                out.push((path, name, binding, command));
             }
         }
         Ok(out)
@@ -222,10 +266,27 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         values: RefCell<BTreeMap<String, String>>,
-        existing: Vec<(String, String, String)>,
+        existing: Vec<(String, String, String, String)>,
+        /// Every write, in order.
+        ///
+        /// The map alone keeps only the last value per key, which cannot see
+        /// an intermediate write — and one of those is load-bearing here: the
+        /// list is cleared before being rewritten so the settings daemon
+        /// re-takes the grab.
+        writes: RefCell<Vec<(String, String)>>,
     }
 
     impl Fake {
+        /// Every value written to one key, in order.
+        fn writes_to(&self, key: &str) -> Vec<String> {
+            self.writes
+                .borrow()
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+
         fn with(list: &str) -> Fake {
             let f = Fake::default();
             f.values
@@ -243,12 +304,15 @@ mod tests {
             Ok(self.values.borrow().get(key).cloned().unwrap_or_default())
         }
         fn set(&self, key: &str, value: &str) -> Result<()> {
+            self.writes
+                .borrow_mut()
+                .push((key.to_string(), value.to_string()));
             self.values
                 .borrow_mut()
                 .insert(key.to_string(), value.to_string());
             Ok(())
         }
-        fn existing_bindings(&self) -> Result<Vec<(String, String, String)>> {
+        fn existing_bindings(&self) -> Result<Vec<(String, String, String, String)>> {
             Ok(self.existing.clone())
         }
     }
@@ -303,6 +367,7 @@ mod tests {
             "/org/gnome/…/custom0/".into(),
             "screenshot".into(),
             DEFAULT_CHORD.gnome(),
+            "gnome-screenshot".into(),
         )];
         // The command a real caller passes: our own. An earlier version
         // excluded conflicts whenever the command looked like ours, which made
@@ -315,9 +380,87 @@ mod tests {
     #[test]
     fn our_own_earlier_registration_is_not_a_conflict() {
         let mut f = Fake::with("@as []");
-        f.existing = vec![(OUR_PATH.into(), "capture".into(), DEFAULT_CHORD.gnome())];
+        f.existing = vec![(
+            OUR_PATH.into(),
+            "capture".into(),
+            DEFAULT_CHORD.gnome(),
+            "capture-overlay --show".into(),
+        )];
         let r = register(&f, &DEFAULT_CHORD, "capture-overlay --show").unwrap();
         assert_eq!(r.conflict, None, "our own entry is not a conflict");
+    }
+
+    #[test]
+    fn a_leftover_of_ours_under_an_old_name_is_reclaimed() {
+        // What the rename to `capture` actually produced: a binding on our
+        // chord pointing at `brain-capture`, a binary that no longer exists.
+        // The previous version reported it as a conflict and then added a
+        // second entry anyway — so two entries claimed one chord, the settings
+        // daemon granted the grab to the stale one, and pressing the chord did
+        // nothing at all.
+        //
+        // It is not a conflict. It is ours, and it is dead.
+        let mut f = Fake::with("['/org/gnome/…/custom-keybindings/brain-capture/']");
+        f.existing = vec![(
+            "/org/gnome/…/custom-keybindings/brain-capture/".into(),
+            "brain capture".into(),
+            DEFAULT_CHORD.gnome(),
+            "/home/someone/.local/bin/brain-capture --show".into(),
+        )];
+
+        let r = register(&f, &DEFAULT_CHORD, "capture-overlay --show").unwrap();
+
+        assert_eq!(r.conflict, None, "our own leftover is not a conflict");
+        let list = f.get(LIST_KEY).unwrap();
+        assert!(
+            !list.contains("brain-capture"),
+            "the dead binding is still claiming the chord: {list}"
+        );
+        assert!(list.contains(OUR_PATH), "ours was not registered: {list}");
+    }
+
+    #[test]
+    fn reclaiming_forces_the_grab_to_be_retaken() {
+        // Dropping an entry does not make the settings daemon re-grab for
+        // whoever is left. After the rename the stale binding was removed and
+        // the chord stayed dead until the list was cleared and rewritten, so
+        // the list is written empty first whenever something was reclaimed.
+        let mut f = Fake::with("['/org/gnome/…/custom-keybindings/brain-capture/']");
+        f.existing = vec![(
+            "/org/gnome/…/custom-keybindings/brain-capture/".into(),
+            "brain capture".into(),
+            DEFAULT_CHORD.gnome(),
+            "brain-capture --show".into(),
+        )];
+
+        register(&f, &DEFAULT_CHORD, "capture-overlay --show").unwrap();
+
+        assert!(
+            f.writes_to(LIST_KEY).contains(&"[]".to_string()),
+            "the list was never cleared, so the grab is never retaken: {:?}",
+            f.writes_to(LIST_KEY)
+        );
+    }
+
+    #[test]
+    fn a_users_own_binding_on_our_chord_is_left_alone() {
+        // The distinction that matters: reclaiming ours must not become
+        // taking anybody's.
+        let mut f = Fake::with("['/org/gnome/…/custom0/']");
+        f.existing = vec![(
+            "/org/gnome/…/custom0/".into(),
+            "screenshot".into(),
+            DEFAULT_CHORD.gnome(),
+            "gnome-screenshot --interactive".into(),
+        )];
+
+        let r = register(&f, &DEFAULT_CHORD, "capture-overlay --show").unwrap();
+
+        assert_eq!(r.conflict.as_deref(), Some("screenshot"));
+        assert!(
+            f.get(LIST_KEY).unwrap().contains("custom0"),
+            "a binding the user set was taken away"
+        );
     }
 
     #[test]
