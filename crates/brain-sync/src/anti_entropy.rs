@@ -19,7 +19,9 @@ use alloc::vec::Vec;
 
 use brain_core::envelope::Envelope;
 
-use crate::message::{Message, VersionVector};
+use alloc::collections::BTreeSet;
+
+use crate::message::{Message, Seal, VersionVector};
 use crate::session::Session;
 use crate::transport::{Transport, TransportError};
 
@@ -92,7 +94,26 @@ pub const FANOUT: usize = 3;
 /// implementation in the tests rather than a direct call into `brain-store`.
 pub trait Archive {
     /// One sequence number per origin, gap-free.
+    ///
+    /// Sealed origins are in here too. Leaving them out is the mistake §5.5
+    /// names: a newcomer would ask nothing about them, receive none of their
+    /// events, and report agreement with every peer.
     fn heads(&self) -> VersionVector;
+
+    /// Origins that will never author again, and the roster each was sealed
+    /// against.
+    ///
+    /// Empty by default, because a replica that seals nothing is correct and
+    /// merely does more work.
+    fn sealed(&self) -> Vec<Seal> {
+        Vec::new()
+    }
+
+    /// A digest of this replica's current roster, for comparing against the
+    /// one a seal names.
+    fn roster_digest(&self) -> [u8; 32] {
+        [0u8; 32]
+    }
 
     /// Every event this origin authored in the range, in sequence order.
     fn range(&self, dev: &str, from: u64, to: u64) -> Vec<Envelope>;
@@ -139,24 +160,47 @@ pub fn exchange<T: Transport, A: Archive>(
     archive: &mut A,
 ) -> Result<Exchanged, TransportError> {
     let mine = archive.heads();
+    let my_seals = archive.sealed();
+    debug_assert!(
+        my_seals.iter().all(|s| mine.contains_key(&s.dev)),
+        "a sealed origin is missing from the version vector, which is the \
+         completeness-oracle failure in §5.5: a newcomer asks nothing about \
+         it, receives none of its events, and reports agreement with every \
+         peer"
+    );
     send(
         session,
         &Message::Hello {
             v: crate::message::PROTOCOL_VERSION,
             vv: mine.clone(),
             partial: false,
+            sealed: if my_seals.is_empty() {
+                None
+            } else {
+                Some(my_seals.clone())
+            },
         },
     )?;
 
-    let theirs = match decode(&session.recv_blocking()?) {
-        Some(Message::Hello { vv, .. }) => vv,
+    let (theirs, their_seals) = match decode(&session.recv_blocking()?) {
+        Some(Message::Hello { vv, sealed, .. }) => (vv, sealed.unwrap_or_default()),
         // Anything else here is a peer speaking a protocol this build does not
         // know. There is nothing to negotiate down to, so the round is simply
         // over.
         _ => return Err(TransportError::Malformed),
     };
 
+    // A sealed origin both sides agree on is settled, and settled for ever:
+    // no event can ever be added to it. Skipping it is the only thing sealing
+    // actually saves, and it saves nothing on a first sync — which is correct,
+    // because a first sync is exactly when the events are needed.
+    let settled = agreed(&my_seals, &their_seals, archive.roster_digest());
     for ask in wanted(&mine, &theirs) {
+        if let Message::Range { dev, .. } = &ask
+            && settled.contains(dev.as_str())
+        {
+            continue;
+        }
         send(session, &ask)?;
     }
     send(session, &Message::Asked)?;
@@ -204,6 +248,30 @@ pub fn exchange<T: Transport, A: Archive>(
     }
 
     Ok(out)
+}
+
+/// Origins both sides have sealed identically, under a roster both agree is
+/// current.
+///
+/// A seal computed against a different roster is ignored rather than trusted:
+/// the roster is concurrently mutable, and a seal computed while a device was
+/// being admitted may not account for what that device holds. Ignoring it
+/// costs a diff and cannot lose an event, which is the right direction for
+/// the two to fail in.
+fn agreed<'a>(mine: &'a [Seal], theirs: &'a [Seal], roster: [u8; 32]) -> BTreeSet<&'a str> {
+    let mut out = BTreeSet::new();
+    for m in mine {
+        if m.roster != roster {
+            continue;
+        }
+        if theirs
+            .iter()
+            .any(|t| t.dev == m.dev && t.seq == m.seq && t.last == m.last && t.roster == roster)
+        {
+            out.insert(m.dev.as_str());
+        }
+    }
+    out
 }
 
 fn send<T: Transport>(s: &mut Session<T>, m: &Message) -> Result<(), TransportError> {

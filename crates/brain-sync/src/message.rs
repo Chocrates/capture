@@ -33,6 +33,48 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// over two of these (§5.5).
 pub type VersionVector = BTreeMap<String, u64>;
 
+/// An origin that will never author again, and where it ended.
+///
+/// The entry is kept **for ever**, and that is the whole point of it. If a
+/// retired origin simply vanished from the vector, a newly paired device
+/// asking "what am I missing" would get no answer for it, silently receive
+/// none of its events, and report agreement with every peer. After two
+/// reinstalls a fresh device holds a fraction of the archive and believes it
+/// is complete — and worse, an unreachable redaction can be bypassed, because
+/// a returning old replica hands over content whose destroying `redact` lived
+/// in a stream the new device never received.
+///
+/// What sealing saves is the live reconciliation work, not the entry: a
+/// sealed origin is never diffed again once both sides show the same final
+/// id, and a device holding it can answer a newcomer in one range. The honest
+/// cost is roughly forty bytes per retired origin, permanently — a few
+/// kilobytes over a lifetime for one person. An earlier draft claimed the
+/// vector collapsed to "live devices plus a constant", which was wrong, and
+/// this correction is cheaper than the bug it prevents.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct Seal {
+    /// The origin, in hex.
+    #[n(0)]
+    pub dev: String,
+    /// Its final sequence number.
+    #[n(1)]
+    pub seq: u64,
+    /// Its final event's id, so two replicas can agree they hold the same
+    /// ending rather than merely the same count.
+    #[n(2)]
+    pub last: EventId,
+    /// A digest of the roster this seal was computed against.
+    ///
+    /// The roster is a concurrently-mutable set, so a seal computed while a
+    /// device was being admitted may not account for what that device holds.
+    /// A seal is therefore honoured only by replicas that agree the roster is
+    /// current; where they do not, the origin is treated as live and diffed
+    /// normally. That costs a little work and cannot lose an event, which is
+    /// the right direction for the two to fail in.
+    #[cbor(n(3), with = "minicbor::bytes")]
+    pub roster: [u8; 32],
+}
+
 /// One message.
 ///
 /// The variants are numbered and the numbers are permanent.
@@ -57,6 +99,13 @@ pub enum Message {
         /// a new device.
         #[n(2)]
         partial: bool,
+        /// Origins that are finished, and where they stopped.
+        ///
+        /// A trailing field, so a peer running a build that predates sealing
+        /// reads the rest of the Hello and simply treats every origin as
+        /// live — which is correct, only slower.
+        #[n(3)]
+        sealed: Option<Vec<Seal>>,
     },
 
     /// Send me this origin's events from `from` to `to`, inclusive.
@@ -146,6 +195,7 @@ mod tests {
                 v: PROTOCOL_VERSION,
                 vv: vv.clone(),
                 partial: false,
+                sealed: None,
             },
             Message::Range {
                 dev: String::from("aa"),
@@ -175,6 +225,7 @@ mod tests {
             v: PROTOCOL_VERSION,
             vv: vv.clone(),
             partial: false,
+            sealed: None,
         };
         match roundtrip(&m) {
             Message::Hello { vv: back, .. } => assert_eq!(back, vv),
@@ -190,6 +241,7 @@ mod tests {
             v: PROTOCOL_VERSION,
             vv: VersionVector::new(),
             partial: true,
+            sealed: None,
         };
         match roundtrip(&m) {
             Message::Hello { partial, .. } => assert!(partial),

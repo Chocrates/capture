@@ -16,6 +16,10 @@ use brain_sync::transport::Pair;
 
 #[derive(Default)]
 struct Replica {
+    /// Origins this replica considers finished.
+    seals: Vec<brain_sync::message::Seal>,
+    /// What it thinks the roster is.
+    roster: [u8; 32],
     /// Origin, in hex, to that origin's events by sequence number.
     held: BTreeMap<String, BTreeMap<u64, Envelope>>,
     /// Events this replica refuses, by id, to model ingest rejecting one.
@@ -48,6 +52,14 @@ impl Replica {
 }
 
 impl Archive for Replica {
+    fn sealed(&self) -> Vec<brain_sync::message::Seal> {
+        self.seals.clone()
+    }
+
+    fn roster_digest(&self) -> [u8; 32] {
+        self.roster
+    }
+
     fn heads(&self) -> VersionVector {
         self.held
             .iter()
@@ -211,4 +223,135 @@ fn a_replica_starting_from_nothing_gets_everything() {
 
     assert_eq!(fresh.count(), events.len());
     assert_eq!(fresh.heads(), full.heads());
+}
+
+// ---------------------------------------------------------------- sealing ----
+
+fn seal(
+    dev: &str,
+    seq: u64,
+    last: brain_core::EventId,
+    roster: [u8; 32],
+) -> brain_sync::message::Seal {
+    brain_sync::message::Seal {
+        dev: dev.into(),
+        seq,
+        last,
+        roster,
+    }
+}
+
+#[test]
+fn a_newly_paired_device_still_receives_a_sealed_origins_events() {
+    // The completeness oracle, tested directly. If a sealed origin dropped out
+    // of the vector, this device would ask nothing about it, receive none of
+    // its events, and report agreement with every peer — holding a fraction of
+    // the archive while believing it complete. The failure is silent and only
+    // shows up after two reinstalls, which is why it is asserted rather than
+    // reasoned about.
+    let (retired, events) = origin(1, 5);
+    let dev = hex(&retired.dev().0);
+    let last = events.last().unwrap();
+
+    let mut full = Replica::with(&events);
+    full.seals = vec![seal(&dev, last.header.seq, last.header.id(), [7; 32])];
+    full.roster = [7; 32];
+
+    // The invariant the oracle rests on, asserted where it can be seen: a
+    // sealed origin is still *in* the vector. The entry is what makes the
+    // origin discoverable; sealing only means nothing further will be added
+    // to it.
+    assert_eq!(
+        full.heads().get(&dev).copied(),
+        Some(last.header.seq),
+        "the sealed origin dropped out of the version vector"
+    );
+
+    let mut newcomer = Replica {
+        roster: [7; 32],
+        ..Default::default()
+    };
+
+    sync(&mut newcomer, &mut full);
+
+    assert_eq!(
+        newcomer.count(),
+        events.len(),
+        "a newly paired device received nothing for a sealed origin and would report itself complete"
+    );
+}
+
+#[test]
+fn a_sealed_origin_both_sides_agree_on_is_not_diffed_again() {
+    // What sealing actually saves. Both hold the same ending, so there is
+    // nothing to discover and no reason to look.
+    let (retired, events) = origin(1, 4);
+    let dev = hex(&retired.dev().0);
+    let last = events.last().unwrap();
+    let s = seal(&dev, last.header.seq, last.header.id(), [7; 32]);
+
+    let mut a = Replica::with(&events);
+    let mut b = Replica::with(&events[..2]);
+    a.seals = vec![s.clone()];
+    b.seals = vec![s];
+    a.roster = [7; 32];
+    b.roster = [7; 32];
+
+    let (theirs, _) = sync(&mut b, &mut a);
+
+    assert_eq!(theirs.received, 0, "a settled origin was reconciled anyway");
+}
+
+#[test]
+fn a_seal_from_a_different_roster_is_ignored() {
+    // The roster is concurrently mutable, so a seal computed while a device
+    // was being admitted may not account for what that device holds. Ignoring
+    // it costs a diff and cannot lose an event, which is the direction the two
+    // should fail in.
+    let (retired, events) = origin(1, 4);
+    let dev = hex(&retired.dev().0);
+    let last = events.last().unwrap();
+
+    let mut a = Replica::with(&events);
+    let mut b = Replica::with(&events[..2]);
+    a.seals = vec![seal(&dev, last.header.seq, last.header.id(), [7; 32])];
+    b.seals = vec![seal(&dev, last.header.seq, last.header.id(), [7; 32])];
+    a.roster = [7; 32];
+    // The device that is behind has since admitted someone, and no longer
+    // agrees the sealed roster is current.
+    b.roster = [8; 32];
+
+    sync(&mut b, &mut a);
+
+    assert_eq!(
+        b.count(),
+        events.len(),
+        "a seal was honoured across a roster the two sides did not agree on"
+    );
+}
+
+#[test]
+fn seals_that_disagree_about_the_ending_are_not_honoured() {
+    // Same origin, same sequence number, different final event. One of the two
+    // is holding something the other is not, and that is exactly when a diff
+    // must happen rather than be skipped.
+    let (retired, events) = origin(1, 4);
+    let dev = hex(&retired.dev().0);
+    let last = events.last().unwrap();
+
+    let mut a = Replica::with(&events);
+    let mut b = Replica::with(&events[..2]);
+    a.seals = vec![seal(&dev, last.header.seq, last.header.id(), [7; 32])];
+    b.seals = vec![seal(
+        &dev,
+        last.header.seq,
+        brain_core::EventId([0xEE; 32]),
+        [7; 32],
+    )];
+    a.roster = [7; 32];
+    b.roster = [7; 32];
+
+    sync(&mut b, &mut a);
+
+    assert_eq!(b.count(), events.len());
 }

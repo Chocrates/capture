@@ -36,6 +36,7 @@ fn hello_encodes_the_same_way_for_ever() {
         v: PROTOCOL_VERSION,
         vv,
         partial: false,
+        sealed: None,
     };
     assert_eq!(
         hex(&encoded(&m)),
@@ -91,6 +92,7 @@ fn the_variant_numbers_are_the_ones_recorded() {
                 v: PROTOCOL_VERSION,
                 vv: VersionVector::new(),
                 partial: false,
+                sealed: None,
             },
             0u8,
         ),
@@ -130,6 +132,7 @@ fn the_protocol_version_is_on_the_wire() {
         v: PROTOCOL_VERSION,
         vv: VersionVector::new(),
         partial: false,
+        sealed: None,
     };
     match minicbor::decode::<Message>(&encoded(&m)).unwrap() {
         Message::Hello { v, .. } => assert_eq!(v, PROTOCOL_VERSION),
@@ -207,4 +210,44 @@ fn a_grant_without_a_secret_encodes_the_same_way_for_ever() {
         // Anything added after `secret` must therefore tolerate its absence.
         "83582044444444444444444444444444444444444444444444444444444444444444445820555555555555555555555555555555555555555555555555555555555555555580"
     );
+}
+
+/// A Hello carrying seals, and one without.
+///
+/// The pair matters: a build that predates sealing must be able to read a
+/// Hello from one that does not, and the absence of the field has to be
+/// distinguishable from an empty list — "I seal nothing" and "I do not know
+/// what sealing is" are the same behaviour but not the same statement.
+#[test]
+fn a_hello_with_seals_encodes_the_same_way_for_ever() {
+    let mut vv = VersionVector::new();
+    vv.insert(String::from("aa"), 41822);
+
+    let m = Message::Hello {
+        v: PROTOCOL_VERSION,
+        vv: vv.clone(),
+        partial: false,
+        sealed: Some(vec![brain_sync::message::Seal {
+            dev: String::from("bb"),
+            seq: 9310,
+            last: EventId([0x11; 32]),
+            roster: [0x22; 32],
+        }]),
+    };
+    assert_eq!(
+        hex(&encoded(&m)),
+        // Hello (variant 0) · array(4): v · vv as a map · partial=false ·
+        // seals: array(1) of [dev, seq, last(32), roster(32)].
+        "82008401a162616119a35ef4818462626219245e5820111111111111111111111111111111111111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222"
+    );
+
+    // And the same Hello without: one array element shorter, because minicbor
+    // elides a trailing None.
+    let plain = Message::Hello {
+        v: PROTOCOL_VERSION,
+        vv,
+        partial: false,
+        sealed: None,
+    };
+    assert!(encoded(&plain).len() < encoded(&m).len());
 }
