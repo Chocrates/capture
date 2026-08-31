@@ -7,6 +7,24 @@
 
 use capture_ffi::{Archive, Captured};
 
+use capture_store::pairing::PORT as PAIRING_PORT;
+
+/// Every `setting` event in an archive's log, as `key=value`.
+///
+/// Read from the log rather than through a surface, because the surface is
+/// the thing that would be wrong. A setting the projection had not folded yet
+/// would look, through any reader, exactly like a setting nobody wrote.
+fn settings_written(root: &str) -> Vec<String> {
+    let paths = capture_store::paths::StorePaths::under(std::path::Path::new(root));
+    let log = capture_store::log::Log::open_read(&paths.events).unwrap();
+    log.all()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.header.kind == capture_core::event::Kind::SETTING)
+        .map(|e| format!("{:?}", e.header.kind))
+        .collect()
+}
+
 fn scratch(name: &str) -> String {
     let d = std::env::temp_dir().join(format!(
         "capture-ffi-{name}-{}-{:?}",
@@ -358,4 +376,72 @@ fn health_says_nothing_about_a_healthy_archive() {
     assert!(a.health().unwrap().is_empty());
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn pairing_two_devices_writes_no_setting() {
+    // §8.9, and an earlier draft of the design got this exactly wrong.
+    //
+    // Pairing is a person connecting two devices. It is not a person expressing
+    // a preference about anything, and if the act of pairing authored settings
+    // then an archive could never afterwards distinguish what somebody chose
+    // from what the software assumed on their behalf — which is the whole
+    // distinction §8.9 exists to keep.
+    //
+    // The temptation is real and specific: the first phone to join is an
+    // obvious notifier, and writing that down here would save a person one
+    // decision. It would also mean their notifier was chosen by the order they
+    // happened to pair things in.
+    let one = scratch("pair-a");
+    let two = scratch("pair-b");
+    let a = Archive::open(one.clone()).unwrap();
+    let b = Archive::open(two.clone()).unwrap();
+
+    let offer = a.offer_pairing().unwrap();
+    let code = offer.code();
+    assert_eq!(code.len(), 6, "six digits, as the desktop shows");
+
+    let joiner = std::thread::spawn(move || {
+        // A short wait so the listener is certainly accepting. The window is
+        // three minutes; this is not a race the test can lose quietly.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        b.join_with_code(format!("127.0.0.1:{}", PAIRING_PORT), code)
+            .unwrap();
+        b
+    });
+
+    offer
+        .wait()
+        .expect("a device joined before the window closed");
+    let b = joiner.join().expect("the joining side did not panic");
+
+    for (which, root) in [("the offering device", &one), ("the joining device", &two)] {
+        assert!(
+            settings_written(root).is_empty(),
+            "{which} authored settings by pairing: {:?}",
+            settings_written(root)
+        );
+    }
+
+    // And it did pair: this is not passing because nothing happened.
+    assert_eq!(
+        a.peers().unwrap().len(),
+        1,
+        "the offering device knows one peer"
+    );
+    assert_eq!(b.peers().unwrap().len(), 1, "and so does the joining one");
+
+    // And the instrument works. An assertion that a log contains no events of
+    // some kind passes just as cheerfully when the reader is broken, and this
+    // is the only way to tell those apart.
+    let paths = capture_store::paths::StorePaths::under(std::path::Path::new(&one));
+    capture_store::mutate::set_setting(&paths, "timeline.limit", Some("50")).unwrap();
+    assert_eq!(
+        settings_written(&one).len(),
+        1,
+        "a setting that was written is seen; so the emptiness above meant something"
+    );
+
+    std::fs::remove_dir_all(&one).ok();
+    std::fs::remove_dir_all(&two).ok();
 }

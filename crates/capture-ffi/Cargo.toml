@@ -13,12 +13,20 @@ crate-type = ["cdylib", "rlib"]
 name = "capture_ffi"
 
 [dependencies]
-capture-store = { path = "../capture-store" }
+# With the network. This is the only consumer that has no daemon beside it:
+# on Android there is no resident process to sync, so the round runs here.
+capture-store = { path = "../capture-store", features = ["mdns"] }
 capture-core = { path = "../capture-core", features = ["std"] }
 capture-time = { path = "../capture-time" }
 uniffi = { workspace = true, features = ["cli"] }
 thiserror = { workspace = true }
 jiff = { workspace = true }
+
+[dev-dependencies]
+# To read the log directly. A test that pairing wrote no `setting` has to look
+# at the events, not at the surface — the surface is what would be wrong.
+capture-store = { path = "../capture-store", features = ["mdns"] }
+capture-core = { path = "../capture-core", features = ["std"] }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"] }

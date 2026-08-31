@@ -22,6 +22,7 @@
 //! multicast lock it must hold or receive nothing. Neither belongs here.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use capture_core::roster::Roster;
 use capture_sync::anti_entropy::{Exchanged, exchange};
@@ -396,4 +397,81 @@ pub fn short(k: &[u8; 32]) -> String {
 
 pub fn now() -> u64 {
     jiff::Timestamp::now().as_millisecond().max(0) as u64
+}
+
+/// One bounded round, for a caller that is about to be killed.
+///
+/// The daemon runs until stopped and can afford a listener that lives as long
+/// as the process. A phone cannot: sync happens inside a `WorkManager` job
+/// that is handed a few seconds, and anything still running when the window
+/// closes is destroyed mid-sentence. So the window is the parameter.
+///
+/// It listens as well as dials for the length of it. A device that only ever
+/// dialled would be unreachable to a peer that woke first, and two devices
+/// that are both only-dialling reach each other only by coincidence of
+/// timing.
+///
+/// Best-effort throughout. A round that reached nobody is not an error — it is
+/// the ordinary result of being the only device awake — and reporting it as
+/// one would train a person to ignore the report.
+#[cfg(feature = "mdns")]
+pub fn bounded(paths: &StorePaths, identity: &Identity, window: Duration) -> Result<Report> {
+    let deadline = std::time::Instant::now() + window;
+    let port = discovery::sync_port();
+
+    // Bound first. A peer that finds the advertisement immediately and dials
+    // before the socket exists gets a refusal, and then backs off — the cost
+    // of which lands on the next round rather than this one.
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).map_err(Error::Io)?;
+    listener.set_nonblocking(true).map_err(Error::Io)?;
+
+    let mut beacon = Beacon::new().ok();
+    let multicast = beacon.is_some();
+
+    let mut report = Report {
+        multicast,
+        ..Default::default()
+    };
+
+    // Advertise and dial. Whether this found anybody is in the peer records
+    // `tick` writes, which is where the surfaces read it from anyway.
+    let round = now() / 1000;
+    if let Err(e) = tick(paths, identity, &mut beacon, round, port) {
+        report.trouble = Some(e.to_string());
+    }
+
+    // Then answer, for whatever is left of the window. Sleeping between polls
+    // rather than blocking on accept: a blocking accept with no peer is a
+    // thread that has to be interrupted to stop, and the interruption is the
+    // part that goes wrong when the platform is killing the process anyway.
+    while std::time::Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => match answer(paths, identity, stream) {
+                Ok(()) => report.answered += 1,
+                Err(e) => report.trouble = Some(e.to_string()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => return Err(Error::Io(e)),
+        }
+    }
+
+    Ok(report)
+}
+
+/// What one bounded round managed.
+#[derive(Debug, Default, Clone)]
+pub struct Report {
+    /// Whether a responder could be opened at all.
+    ///
+    /// On Android this is false when the multicast lock was not held, and that
+    /// is worth saying: multicast receive then produces no packets and no
+    /// error, so discovery looks like it ran and found an empty network.
+    pub multicast: bool,
+    /// Peers that dialled this device during the window.
+    pub answered: u32,
+    /// The last thing that went wrong, if anything did. Not a failure of the
+    /// round: a peer that refused is one peer.
+    pub trouble: Option<String>,
 }

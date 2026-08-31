@@ -145,6 +145,39 @@ pub struct Pending {
     pub at: String,
 }
 
+/// A device this archive knows about.
+#[derive(Debug, uniffi::Record)]
+pub struct Peer {
+    /// The first bytes of its key, which is how every surface names a device.
+    pub key: String,
+    /// A remembered address, where one is known. Absent is not a fault: a peer
+    /// that only ever dials in is demonstrably alive and has no address here,
+    /// because the port it called from was ephemeral.
+    pub addr: Option<String>,
+    /// When it was last reached, rendered. Never as "fresh" or "stale" —
+    /// §6.6, and it matters most on the device that sleeps most: a phone that
+    /// implied currency after four hours in a pocket would be lying in the
+    /// direction people act on.
+    pub last_seen: Option<String>,
+    /// Consecutive failed dials.
+    pub missed: u32,
+}
+
+/// What one sync round managed.
+#[derive(Debug, uniffi::Record)]
+pub struct SyncReport {
+    /// Whether a responder could be opened.
+    ///
+    /// False on Android means the multicast lock was not held, and that is the
+    /// trap worth naming: multicast receive then yields no packets and no
+    /// error, so discovery looks like it ran against an empty network.
+    pub multicast: bool,
+    /// Peers that dialled this device during the window.
+    pub answered: u32,
+    /// The last thing that went wrong, if anything did.
+    pub trouble: Option<String>,
+}
+
 #[derive(Debug, uniffi::Record)]
 pub struct AgendaEntry {
     pub slug: String,
@@ -573,6 +606,105 @@ impl Archive {
         Ok(capture_store::promote::set_done(&self.paths, &name, done)?)
     }
 
+    /// Run one sync round, for at most this many seconds.
+    ///
+    /// The window is a parameter because the caller is about to be killed.
+    /// Android runs this inside a job with a budget, and anything still going
+    /// when the budget ends is destroyed mid-sentence rather than wound up.
+    ///
+    /// Blocking, and meant to be: the caller is a background worker whose
+    /// whole purpose is to wait for this.
+    ///
+    /// Reaching nobody is not an error. It is the ordinary result of being the
+    /// only device awake, and reporting it as a failure would teach a person
+    /// to ignore the report.
+    pub fn sync(&self, seconds: u32) -> Result<SyncReport> {
+        let identity = capture_store::store::open(&self.paths)?;
+        let r = capture_store::round::bounded(
+            &self.paths,
+            &identity,
+            std::time::Duration::from_secs(seconds.clamp(1, 120) as u64),
+        )?;
+        Ok(SyncReport {
+            multicast: r.multicast,
+            answered: r.answered,
+            trouble: r.trouble,
+        })
+    }
+
+    /// Every device this archive knows to talk to.
+    ///
+    /// The same union a sync round considers, and for the same reason: a
+    /// device that has just been admitted has an address nowhere, because the
+    /// port it paired from was ephemeral and it has never dialled in. Listing
+    /// only remembered addresses would show *nothing* on a device seconds
+    /// after pairing succeeded on it — which reads as pairing having failed,
+    /// and is the moment a person is most likely to try again and make a
+    /// mess.
+    pub fn peers(&self) -> Result<Vec<Peer>> {
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        let me = capture_store::store::open(&self.paths)?.public().to_bytes();
+
+        let known = ops.peer_addresses()?;
+        let mut out: Vec<Peer> = Vec::new();
+        let mut seen: Vec<[u8; 32]> = Vec::new();
+
+        for p in known {
+            if p.key == me {
+                continue;
+            }
+            seen.push(p.key);
+            out.push(Peer {
+                key: named(&p.key),
+                addr: p.addr,
+                last_seen: p.last_seen.map(when),
+                missed: p.attempts,
+            });
+        }
+
+        for key in ops.dialable()? {
+            if key == me || seen.contains(&key) {
+                continue;
+            }
+            out.push(Peer {
+                key: named(&key),
+                addr: None,
+                last_seen: None,
+                missed: 0,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Offer this device for pairing.
+    ///
+    /// Two steps rather than one, because the code has to be readable while
+    /// the window is open. A single call that returned the code would return
+    /// it once pairing had already happened, which is the one moment it is of
+    /// no use to anybody.
+    ///
+    /// **Emits no `setting`** — §8.9: pairing is a person connecting two
+    /// devices, not a person expressing a preference, and an archive whose
+    /// settings were written by the act of pairing could never afterwards say
+    /// which of them anybody chose.
+    pub fn offer_pairing(&self) -> Result<std::sync::Arc<Offer>> {
+        let offering = capture_store::pairing::Offering::open(&self.paths)?;
+        Ok(std::sync::Arc::new(Offer {
+            code: offering.shown(),
+            paths: self.paths.clone(),
+            offering: Mutex::new(Some(offering)),
+        }))
+    }
+
+    /// Join a device that is offering, by the code it is showing.
+    pub fn join_with_code(&self, addr: String, code: String) -> Result<()> {
+        let _writing = self.write_lock()?;
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        capture_store::pairing::accept_code(&self.paths, code.as_bytes(), &addr, now)?;
+        Ok(())
+    }
+
     /// Carry out whatever has come due — redactions past their window,
     /// promotions, expiries.
     ///
@@ -645,6 +777,60 @@ fn rendered(ms: i64, tz: Option<&str>) -> (String, String) {
         // refusing a read over — the note exists and its text is what matters.
         Err(_) => ("unknown".into(), String::new()),
     }
+}
+
+/// A pairing window that is open, and the code that closes it.
+///
+/// Held as an object rather than returned as a pair of values because the
+/// window is a live socket: dropping this closes it, which is the behaviour
+/// wanted when a person navigates away mid-pairing.
+#[derive(uniffi::Object)]
+pub struct Offer {
+    code: String,
+    paths: StorePaths,
+    /// Taken by the first `wait`, because admitting consumes the listener.
+    offering: Mutex<Option<capture_store::pairing::Offering>>,
+}
+
+#[uniffi::export]
+impl Offer {
+    /// The six digits to type on the joining device.
+    pub fn code(&self) -> String {
+        self.code.clone()
+    }
+
+    /// Block until a device joins, or the window closes.
+    ///
+    /// Returns the joined device's key. Called from a background thread on the
+    /// caller's side: this waits for a person to walk to another machine.
+    pub fn wait(&self) -> Result<String> {
+        let offering = self
+            .offering
+            .lock()
+            .map_err(|_| CaptureError::Refused {
+                reason: "the pairing window was left in an unknown state".into(),
+            })?
+            .take()
+            .ok_or_else(|| CaptureError::Refused {
+                reason: "this pairing window has already been used".into(),
+            })?;
+
+        let now = || jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        let joined = offering.admit_one(&self.paths, now(), now)?;
+        Ok(joined[..6].iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+/// The first bytes of a key, which is how every surface names a device.
+fn named(key: &[u8; 32]) -> String {
+    key[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A moment, in this device's zone.
+fn when(ms: u64) -> String {
+    let here = jiff::tz::TimeZone::system();
+    let (day, at) = rendered(ms as i64, here.iana_name());
+    format!("{day} {at}")
 }
 
 fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
