@@ -178,6 +178,17 @@ impl Origin {
         self.membership(Kind::ORIGIN_CLAIM)
     }
 
+    /// Author a rotation of the roster secret.
+    pub fn roster_key(&mut self, secret: [u8; 32]) -> Envelope {
+        let body = crate::body::RosterKeyBody {
+            nonce: [0u8; 16],
+            secret,
+        };
+        let mut buf = Vec::new();
+        minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
+        self.author(Kind::ROSTER_KEY, None, None, buf, 1_700_000_000_000)
+    }
+
     fn membership(&mut self, kind: Kind) -> Envelope {
         let body = OriginClaimBody {
             nonce: [0u8; 16],

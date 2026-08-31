@@ -23,8 +23,8 @@ use brain_core::{
     body::{
         AliasBody, Ambient, CaptureBody, Cue, EditBody, EventFields, IntentBody, MuteBody,
         MuteScope, OccBody, OccEditBody, OccMoveBody, OriginClaimBody, Outcome, ParentBody,
-        PromoteBody, Promoted, RedactBody, RedactScope, ReviewBody, RuleSpec, SeriesFields,
-        SettingBody, TagBody, TaskFields, When,
+        PromoteBody, Promoted, RedactBody, RedactScope, ReviewBody, RosterKeyBody, RuleSpec,
+        SeriesFields, SettingBody, TagBody, TaskFields, When,
     },
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::Hlc,
@@ -713,5 +713,23 @@ fn a_setting_encodes_the_same_way_for_ever() {
     assert_eq!(
         hex(&canonical_of(&reverted)),
         "8250111111111111111111111111111111116e74696d656c696e652e6c696d6974"
+    );
+}
+
+/// The roster secret is broadcast-adjacent and long-lived: every device on
+/// the mesh has to derive the same pseudonym from it or they stop finding
+/// each other, and a device that has been off for a month rejoins against
+/// whatever the others are advertising under.
+#[test]
+fn a_roster_key_encodes_the_same_way_for_ever() {
+    let b = RosterKeyBody {
+        nonce: [0x11; 16],
+        secret: [0x22; 32],
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        // array(2) · nonce(16) · secret(32). No optional tail: a rotation
+        // that did not say what the new key is would be meaningless.
+        "82501111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222"
     );
 }

@@ -37,6 +37,7 @@
 // rather than by a lint.
 extern crate alloc;
 
+pub mod discovery;
 pub mod message;
 pub mod session;
 pub mod transport;

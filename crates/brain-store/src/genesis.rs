@@ -10,11 +10,11 @@
 
 use brain_core::{
     Dev, Incarnation, Nonce,
-    body::OriginClaimBody,
+    body::{OriginClaimBody, RosterKeyBody},
     envelope::Envelope,
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::HlcState,
-    id::BodyHash,
+    id::{BodyHash, EventId},
 };
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -131,6 +131,55 @@ pub fn origin_claim(
         prev: None,
         occ: None,
         chain: None,
+        bhash: BodyHash::of(&body_bytes),
+    };
+
+    Ok(sign(header, body_bytes, signing))
+}
+
+/// Author a `roster_key`: mint or rotate the secret the mesh advertises under.
+///
+/// Minting and rotating are the same event. The first one is authored right
+/// after the roster root, which is why this takes a `seq` and a `chain` rather
+/// than assuming a fresh origin the way the two above do — every roster_key
+/// after the first has a predecessor.
+///
+/// Rotation is what a retirement is followed by (§5.2): the retired device
+/// holds the whole log and can therefore go on deriving anything derivable
+/// from what it already has, but it cannot receive the replacement, because
+/// ingesting the retirement tears its sessions down.
+#[allow(clippy::too_many_arguments)]
+pub fn roster_key(
+    signing: &SigningKey,
+    incarnation: &Incarnation,
+    clock: &mut HlcState,
+    physical_now: u64,
+    nonce: Nonce,
+    secret: [u8; 32],
+    seq: u64,
+    chain: Option<EventId>,
+) -> Result<Envelope> {
+    let pubkey = signing.verifying_key().to_bytes();
+    let dev = Dev::derive(&pubkey, incarnation);
+
+    let body = RosterKeyBody {
+        nonce: nonce.0,
+        secret,
+    };
+    let body_bytes = encode(&body);
+
+    let hlc = clock.issue(physical_now, dev);
+
+    let header = Header {
+        v: ENVELOPE_VERSION,
+        dev,
+        seq,
+        hlc,
+        kind: Kind::ROSTER_KEY,
+        tgt: None,
+        prev: None,
+        occ: None,
+        chain,
         bhash: BodyHash::of(&body_bytes),
     };
 

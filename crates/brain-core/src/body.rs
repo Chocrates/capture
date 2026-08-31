@@ -711,3 +711,21 @@ mod tests {
         assert_eq!(back.text, weird);
     }
 }
+
+/// The body of a `roster_key` event: the shared secret, minted or rotated.
+///
+/// Deliberately not a field on [`OriginClaimBody`], though the roster root is
+/// where the first one appears. That body is shared by `device_add` and
+/// `origin_claim`, and a secret on an origin claim would be meaningless — a
+/// field that must always be absent on one of its two kinds is a rule to
+/// enforce and test, where a separate body cannot express the mistake.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct RosterKeyBody {
+    /// Hiding salt.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub nonce: [u8; 16],
+    /// The secret itself. Every member holds it; membership is what holding it
+    /// means.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub secret: [u8; 32],
+}

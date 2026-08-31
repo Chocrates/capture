@@ -499,6 +499,53 @@ fn a_restored_device_stays_a_member() {
 }
 
 #[test]
+fn the_roster_secret_is_the_latest_rotation() {
+    let mut a = testing::Origin::new(0);
+    let root = a.roster_root();
+    let first = a.roster_key([1; 32]);
+    let second = a.roster_key([2; 32]);
+
+    let r = roster::build(&[root, first, second]);
+    assert_eq!(
+        r.secret,
+        Some([2; 32]),
+        "a device advertising under a superseded secret is a device its peers \
+         cannot recognise"
+    );
+}
+
+#[test]
+fn an_archive_with_no_rotation_has_no_secret() {
+    // Every archive written before sync existed. `None` is the true statement
+    // about it — it has never advertised — and inventing one on read would
+    // have each device invent a different one.
+    let mut a = testing::Origin::new(0);
+    let root = a.roster_root();
+    assert_eq!(roster::build(&[root]).secret, None);
+}
+
+#[test]
+fn an_outsider_cannot_choose_what_the_mesh_advertises_under() {
+    // The secret is what makes the broadcast recognisable only to members. A
+    // non-member able to set it could make every device advertise under a
+    // value it knows, which is the correlation leak with extra steps.
+    let mut a = testing::Origin::new(0);
+    let mut stranger = testing::Origin::new(1);
+    let root = a.roster_root();
+    let mine = a.roster_key([1; 32]);
+    let theirs = stranger.roster_key([9; 32]);
+    let theirs_id = theirs.header.id();
+
+    let r = roster::build(&[root, mine, theirs]);
+    assert_eq!(r.secret, Some([1; 32]));
+    assert_eq!(
+        r.refused.get(&theirs_id),
+        Some(&roster::Refusal::KeyIsNotAMember),
+        "a non-member's rotation was ignored silently rather than reported"
+    );
+}
+
+#[test]
 fn an_unknown_kind_is_kept_rather_than_discarded() {
     // From a newer build. Storing it is what makes an upgrade able to fold it
     // later; discarding it would lose data on the older device permanently.

@@ -44,7 +44,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::{
-    Dev, Incarnation, body::OriginClaimBody, envelope::Envelope, event::Kind, id::EventId,
+    Dev, Incarnation,
+    body::{OriginClaimBody, RosterKeyBody},
+    envelope::Envelope,
+    event::Kind,
+    id::EventId,
 };
 
 /// The membership state ingest consults.
@@ -54,6 +58,12 @@ pub struct Roster {
     pub keys: BTreeSet<[u8; 32]>,
     /// Which key each origin authors under.
     pub origins: BTreeMap<Dev, [u8; 32]>,
+    /// The shared secret discovery advertises under (§5.2), latest wins.
+    ///
+    /// `None` on an archive written before sync existed. That is not a defect
+    /// to repair on read: such a device has never advertised, and minting a
+    /// key is an event some device has to author.
+    pub secret: Option<[u8; 32]>,
     /// Membership events that were authentic but did not confer membership,
     /// and why. Kept because "this device is silently not a member" is the
     /// failure that is impossible to diagnose without it.
@@ -101,7 +111,12 @@ impl Roster {
 pub fn build(events: &[Envelope]) -> Roster {
     let mut ordered: Vec<&Envelope> = events
         .iter()
-        .filter(|e| e.header.kind == Kind::DEVICE_ADD || e.header.kind == Kind::ORIGIN_CLAIM)
+        .filter(|e| {
+            matches!(
+                e.header.kind,
+                Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM | Kind::ROSTER_KEY
+            )
+        })
         .collect();
     ordered.sort_by_key(|e| e.header.hlc);
 
@@ -115,6 +130,23 @@ pub fn build(events: &[Envelope]) -> Roster {
             // can be inferred from its absence.
             continue;
         };
+        if e.header.kind == Kind::ROSTER_KEY {
+            // Ordered by timestamp, so the last rotation any replica has seen
+            // is the one it advertises under. A device still holding an older
+            // key fails to recognise its peers until the rotation reaches it,
+            // which is a delay in being found rather than a divergence.
+            if !r.origins.contains_key(&e.header.dev) {
+                // Any member may rotate; a non-member minting the secret would
+                // be an outsider choosing what the mesh advertises under.
+                r.refused.insert(id, Refusal::KeyIsNotAMember);
+                continue;
+            }
+            if let Ok(rekey) = minicbor::decode::<RosterKeyBody>(body) {
+                r.secret = Some(rekey.secret);
+            }
+            continue;
+        }
+
         let Ok(claim) = minicbor::decode::<OriginClaimBody>(body) else {
             continue;
         };

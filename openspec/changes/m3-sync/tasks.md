@@ -13,8 +13,8 @@
 
 ## 3. Discovery
 
-- [ ] 3.1 Advertise and browse `_bsp._tcp.local`, with the TXT record carrying the rotating pseudonym and the keyed digest.
-- [ ] 3.2 Derive both from the roster key. **Test that an observer who is not a member cannot correlate a device across two networks, and cannot infer capture counts from the digest** — those are the two leaks §5.3 names, and both are cheap now and expensive once devices are advertising.
+- [ ] 3.1 Advertise and browse `_bsp._tcp.local`, with the TXT record carrying the rotating pseudonym and the keyed digest. **Derivations done** in `brain-sync::discovery`; the mDNS wiring itself is still to do.
+- [x] 3.2 Derive both from the roster key. **Done**: the roster key is minted, not derived from the member set — a retired device holds the whole log, so anything computable from what it already has stays computable by it, and the device retired *because it was stolen* would go on recognising your devices on every network it meets them. Minting and rotating are one event kind (`roster_key`, 25), so the first key is the first rotation. Rotation is also what closes the counting leak: a keyed digest still changes whenever the vector changes, so keying alone hides the count and leaves the timing. **Test that an observer who is not a member cannot correlate a device across two networks, and cannot infer capture counts from the digest** — those are the two leaks §5.3 names, and both are cheap now and expensive once devices are advertising.
 - [ ] 3.3 Implement the static fallback: last-known addresses, jittered exponential backoff. mDNS is blocked on many corporate and guest networks and a system that only works at home is not a system.
 - [ ] 3.4 Skip the connection where the advertised digest says there is nothing to do.
 

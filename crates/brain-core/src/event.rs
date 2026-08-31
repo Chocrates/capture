@@ -105,13 +105,31 @@ impl Kind {
     /// bounded: nothing else in the system reads it, so a wrong parent misfiles
     /// a page in one sidebar and loses nothing.
     pub const PARENT: Kind = Kind(24);
+    /// The secret every roster member shares, and nobody else holds.
+    ///
+    /// It keys the discovery pseudonym and the version-vector digest (§5.2),
+    /// which are broadcast in the clear on every network the device joins.
+    /// Members can recognise each other in that broadcast; an observer sees a
+    /// value that changes per network and on a schedule, and can correlate
+    /// nothing from it.
+    ///
+    /// Minting and rotating are the same event, so the first key is simply the
+    /// first rotation and there is one code path rather than two. Rotation is
+    /// the reason this is an explicit secret rather than something derived
+    /// from the member set: a retired device holds the whole log, so anything
+    /// computable from what it already has stays computable by it, and the
+    /// device you retired because it was stolen goes on recognising your
+    /// devices on every network it meets them. It cannot receive the
+    /// replacement, because ingesting the retirement tears its sessions down
+    /// (§5.3).
+    pub const ROSTER_KEY: Kind = Kind(25);
 
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=24).contains(&self.0)
+        (1..=25).contains(&self.0)
     }
 }
 
@@ -212,14 +230,15 @@ mod m2_kinds {
         assert_eq!(Kind::OCC_DONE.0, 22);
         assert_eq!(Kind::OCC_UNDONE.0, 23);
         assert_eq!(Kind::PARENT.0, 24);
+        assert_eq!(Kind::ROSTER_KEY.0, 25);
     }
 
     #[test]
     fn a_kind_from_a_later_build_is_still_unknown() {
         // The boundary has to keep working after it moves. An event written by
-        // a build that knows kind 24 must be held by this one rather than
-        // discarded or misread as something it knows.
-        assert!(!Kind(25).is_known());
+        // a build that knows one more kind than this one must be held rather
+        // than discarded or misread as something it knows.
+        assert!(!Kind(26).is_known());
         assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }
