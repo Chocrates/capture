@@ -13,6 +13,7 @@ import uniffi.capture_ffi.Archive
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
+import uniffi.capture_ffi.Pending
 
 /** Which surface is showing. */
 sealed interface Screen {
@@ -55,6 +56,10 @@ class Model(private val archive: Archive) : ViewModel() {
     var note by mutableStateOf<NoteSummary?>(null)
         private set
 
+    /** The destruction waiting on the note on screen, where one is waiting. */
+    var pending by mutableStateOf<Pending?>(null)
+        private set
+
     /** The last thing that went wrong, for saying so rather than swallowing it. */
     var trouble by mutableStateOf<String?>(null)
         private set
@@ -69,7 +74,10 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load { pages = archive.named() }
             is Screen.Health -> load { conditions = archive.health() }
-            is Screen.Note -> load { note = archive.note(to.name) }
+            is Screen.Note -> load {
+                note = archive.note(to.name)
+                pending = archive.pendingRedaction(to.name)
+            }
             is Screen.Search -> hits = emptyList()
         }
     }
@@ -83,6 +91,57 @@ class Model(private val archive: Archive) : ViewModel() {
     }
 
     fun today(): String = archive.today()
+
+    // --- mutations -----------------------------------------------------------
+    //
+    // §8.4 makes this the first-party surface and §8.10 scoped it to every
+    // mutation the desktop offers. The reason is §2.6: suppressing something
+    // is meant to be cheaper than destroying it, and that gradient inverts
+    // the moment muting needs a laptop and destroying does not.
+    //
+    // Each one re-reads rather than editing the copy on screen. The archive
+    // may have done more than was asked — a mute settles, an alias moves a
+    // page — and a screen patched locally would show the request instead of
+    // the result.
+
+    fun edit(name: String, text: String) = after(name) { archive.edit(name, text) }
+
+    fun tag(name: String, tag: String) = after(name) { archive.tag(name, tag) }
+
+    fun untag(name: String, tag: String) = after(name) { archive.untag(name, tag) }
+
+    fun setAlias(name: String, alias: String?) = after(name) { archive.setAlias(name, alias) }
+
+    fun setParent(name: String, under: String?) = after(name) { archive.setParent(name, under) }
+
+    fun pin(name: String, pinned: Boolean) = after(name) { archive.pin(name, pinned) }
+
+    fun mute(name: String) = after(name) { archive.mute(name) }
+
+    fun setDone(name: String, done: Boolean) = after(name) { archive.setDone(name, done) }
+
+    fun redact(name: String) = after(name) { archive.redact(name) }
+
+    /**
+     * Call off a queued destruction.
+     *
+     * The id is fetched rather than remembered from the ordering call: this
+     * process may not be the one that ordered it, and on a phone it usually is
+     * not.
+     */
+    fun cancelRedaction(name: String) = after(name) {
+        archive.pendingRedaction(name)?.let { archive.cancelRedaction(it.id) }
+    }
+
+    /** Do something to a note, then re-read what it actually became. */
+    private fun after(name: String, work: suspend () -> Unit) = load {
+        work()
+        note = archive.note(name)
+        pending = archive.pendingRedaction(name)
+        // The lists behind this note are now stale in a way that is visible
+        // the moment the back gesture happens.
+        timeline = archive.timeline(100u)
+    }
 
     /** Settle whatever has come due. Called when the app comes forward. */
     fun settle() = load { archive.settle() }

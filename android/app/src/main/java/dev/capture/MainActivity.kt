@@ -66,7 +66,7 @@ private fun App(model: Model) {
                 is Screen.Agenda -> Agenda(screen.day, model.agenda)
                 is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
                 is Screen.Health -> Health(model.conditions)
-                is Screen.Note -> NotePage(model.note)
+                is Screen.Note -> NotePage(model.note, model.pending, model)
             }
         }
     }

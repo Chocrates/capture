@@ -132,6 +132,19 @@ pub enum Captured {
 /// entries into columns because it has the width for it; a phone agenda is
 /// read top to bottom, and packing would be work done to produce a layout
 /// nothing renders.
+/// A destruction ordered and not yet carried out.
+///
+/// Carries when the window closes rather than how long is left: a duration
+/// computed once and rendered on a screen that stays up is wrong within a
+/// minute, and wrong in the direction of appearing to have more time.
+#[derive(Debug, uniffi::Record)]
+pub struct Pending {
+    /// The id that cancels it.
+    pub id: String,
+    pub day: String,
+    pub at: String,
+}
+
 #[derive(Debug, uniffi::Record)]
 pub struct AgendaEntry {
     pub slug: String,
@@ -508,6 +521,41 @@ impl Archive {
     pub fn redact(&self, name: String) -> Result<String> {
         let _w = self.write_lock()?;
         Ok(capture_store::mutate::redact(&self.paths, &name)?)
+    }
+
+    /// The destruction waiting on a note, where one is waiting.
+    ///
+    /// Exists because `cancel_redaction` is keyed by the id `redact` returned,
+    /// and a phone does not survive long enough to keep it. The application is
+    /// destroyed and rebuilt constantly — on rotation, on a low-memory kill,
+    /// on being backgrounded for a minute — and a window that can only be
+    /// cancelled by the process that opened it is not the window §1.1
+    /// describes. It is one that closes when the platform feels like it.
+    ///
+    /// So the id is asked for again rather than held. The queue is in the
+    /// projection and outlives every process that reads it.
+    pub fn pending_redaction(&self, name: String) -> Result<Option<Pending>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+
+        let waiting = store
+            .redact_queue()?
+            .into_iter()
+            .find(|(_, on, _, cancelled)| *on == tgt && !*cancelled);
+
+        Ok(waiting.map(|(redact, _, execute_after, _)| {
+            // This device's zone, not the note's. A capture time belongs to
+            // where you were; a deadline is happening in front of you now.
+            let here = jiff::tz::TimeZone::system();
+            let (day, at) = rendered(execute_after as i64, here.iana_name());
+            Pending {
+                id: capture_store::mutate::short(&redact),
+                day,
+                at,
+            }
+        }))
     }
 
     /// Stop a queued destruction, by the id `redact` returned.

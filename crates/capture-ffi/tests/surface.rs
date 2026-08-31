@@ -229,6 +229,40 @@ fn a_queued_destruction_is_distinguishable_from_a_finished_one() {
 }
 
 #[test]
+fn the_cancelling_id_outlives_the_process_that_ordered_it() {
+    // The window is worth nothing if only the process that opened it can close
+    // it. A phone destroys and rebuilds an application constantly — rotation,
+    // a low-memory kill, a minute in the background — and every one of those
+    // would otherwise commit a destruction that was still cancellable a second
+    // earlier, without anybody deciding to.
+    let root = scratch("redact-restart");
+    let a = Archive::open(root.clone()).unwrap();
+    let slug = match a.capture("regrettable".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+    a.redact(slug.clone()).unwrap();
+    drop(a);
+
+    // A different process, holding nothing from the first.
+    let b = Archive::open(root.clone()).unwrap();
+    let waiting = b
+        .pending_redaction(slug.clone())
+        .unwrap()
+        .expect("the queue is in the projection, not in a process");
+    assert!(!waiting.at.is_empty(), "and it says when the window closes");
+
+    b.cancel_redaction(waiting.id).unwrap();
+    assert!(!b.note(slug.clone()).unwrap().redaction_queued);
+    assert!(
+        b.pending_redaction(slug).unwrap().is_none(),
+        "and a cancelled redaction stops being offered as cancellable"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn settling_is_something_the_phone_asks_for() {
     // The desktop settles on every command that writes. A phone has no
     // equivalent — it is opened and closed rather than invoked — so the work

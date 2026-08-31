@@ -37,7 +37,9 @@
 - [x] 5.3 Wiki with nesting. The parent arrives as a field on each page rather than as a tree, so there is nothing on this side that can get a cycle or an orphan wrong.
 - [ ] 5.4 Review session.
 - [~] 5.5 Health. **Conditions done**, in two tiers that are not severities: `attention` wants a decision, `worth-knowing` needs nothing. Peers are still to add, with sync in section 6.
-- [ ] 5.6 Every mutation the desktop offers, per §8.4. A phone that suppresses a note only by reaching for a laptop inverts the gradient §2.6 exists to create.
+- [x] 5.6 Every mutation the desktop offers, per §8.4. **Done and driven on the emulator**: edit, tag, rename, move, pin, mute, destroy and cancel, each re-reading the note rather than patching the copy on screen.
+  - **A queued destruction could only be cancelled by the process that ordered it.** `cancel_redaction` is keyed by the id `redact` returns, which a desktop holds in its window and a phone does not: the application is destroyed and rebuilt on rotation, on a low-memory kill, on a minute in the background. Every one of those would have committed a destruction that was cancellable a second earlier, without anybody deciding to — §1.1's window closing when the platform felt like it. `pending_redaction` asks the projection for the id instead, and the cancel is now verified across a `force-stop`.
+  - The confirmation asks for the note's name typed out. A count is dismissible by the reflex that dismisses dialogs; a name is not. **uiautomator reports the disabled button as `enabled="true"`** — Compose carries disabled state in semantics and leaves the legacy bit set — so the only evidence that the guard holds is tapping it and watching nothing happen.
 
 ## 6. Sync
 

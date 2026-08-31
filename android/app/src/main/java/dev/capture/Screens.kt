@@ -1,6 +1,8 @@
 package dev.capture
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,6 +28,7 @@ import uniffi.capture_ffi.AgendaEntry
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
+import uniffi.capture_ffi.Pending
 
 /**
  * The timeline: everything, newest first, grouped by the day it belongs to.
@@ -84,19 +87,35 @@ private fun NoteRow(note: NoteSummary, onOpen: (String) -> Unit) {
     HorizontalDivider()
 }
 
-/** One note in full. */
+/** One note in full, and everything that can be done to it. */
 @Composable
-fun NotePage(note: NoteSummary?) {
+fun NotePage(note: NoteSummary?, pending: Pending?, model: Model) {
     if (note == null) {
         Empty("Loading.")
         return
     }
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(note.alias ?: note.slug, style = MaterialTheme.typography.titleMedium)
-        Text("${note.day} ${note.at}", style = MaterialTheme.typography.labelSmall)
-        Text(note.text ?: "(no readable text)", style = MaterialTheme.typography.bodyLarge)
-        if (note.mutedUntilMs != null) Text("Muted.", style = MaterialTheme.typography.labelMedium)
-        if (note.pinned) Text("Pinned.", style = MaterialTheme.typography.labelMedium)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(note.alias ?: note.slug, style = MaterialTheme.typography.titleMedium)
+            Text("${note.day} ${note.at}", style = MaterialTheme.typography.labelSmall)
+            Text(
+                note.text ?: when {
+                    note.redacted -> "Destroyed. The content is gone."
+                    note.redactionQueued -> "Withheld while the destruction is pending."
+                    else -> "(no readable text)"
+                },
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            if (note.mutedUntilMs != null) {
+                Text("Muted.", style = MaterialTheme.typography.labelMedium)
+            }
+            if (note.pinned) Text("Pinned.", style = MaterialTheme.typography.labelMedium)
+        }
+        HorizontalDivider()
+        Actions(note, pending, model)
     }
 }
 
