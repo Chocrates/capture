@@ -12,8 +12,9 @@ publish.workspace = true
 [dependencies]
 capture-parse = { path = "../capture-parse" }
 capture-time = { path = "../capture-time" }
-# The wire types and the protocol. Not the network: `mdns` is off, so this is
-# the shape of a sync rather than the ability to perform one.
+# The wire types and the protocol. Whether the network comes with them is the
+# `mdns` feature below: a crate that only prints a timeline should not link a
+# responder to do it.
 capture-sync = { path = "../capture-sync" }
 capture-core = { path = "../capture-core", features = ["std"] }
 ed25519-dalek = { workspace = true, features = ["std", "rand_core"] }
@@ -27,6 +28,15 @@ getrandom = { workspace = true }
 jiff = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# To answer "which network is this" and "where can a peer reach me" with
+# something true. A sync round advertises both.
+if-addrs = { workspace = true }
+
+[features]
+# Browse and advertise. Off by default, because `round` is useful without it
+# — a device with a remembered address syncs over TCP alone, which is the
+# fallback for every network that blocks multicast.
+mdns = ["capture-sync/mdns"]
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -11,12 +11,9 @@
 
 use std::net::{TcpListener, TcpStream};
 
-use capture_store::gate::Gate;
 use capture_store::ops::Ops;
 use capture_store::paths::StorePaths;
 use capture_store::session::{Admitted, Session};
-use capture_store::sync::StoreArchive;
-use capture_sync::anti_entropy::exchange;
 use capture_sync::session::Session as Secure;
 use capture_sync::tcp::Tcp;
 
@@ -158,36 +155,27 @@ fn sync(a: &Device, b: &Device) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
+    // Through `round::reconcile`, which is what the daemon and the phone run.
+    //
+    // This used to open its own gate and call `exchange` directly. That made
+    // the suite proving convergence the one place convergence was performed
+    // differently from anywhere else — and it is exactly where a step can go
+    // missing without any test objecting, because this *is* the test. The
+    // fold after an exchange was once missing in the daemon while the suite
+    // here was green.
     let b_paths = b.paths.clone();
     let b_secret = b_id.noise_secret();
     let responder = std::thread::spawn(move || {
         let stream = listener.accept().unwrap().0;
         let tcp = Tcp::new(stream).unwrap();
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
-
-        let mut s = Session::open(b_paths.clone()).unwrap();
-        let own = s.identity.public().to_bytes();
-        let ops = Ops::open(&b_paths.ops).unwrap();
-        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own).unwrap();
-        let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
-        let done = exchange(&mut secure, &mut archive).expect("the responder finished");
-        archive.settle().expect("folded what arrived");
-        done
+        capture_store::round::reconcile(&b_paths, &mut secure).expect("the responder finished")
     });
 
     let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
     let mut secure =
         Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
-
-    {
-        let mut s = Session::open(a.paths.clone()).unwrap();
-        let own = s.identity.public().to_bytes();
-        let ops = Ops::open(&a.paths.ops).unwrap();
-        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own).unwrap();
-        let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
-        exchange(&mut secure, &mut archive).expect("the initiator finished");
-        archive.settle().expect("folded what arrived");
-    }
+    capture_store::round::reconcile(&a.paths, &mut secure).expect("the initiator finished");
 
     responder.join().expect("no panic");
 }

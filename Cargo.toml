@@ -22,6 +22,11 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+# Which network this is, and where a peer can reach us. Named here rather than
+# per-crate because two crates asking the same question of the same machine
+# must not be able to answer it with two different versions.
+if-addrs = "0.15"
+
 # --- frozen primitives (group 2). Versions pinned: the encoding is permanent. ---
 minicbor = { version = "2.3.0", default-features = false, features = ["alloc", "derive"] }
 blake3 = { version = "1", default-features = false }

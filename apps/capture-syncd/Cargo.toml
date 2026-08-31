@@ -10,7 +10,7 @@ publish = false
 # The protocol, and this time with the network: this is the one binary that
 # browses and dials.
 capture-sync = { path = "../../crates/capture-sync", features = ["mdns"] }
-capture-store = { path = "../../crates/capture-store" }
+capture-store = { path = "../../crates/capture-store", features = ["mdns"] }
 capture-core = { path = "../../crates/capture-core", features = ["std"] }
 minicbor = { workspace = true }
 tracing = { workspace = true }
@@ -22,7 +22,7 @@ zbus = { workspace = true }
 # To answer "which network is this" and "where can I be reached" with something
 # true. Already in the tree under mdns-sd; named here because this crate uses
 # it directly.
-if-addrs = "0.15"
+if-addrs = { workspace = true }
 
 [[bin]]
 name = "capture-syncd"

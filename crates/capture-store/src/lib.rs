@@ -34,6 +34,7 @@ pub mod promote;
 pub mod purge;
 pub mod ratelimit;
 pub mod review;
+pub mod round;
 pub mod session;
 pub mod settings;
 pub mod spool;
