@@ -66,14 +66,25 @@ SCAFFOLDING = {"crates/capture-core/src/testing.rs"}
 # boundary.
 FOREIGN_CALLERS = {"crates/capture-ffi"}
 
+ALL = sorted(ROOT.glob("crates/*/src/**/*.rs")) + sorted(ROOT.glob("apps/*/src/**/*.rs"))
+
+# Where definitions are checked. A boundary crate's own surface is not, for the
+# reason above.
 SOURCES = [
     p
-    for p in sorted(ROOT.glob("crates/*/src/**/*.rs")) + sorted(ROOT.glob("apps/*/src/**/*.rs"))
+    for p in ALL
     if str(p.relative_to(ROOT)) not in SCAFFOLDING
     and not any(str(p.relative_to(ROOT)).startswith(c) for c in FOREIGN_CALLERS)
 ]
-CALLERS = SOURCES + sorted(ROOT.glob("crates/*/tests/**/*.rs")) + sorted(
-    ROOT.glob("apps/*/tests/**/*.rs")
+
+# Where calls are counted, which is everywhere. A boundary crate is exempt from
+# being *checked*, not from *counting*: it is ordinary Rust calling ordinary
+# functions, and the first thing it called that nothing else did was reported
+# as dead code while shipping in the Android app.
+CALLERS = (
+    ALL
+    + sorted(ROOT.glob("crates/*/tests/**/*.rs"))
+    + sorted(ROOT.glob("apps/*/tests/**/*.rs"))
 )
 
 DEF = re.compile(r"^\s*pub(?:\(crate\))?\s+fn\s+(\w+)")
@@ -149,8 +160,13 @@ def main() -> int:
             if m:
                 defined.setdefault((m.group(1), bool(in_impl or in_trait)), []).append(path)
 
-    src = {p: p.read_text() for p in SOURCES}
-    tests = {p: p.read_text() for p in CALLERS if p not in set(SOURCES)}
+    # Shipping code against test code, which is the distinction the whole
+    # check turns on. `ALL` rather than `SOURCES`: a boundary crate is exempt
+    # from having its own surface checked, and is still shipping code when it
+    # calls something.
+    shipping = set(ALL)
+    src = {p: p.read_text() for p in shipping}
+    tests = {p: p.read_text() for p in CALLERS if p not in shipping}
 
     def mentions(name, corpus, method):
         n = 0
