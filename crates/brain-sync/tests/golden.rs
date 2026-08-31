@@ -137,6 +137,16 @@ fn the_protocol_version_is_on_the_wire() {
     }
 }
 
+/// The two markers that end a round. They carry nothing, which is the point:
+/// a peer that cannot decode the rest of the protocol must still be able to
+/// tell that the other side has stopped talking.
+#[test]
+fn the_end_markers_encode_the_same_way_for_ever() {
+    // array(2): the variant number, then its empty field list.
+    assert_eq!(hex(&encoded(&Message::Asked)), "820680");
+    assert_eq!(hex(&encoded(&Message::Done)), "820780");
+}
+
 // ------------------------------------------------------------- pairing ----
 //
 // These cross before either device is on the other's roster, which makes them

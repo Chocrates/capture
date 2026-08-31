@@ -26,11 +26,11 @@
 
 ## 5. Anti-entropy
 
-- [ ] 5.1 Read the version vector off `heads` — it is already there, gap-free, and has been since M1.
-- [ ] 5.2 Implement `HELLO`/`RANGE` with each side computing its own diff. No negotiation round.
-- [ ] 5.3 Run it on session open, on network change, on wake, and on a timer while connected.
-- [ ] 5.4 Implement relaying: any device relays any origin's events. **Test that the desktop receives the phone's events while the desktop was off, via the laptop** — "no device is required to be online" is the claim that makes this serverless rather than one machine quietly being the server.
-- [ ] 5.5 Peer selection with fanout 2–3. At two devices this degenerates to a full mesh; write it anyway, because "sync with the other one" quietly becoming an assumption is a rewrite later.
+- [x] 5.1 Read the version vector off `heads` — it is already there, gap-free, and has been since M1.
+- [x] 5.2 Implement `HELLO`/`RANGE` with each side computing its own diff. No negotiation round. **Done**: `anti_entropy::wanted` is a pure function of two version vectors, so a device off for a month and an origin neither side authored are test inputs rather than situations to reproduce with real hardware. Termination needed **two** markers, not one: a round has two phases per side, and a side's answers necessarily follow its questions. The first version had one marker and both sides hung up while the events they had asked for were still in flight — caught by the end-to-end test, not by reading.
+- [~] 5.3 Run it on session open, on network change, on wake, and on a timer while connected. The exchange runs; *when* it runs is the daemon's loop, so this lands with section 10.
+- [x] 5.4 Implement relaying: any device relays any origin's events. **Done and tested**: the desktop takes the phone's events from the laptop, which authored none of them. It falls out of the vector naming *origins* rather than peers — there is no code path that could prefer the author. **Test that the desktop receives the phone's events while the desktop was off, via the laptop** — "no device is required to be online" is the claim that makes this serverless rather than one machine quietly being the server.
+- [x] 5.5 Peer selection with fanout 2–3. **Done**: rotating rather than random, so "no peer is starved" is a property of a counter a test can hold still rather than of a random source. Degenerates to the other device at two, as predicted. At two devices this degenerates to a full mesh; write it anyway, because "sync with the other one" quietly becoming an assumption is a rewrite later.
 
 ## 6. Sealing
 

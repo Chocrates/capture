@@ -100,6 +100,28 @@ pub enum Message {
         #[n(0)]
         tgt: EventId,
     },
+
+    /// That is everything I am going to ask for.
+    ///
+    /// Distinct from [`Message::Done`], and the distinction is the whole of
+    /// the termination rule. A round has two phases per side — asking, then
+    /// answering — and a side's answers necessarily come *after* its
+    /// questions, so a single marker cannot mean both. The first version of
+    /// this had one, and both sides hung up on reading it while the events
+    /// they had asked for were still in flight behind it.
+    #[n(6)]
+    Asked,
+
+    /// I have sent everything you asked me for.
+    ///
+    /// Termination could be inferred — each side knows how many events it
+    /// asked for, because it named the ranges. It is stated instead, because
+    /// inferring it means a peer that cannot produce one of them leaves the
+    /// other blocked for ever waiting on a count that will never be reached,
+    /// and "the sync hangs occasionally" is the least diagnosable failure this
+    /// protocol could have.
+    #[n(7)]
+    Done,
 }
 
 #[cfg(test)]

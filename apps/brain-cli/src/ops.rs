@@ -582,6 +582,15 @@ fn ms(v: u64) -> String {
     }
 }
 
+/// Enough of a key for a person to compare against what another device shows.
+///
+/// Not the whole thing: thirty-two bytes of hex is not something anyone reads,
+/// and a prefix nobody checks is worse than a prefix short enough that they
+/// do.
+fn short_key(k: &[u8; 32]) -> String {
+    k[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,13 +626,4 @@ mod tests {
         // different fact from a corrupt event and must read as one.
         assert_eq!(kind_name(Kind(9999)), "unknown");
     }
-}
-
-/// Enough of a key for a person to compare against what another device shows.
-///
-/// Not the whole thing: thirty-two bytes of hex is not something anyone reads,
-/// and a prefix nobody checks is worse than a prefix short enough that they
-/// do.
-fn short_key(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
 }

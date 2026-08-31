@@ -37,6 +37,7 @@
 // rather than by a lint.
 extern crate alloc;
 
+pub mod anti_entropy;
 pub mod discovery;
 pub mod mdns;
 pub mod message;
