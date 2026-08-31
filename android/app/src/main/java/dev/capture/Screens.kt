@@ -15,6 +15,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -28,6 +29,7 @@ import uniffi.capture_ffi.AgendaEntry
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
+import uniffi.capture_ffi.Peer
 import uniffi.capture_ffi.Pending
 
 /**
@@ -206,7 +208,7 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
  * and that ambiguity is a cost the system would be manufacturing for free.
  */
 @Composable
-fun Health(conditions: List<Condition>) {
+fun Health(conditions: List<Condition>, peers: List<Peer>, onSync: () -> Unit) {
     val attention = conditions.filter { it.tier == "attention" }
     val knowing = conditions.filter { it.tier != "attention" }
 
@@ -225,6 +227,43 @@ fun Health(conditions: List<Condition>) {
             items(knowing) { Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text(it.text, Modifier.padding(12.dp))
             } }
+        }
+
+        item {
+            Text(
+                "Devices",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+        }
+        if (peers.isEmpty()) {
+            item {
+                Text(
+                    "No other devices yet. Pair one to sync.",
+                    Modifier.padding(vertical = 8.dp),
+                )
+            }
+        }
+        items(peers) { peer ->
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Text(peer.key, style = MaterialTheme.typography.bodyMedium)
+                // When, never "fresh" or "stale" (§6.6). The device that
+                // sleeps most is the one that must not imply currency, and
+                // this is that device.
+                Text(
+                    peer.lastSeen?.let { "Last reached $it" } ?: "Never reached from here",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (peer.missed > 0u) {
+                    Text(
+                        "${peer.missed} attempt(s) since",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        }
+        item {
+            TextButton(onSync, Modifier.padding(top = 8.dp)) { Text("Sync now") }
         }
 
         item {

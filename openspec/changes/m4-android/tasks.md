@@ -43,12 +43,18 @@
 
 ## 6. Sync
 
-- [ ] 6.1 Anti-entropy under `WorkManager`, with network and battery constraints.
-- [ ] 6.2 **Hold a `WifiManager.MulticastLock` while browsing, and report when it cannot be acquired.** Without it multicast receive produces no error and no packets — discovery appears to run and finds nothing, which is indistinguishable from an empty network. This is the trap the design names by name.
+- [~] 6.1 Anti-entropy under `WorkManager`, with network and battery constraints. **Built**: periodic at the platform's fifteen-minute floor, unmetered and not-battery-low, `KEEP` so an application opened often does not sync *less* than one opened rarely. Not yet observed actually firing on a device.
+  - The round itself moved out of `capture-syncd` and into `capture-store::round`. A second copy for the phone would be the one nobody exercises, and the divergence would appear as devices that sync perfectly with their own kind. The daemon keeps the timer, the resume signal and the accept loop; it decides *when*, and `round` decides what one is.
+  - `round::bounded` takes the window as a parameter, because the caller is about to be killed. It listens as well as dials: a device that only dialled would be unreachable to a peer that woke first.
+- [~] 6.2 **Hold a `WifiManager.MulticastLock` while browsing, and report when it cannot be acquired.** **Built**: acquired around the round and released in `finally`, and the report carries whether a responder opened at all — said out loud, because a round that found nothing for want of multicast is a different situation from one where nobody was awake. Not yet confirmed against a real second device.
 - [ ] 6.3 Remembered addresses as the fallback, the same path the desktop uses where mDNS is blocked.
-- [ ] 6.4 Pair the phone to the desktop with the six-digit gesture. **Test that pairing emits no `setting`** — §8.9, and an earlier draft of the design got this exactly wrong.
+- [~] 6.4 Pair the phone to the desktop with the six-digit gesture. **The binding and the §8.9 test are done**; the screen to drive it from is not.
+  - **Pairing is two calls, not one.** The first draft returned the code from the call that waits — so the code became available only once pairing had already happened, the one moment it is of no use. `Offer` holds the open window and dropping it closes the socket, which is what should happen when somebody navigates away.
+  - **The test asserts pairing wrote no `setting` on either side, and then proves its own instrument** by authoring a setting and checking the reader sees it. "The log contains no events of this kind" passes just as cheerfully when the reader is broken.
+  - `peers()` lists the union a sync round considers, not just remembered addresses: a device seconds after admitting another has an address for it nowhere, and the narrower reading showed nothing at all — which reads as pairing having failed.
+  - Noted for §7.4: there is **no `notifier` setting key yet**. The known keys are `timeline.limit` and `capture.text_scale`.
 - [ ] 6.5 **Test convergence with the desktop**: capture on each while apart, reconcile, assert identical folds. This is M3's acceptance test with a real second platform rather than a second directory.
-- [ ] 6.6 Report staleness as *when*, never as freshness. The device that sleeps most is the one that must not imply currency.
+- [x] 6.6 Report staleness as *when*, never as freshness. Health lists each device with when it was last reached, or "never reached from here" — which is the honest reading for a peer that has only ever dialled in, since the port it called from was ephemeral.
 
 ## 7. Cues and notification
 

@@ -14,6 +14,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 /**
@@ -31,6 +32,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         model = Model(Store.of(this))
         model.go(Screen.Timeline)
+
+        // Asked for once and then owned by the platform. A phone cannot keep a
+        // daemon, so the scheduling `capture-syncd` does with a timer is done
+        // by WorkManager under constraints it enforces.
+        SyncWorker.keepSyncing(this)
 
         setContent {
             MaterialTheme {
@@ -51,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun App(model: Model) {
+    val context = LocalContext.current
     Scaffold(bottomBar = { Bar(model) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             // Said out loud rather than left as a blank list. A screen that is
@@ -65,7 +72,7 @@ private fun App(model: Model) {
                 is Screen.Search -> Search(model.hits, model::search) { model.go(Screen.Note(it)) }
                 is Screen.Agenda -> Agenda(screen.day, model.agenda)
                 is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
-                is Screen.Health -> Health(model.conditions)
+                is Screen.Health -> Health(model.conditions, model.peers) { SyncWorker.now(context) }
                 is Screen.Note -> NotePage(model.note, model.pending, model)
             }
         }

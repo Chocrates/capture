@@ -70,6 +70,11 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 
+    // Sync runs here. Android has no resident process to put a daemon in, so
+    // the scheduling the daemon does with a timer is done by the platform,
+    // under constraints it enforces rather than ones an application asks for.
+    implementation(libs.androidx.work)
+
     // uniffi's generated Kotlin calls the native library through JNA.
     implementation(libs.jna) { artifact { type = "aar" } }
 

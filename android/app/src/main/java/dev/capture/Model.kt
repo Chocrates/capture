@@ -13,6 +13,7 @@ import uniffi.capture_ffi.Archive
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
+import uniffi.capture_ffi.Peer
 import uniffi.capture_ffi.Pending
 
 /** Which surface is showing. */
@@ -53,6 +54,8 @@ class Model(private val archive: Archive) : ViewModel() {
         private set
     var conditions by mutableStateOf<List<Condition>>(emptyList())
         private set
+    var peers by mutableStateOf<List<Peer>>(emptyList())
+        private set
     var note by mutableStateOf<NoteSummary?>(null)
         private set
 
@@ -73,7 +76,10 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load { pages = archive.named() }
-            is Screen.Health -> load { conditions = archive.health() }
+            is Screen.Health -> load {
+                conditions = archive.health()
+                peers = archive.peers()
+            }
             is Screen.Note -> load {
                 note = archive.note(to.name)
                 pending = archive.pendingRedaction(to.name)
