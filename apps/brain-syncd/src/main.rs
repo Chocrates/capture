@@ -37,6 +37,21 @@ use brain_sync::tcp::Tcp;
 /// How often to look around when nothing is happening.
 const IDLE: Duration = Duration::from_secs(30);
 
+/// How often to check whether this device has written anything.
+///
+/// A capture should reach the other device promptly, and thirty seconds is not
+/// prompt. §5.4 describes this as a live push to open sessions; what is here
+/// instead is a short poll of the local log that runs a round as soon as
+/// something is written.
+///
+/// Polling rather than being told, for the reason `brain_store::watch` gives:
+/// a reader that depends on a notification shows stale data for ever if the
+/// message is dropped or the writer died between committing and sending it,
+/// where a reader that looks for itself is at worst late. The honest
+/// difference from §5.4 is latency — one round rather than one socket write —
+/// and it is written down rather than claimed away.
+const LOOK: Duration = Duration::from_secs(2);
+
 /// What to say when asked, rather than starting.
 const USAGE: &str = "\
 brain-syncd — find paired devices and reconcile with them
@@ -118,6 +133,14 @@ fn run() -> Result<(), brain_store::Error> {
         }
     };
 
+    // What this device has written, so a capture does not wait for the idle
+    // timer.
+    let mut watch = {
+        let log = brain_store::log::Log::open_read(&paths.events)?;
+        let ops = Ops::open_read(&paths.ops)?;
+        brain_store::watch::Watch::start(&log, &ops)?
+    };
+
     let mut round = 0u64;
     loop {
         if let Err(e) = tick(&paths, &identity, &mut beacon, round, port) {
@@ -127,17 +150,46 @@ fn run() -> Result<(), brain_store::Error> {
         }
         round += 1;
 
-        // Drain anything that arrived while the round ran.
-        while let Ok(arrival) = rx.recv_timeout(IDLE) {
-            match arrival {
-                Arrival::Dialled(stream) => {
+        // Answer whoever calls, and go round again as soon as this device
+        // writes something — or when the idle timer comes up, whichever is
+        // first.
+        let deadline = IDLE;
+        let mut waited = Duration::ZERO;
+        loop {
+            match rx.recv_timeout(LOOK) {
+                Ok(Arrival::Dialled(stream)) => {
                     if let Err(e) = answer(&paths, &identity, stream) {
                         tracing::info!(%e, "a peer connection ended");
+                    }
+                }
+                Err(_) => {
+                    if wrote_something(&paths, &mut watch) {
+                        tracing::debug!("something was captured here; syncing now");
+                        break;
+                    }
+                    waited += LOOK;
+                    if waited >= deadline {
+                        break;
                     }
                 }
             }
         }
     }
+}
+
+/// Whether this device has written anything since the last look.
+///
+/// Errors are treated as "nothing", not as failures: the store may be
+/// momentarily locked by the overlay, and a daemon that stopped over that
+/// would stop whenever the person was capturing.
+fn wrote_something(paths: &StorePaths, watch: &mut brain_store::watch::Watch) -> bool {
+    let Ok(log) = brain_store::log::Log::open_read(&paths.events) else {
+        return false;
+    };
+    let Ok(ops) = Ops::open_read(&paths.ops) else {
+        return false;
+    };
+    watch.poll(&log, &ops).map(|c| c.any()).unwrap_or(false)
 }
 
 enum Arrival {
@@ -220,8 +272,16 @@ fn tick(
         }
         // Backed off, so a device that is simply switched off is not dialled
         // every thirty seconds all day.
-        if p.attempts > 0 && !round.is_multiple_of(u64::from(1 + p.attempts.min(8))) {
-            continue;
+        //
+        // Through `discovery::backoff`, which is jittered, ceilinged and
+        // overflow-safe and has tests saying so. An earlier version computed
+        // its own interval here from the attempt count — a second rule,
+        // untested, quietly replacing the one that was.
+        if let Some(last) = p.last_seen {
+            let wait = discovery::backoff(p.attempts, jitter(&p.key)) * 1000;
+            if p.attempts > 0 && now().saturating_sub(last) < wait {
+                continue;
+            }
         }
         reachable.push((p.key, addr, None));
     }
@@ -337,7 +397,8 @@ fn reconcile<T: brain_sync::transport::Transport>(
 ) -> Result<Exchanged, brain_store::Error> {
     let mut s = Session::open(paths.clone())?;
     let ops = Ops::open(&paths.ops)?;
-    let mut gate = Gate::open(&mut s.log, &mut s.state, &ops)?;
+    let own = s.identity.public().to_bytes();
+    let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own)?;
     let mut archive = StoreArchive::new(&mut gate, &ops, now());
 
     let done = exchange(secure, &mut archive)
@@ -433,6 +494,15 @@ fn local_addresses() -> Vec<std::net::IpAddr> {
     // A placeholder until the daemon enumerates interfaces properly. Binding
     // to all interfaces still works; what suffers is the advertised address.
     vec![std::net::IpAddr::from([127, 0, 0, 1])]
+}
+
+/// A per-peer jitter that does not need a source of randomness.
+///
+/// The point of jitter is that devices do not all retry in the same instant,
+/// and a value derived from the peer's own key achieves that while staying a
+/// function a test can hold still.
+fn jitter(key: &[u8; 32]) -> u64 {
+    u64::from_be_bytes(key[..8].try_into().expect("32 bytes has 8"))
 }
 
 fn short(k: &[u8; 32]) -> String {

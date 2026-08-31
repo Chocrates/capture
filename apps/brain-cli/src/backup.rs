@@ -276,7 +276,8 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
     {
         // The ordinary ingest path, not an importer. A restore route exercised
         // only during a disaster is one that has never run when it mattered.
-        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops)?;
+        let own = s.identity.public().to_bytes();
+        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own)?;
         for e in &events {
             match gate.offer(e, now)? {
                 Outcome::Took(brain_store::log::Ingested::Duplicate) => already += 1,

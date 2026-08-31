@@ -500,6 +500,112 @@ impl Session {
         Ok(id)
     }
 
+    /// Retire a key: stop accepting anything it authors beyond where it is now.
+    ///
+    /// Retires the **key**, not an origin. Retiring an origin would let a
+    /// stolen device mint a fresh incarnation and walk straight back in, which
+    /// would make the whole remedy evaporate on one restart (§5.3).
+    ///
+    /// Names a head per origin rather than a moment. The retired device
+    /// chooses its own `hlc` and can backdate, and there is no causal ordering
+    /// between a retirement and the events of the device being retired — so a
+    /// timestamp rule is unenforceable. The per-origin chain makes "beyond
+    /// this event" provable whatever the clock claims.
+    pub fn retire(
+        &mut self,
+        key: &[u8; 32],
+        supersedes: Option<brain_core::EventId>,
+    ) -> Result<brain_core::EventId> {
+        let roster = brain_core::roster::build(&self.log.all()?);
+
+        // Where each of that key's origins stops, as this device sees it. Read
+        // from the log rather than asked for: the point of a head is that it is
+        // what *was* legitimately authored, and a number supplied by hand would
+        // be a guess about somebody else's history.
+        let heads = self.log.heads()?;
+        let mut named = Vec::new();
+        for (dev, owner) in &roster.origins {
+            if owner != key {
+                continue;
+            }
+            let hex = crate::projection::dev_hex(dev);
+            let Some(&seq) = heads.get(&hex) else {
+                continue;
+            };
+            let Some(last) = self
+                .log
+                .range(&hex, seq, seq)?
+                .first()
+                .map(|e| e.header.id())
+            else {
+                continue;
+            };
+            named.push(brain_core::body::RetiredHead {
+                dev: *dev,
+                seq,
+                last,
+            });
+        }
+
+        let key = *key;
+        self.append(Kind::DEVICE_RETIRE, None, None, move |nonce| {
+            let body = brain_core::body::RetireBody {
+                nonce,
+                pubkey: key,
+                heads: named,
+                supersedes,
+            };
+            let mut b = Vec::new();
+            minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
+            b
+        })
+    }
+
+    /// Re-admit a key, co-signed by a second one.
+    ///
+    /// The only event whose validity does not descend from current roster
+    /// membership, and it exists because any member may retire any member: one
+    /// compromised or malfunctioning device can retire every other, after which
+    /// no `device_add` can help because there are no members left to sign one.
+    ///
+    /// The co-signature covers the subject rather than the event id, because
+    /// the id covers the body hash and the body is where the co-signature
+    /// lives. Forging one needs two compromised devices *and* being in the room
+    /// with them.
+    pub fn readmit_with(
+        &mut self,
+        subject: &Admitted,
+        cosigner: &[u8; 32],
+        cosign: &[u8; 64],
+        nonce: [u8; 16],
+    ) -> Result<brain_core::EventId> {
+        if cosigner == &subject.pubkey {
+            return Err(crate::Error::Usage(
+                "a re-admission needs two different keys — the subject cannot vouch for itself"
+                    .into(),
+            ));
+        }
+
+        // The nonce is supplied rather than minted here. Every other body gets
+        // a fresh one from this layer, and this is the exception: the
+        // co-signature covers the nonce, and the two devices signing have no
+        // channel to agree one over beyond the person carrying it between them.
+        let (pubkey, incarnation) = (subject.pubkey, subject.incarnation);
+        let (cosigner, cosign) = (*cosigner, *cosign);
+        self.append(Kind::DEVICE_READMIT, None, None, move |_| {
+            let body = brain_core::body::ReadmitBody {
+                nonce,
+                pubkey,
+                incarnation,
+                cosigner,
+                cosign,
+            };
+            let mut b = Vec::new();
+            minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
+            b
+        })
+    }
+
     /// Admit another device: this one vouching for its key.
     ///
     /// The event a pairing produces. Every other device learns the newcomer by

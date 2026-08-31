@@ -125,6 +125,15 @@ pub enum Command {
         code: Option<String>,
         at: Option<String>,
     },
+    /// Stop accepting anything a device authors from now on.
+    Retire { key: String, force: bool },
+    /// Vouch for another device's re-admission.
+    Cosign { blob: String },
+    /// Re-admit this device, with another's signature.
+    Readmit {
+        cosign: Option<String>,
+        by: Option<String>,
+    },
     /// Write everything appended since the last export.
     Export { json: bool },
     /// Rebuild a store from exported events.
@@ -620,6 +629,35 @@ where
             };
             Ok(Command::Pair { code, at })
         }
+        "retire" => match args[1..].iter().find(|a| !a.starts_with('-')) {
+            Some(key) => Ok(Command::Retire {
+                key: key.clone(),
+                force: args[1..].iter().any(|a| a == "--yes"),
+            }),
+            None => Err(Bad::Value {
+                command: "retire".into(),
+                problem: "give the key shown in brain peers".into(),
+            }),
+        },
+        "cosign" => match args[1..].iter().find(|a| !a.starts_with('-')) {
+            Some(blob) => Ok(Command::Cosign { blob: blob.clone() }),
+            None => Err(Bad::Value {
+                command: "cosign".into(),
+                problem: "give what the other device printed".into(),
+            }),
+        },
+        "readmit" => {
+            let rest = &args[1..];
+            let after = |flag: &str| {
+                rest.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| rest.get(i + 1).cloned())
+            };
+            Ok(Command::Readmit {
+                cosign: after("--cosign"),
+                by: after("--by"),
+            })
+        }
         "peers" => Ok(Command::Peers {
             json: has_json(&args[1..]),
         }),
@@ -866,6 +904,10 @@ OPERATING
                           type a code shown on another device
   brain peers             every device in the roster, and when it was
                           last reached
+  brain retire KEY        stop accepting what a device writes from now on
+                          — for one that was lost or stolen
+  brain readmit           get back in after every device was retired;
+                          needs a second device to vouch, via brain cosign
   brain admission-seen KEY
                           say you know about a device another device admitted
   brain exports-pruned    say you have dealt with export files holding

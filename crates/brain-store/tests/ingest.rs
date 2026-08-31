@@ -65,7 +65,7 @@ fn an_event_arriving_before_its_predecessor_is_held() {
     let mut b = bench("out-of-order");
     let (_, events) = member(1, 3);
 
-    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, [0xEE; 32]).unwrap();
     let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
 
     assert!(archive.ingest(events[0].clone()), "the root");
@@ -95,7 +95,7 @@ fn the_same_event_arriving_twice_changes_nothing() {
     let mut b = bench("duplicate");
     let (_, events) = member(1, 2);
 
-    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, [0xEE; 32]).unwrap();
     let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     for e in &events {
         archive.ingest(e.clone());
@@ -125,7 +125,7 @@ fn relaying_confers_no_authority() {
     // Keep the header's claimed origin; take the signature from elsewhere.
     forged.sig = other[0].sig;
 
-    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, [0xEE; 32]).unwrap();
     let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     archive.ingest(events[0].clone());
 
@@ -153,7 +153,7 @@ fn a_rejected_event_never_occupies_a_position() {
     let mut forged = events[2].clone();
     forged.sig = other[0].sig;
 
-    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, [0xEE; 32]).unwrap();
     let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     archive.ingest(events[0].clone());
     archive.ingest(events[1].clone());
@@ -178,7 +178,7 @@ fn a_range_comes_back_in_sequence_order() {
     let mut b = bench("range-order");
     let (o, events) = member(1, 5);
 
-    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+    let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, [0xEE; 32]).unwrap();
     let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     for e in &events {
         archive.ingest(e.clone());

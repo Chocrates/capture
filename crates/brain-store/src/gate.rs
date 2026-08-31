@@ -70,6 +70,8 @@ pub struct Gate<'a> {
     state: &'a mut Store,
     ops: &'a Ops,
     roster: Roster,
+    /// This device's own signing key, for the self-retirement guard.
+    own: [u8; 32],
 }
 
 impl<'a> Gate<'a> {
@@ -79,14 +81,30 @@ impl<'a> Gate<'a> {
     /// the projection may be absent, stale, or mid-rebuild, and ingest that
     /// trusts a stale roster admits events under keys that were retired. The
     /// log is the only thing that is never any of those.
-    pub fn open(log: &'a mut Log, state: &'a mut Store, ops: &'a Ops) -> Result<Self> {
-        let r = roster::build(&log.all()?);
+    /// `own` is this device's own signing key.
+    ///
+    /// Required rather than optional: what it enables is the refusal to accept
+    /// a retirement of *this* device that this device did not issue, and an
+    /// `Option` would make forgetting it a silent loss of that guard.
+    pub fn open(
+        log: &'a mut Log,
+        state: &'a mut Store,
+        ops: &'a Ops,
+        own: [u8; 32],
+    ) -> Result<Self> {
+        let mut r = roster::build(&log.all()?);
+        // The first of §5.3's three lockout guards. Applied here rather than
+        // left to callers because a guard nobody remembers to apply is one the
+        // design claims and the code does not have — and this one is inert
+        // right up until a malfunctioning peer retires every other device.
+        r.honour_self(&own);
         state.write_roster(&r)?;
         Ok(Gate {
             log,
             state,
             ops,
             roster: r,
+            own,
         })
     }
 
@@ -164,6 +182,7 @@ impl<'a> Gate<'a> {
     /// only thing that reconsiders refusals recorded by an older build.
     pub fn reconsider(&mut self) -> Result<usize> {
         self.roster = roster::build(&self.log.all()?);
+        self.roster.honour_self(&self.own);
         self.state.write_roster(&self.roster)?;
 
         let mut admitted = 0;
@@ -347,6 +366,10 @@ mod tests {
         ops: Ops,
     }
 
+    /// A key that is nobody's, so the self-retirement guard never fires and
+    /// these tests observe the roster as every *other* device sees it.
+    const OWN: [u8; 32] = [0xEE; 32];
+
     fn bench(name: &str) -> Bench {
         let dir = std::env::temp_dir().join(format!("brain-gate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -369,7 +392,7 @@ mod tests {
     fn nothing_is_accepted_before_a_roster_exists() {
         let mut b = bench("paused");
         let s = testing::mixed(1, 1, 2, 4);
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         assert!(!g.is_open());
         assert_eq!(g.offer(&s.events[0], 100).unwrap(), Outcome::Paused);
         assert_eq!(
@@ -390,7 +413,7 @@ mod tests {
         let mut d = testing::Origin::new(0);
         let root = d.roster_root();
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         assert!(matches!(g.offer(&root, 100).unwrap(), Outcome::Took(_)));
         assert!(g.is_open());
         assert_eq!(g.roster().key_for(&d.dev()), Some(&d.pubkey()));
@@ -410,7 +433,7 @@ mod tests {
             1_700_000_000_000,
         );
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&root, 100).unwrap();
         assert_eq!(
             g.offer(&e, 101).unwrap(),
@@ -440,7 +463,7 @@ mod tests {
             1_700_000_100_000,
         );
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&root, 100).unwrap();
         // Capture first, claim second — the order that would lose data.
         assert_eq!(
@@ -483,7 +506,7 @@ mod tests {
         );
         e.sig[0] ^= 0xFF;
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&root, 100).unwrap();
         assert_eq!(
             g.offer(&e, 101).unwrap(),
@@ -502,7 +525,7 @@ mod tests {
         let first = a.roster_root();
         let second = c.roster_root();
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&first, 100).unwrap();
         let out = g.offer(&second, 101).unwrap();
 
@@ -523,10 +546,10 @@ mod tests {
         let mut d = testing::Origin::new(0);
         let root = d.roster_root();
         {
-            let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+            let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
             g.offer(&root, 100).unwrap();
         }
-        let g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         assert!(g.is_open());
         assert_eq!(g.roster().key_for(&d.dev()), Some(&d.pubkey()));
     }
@@ -544,7 +567,7 @@ mod tests {
             1_700_000_000_000,
         );
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&root, 100).unwrap();
         assert_eq!(g.offer(&e, 101).unwrap(), Outcome::Took(Ingested::Accepted));
         assert_eq!(
@@ -583,7 +606,7 @@ mod tests {
         );
         let retire = laptop.retires(&phone, &[(phone.dev(), kept.header.seq, kept.header.id())]);
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         g.offer(&root, 100).unwrap();
         g.offer(&add_phone, 101).unwrap();
         g.offer(&kept, 102).unwrap();
@@ -626,7 +649,7 @@ mod tests {
         );
         let retire = laptop.retires(&phone, &[(phone.dev(), kept.header.seq, kept.header.id())]);
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         for e in [&root, &add_phone, &kept, &retire] {
             g.offer(e, 100).unwrap();
         }
@@ -671,7 +694,7 @@ mod tests {
             &[(phone.dev(), first.header.seq, first.header.id())],
         );
 
-        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
         for e in [&root, &add_phone, &first, &narrow] {
             g.offer(e, 100).unwrap();
         }

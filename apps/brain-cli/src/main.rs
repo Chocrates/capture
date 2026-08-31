@@ -120,6 +120,11 @@ fn run(command: Command) -> Result<()> {
         Command::ExportsPruned => ops::exports_pruned(paths()?),
         Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
         Command::Peers { json } => ops::peers(&paths()?, json),
+        Command::Retire { key, force } => pair::retire(paths()?, &key, force),
+        Command::Cosign { blob } => pair::cosign(paths()?, &blob),
+        Command::Readmit { cosign, by } => {
+            pair::readmit(paths()?, cosign.as_deref(), by.as_deref())
+        }
         Command::Pair { code, at } => match code {
             Some(c) => pair::accept(paths()?, &c, at.as_deref()),
             None => pair::offer(paths()?),

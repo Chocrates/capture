@@ -223,3 +223,228 @@ fn short(k: &[u8; 32]) -> String {
 fn now() -> u64 {
     jiff::Timestamp::now().as_millisecond().max(0) as u64
 }
+
+/// Stop accepting what a device writes from here on.
+///
+/// The remedy for a device that was lost or stolen. It retires the **key**,
+/// not an origin: retiring an origin would let the device mint a fresh
+/// incarnation on its next restart and walk straight back in.
+///
+/// What it does *not* do is delete anything. A retired device's past events
+/// were legitimately authored and stay valid — discarding them would mean
+/// losing real notes, which is a worse outcome than the access this closes.
+pub fn retire(paths: StorePaths, key: &str, force: bool) -> Result<()> {
+    let identity = Identity::load(&paths)?;
+    let me = identity.public().to_bytes();
+
+    let log = brain_store::log::Log::open_read(&paths.events)?;
+    let roster = brain_core::roster::build(&log.all()?);
+
+    let wanted = key.to_ascii_lowercase();
+    let matches: Vec<[u8; 32]> = roster
+        .keys
+        .iter()
+        .copied()
+        .filter(|k| short(k).starts_with(&wanted))
+        .collect();
+
+    let subject = match matches.as_slice() {
+        [] => {
+            return Err(Error::NotFound(format!(
+                "no device in the roster matches {key}"
+            )));
+        }
+        [one] => *one,
+        many => {
+            say!("{} devices start with {key}:", many.len());
+            for k in many {
+                say!("  {}", short(k));
+            }
+            return Err(Error::Usage("give more of the key".into()));
+        }
+    };
+
+    if subject == me {
+        // Retiring yourself is a thing you can mean, and it is also what a
+        // mistyped key most often turns out to be.
+        say!("{} is this device.", short(&subject));
+        say!("Retiring it stops every *other* device accepting what this one");
+        say!("writes from now on. This device will go on working locally.");
+    }
+    if roster.keys.len() == 1 {
+        return Err(Error::Usage(
+            "this is the only device in the roster, and a roster with nobody in it can never \
+             admit anyone again"
+                .into(),
+        ));
+    }
+
+    if !force {
+        say!(
+            "This will stop {} being accepted by this archive.",
+            short(&subject)
+        );
+        say!();
+        say!("  Its past events stay — they were legitimately authored.");
+        say!("  Anything it writes *after* the point this device has seen is refused.");
+        say!("  Other devices learn of it as they sync.");
+        say!();
+        say!("Re-run with --yes to go ahead.");
+        return Ok(());
+    }
+
+    let mut s = Session::open(paths.clone())?;
+    let id = s.retire(&subject, None)?;
+
+    say!("Retired {}.", short(&subject));
+    say!(
+        "  {}",
+        id.0[..4]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    say!();
+    say!("If it turns out to have written more than this device had seen, retire");
+    say!("it again once you know: the later head replaces this one.");
+    Ok(())
+}
+
+// ------------------------------------------------------------ readmission ---
+//
+// The way back from a lockout, and the only event whose validity does not
+// descend from current roster membership. It needs two signatures because any
+// member may retire any member: one compromised or malfunctioning device can
+// retire every other, after which `device_add` cannot help — it requires a
+// signature from a current member, and there are none left.
+//
+// Three steps rather than one, because the two signatures come from two
+// machines and that is the point. Forging this requires compromising two
+// devices *and* being in the room with them, which is a materially higher bar
+// than the single compromised device that caused the lockout.
+
+/// What this device needs another to vouch for.
+fn subject_blob(identity: &Identity) -> String {
+    format!(
+        "{}.{}",
+        hexed(&identity.public().to_bytes()),
+        hexed(&identity.incarnation().0)
+    )
+}
+
+fn hexed(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect()
+}
+
+/// Vouch for another device's re-admission.
+///
+/// Run on a device that still works, with the blob the locked-out one printed.
+/// It signs a statement about *which device* is being re-admitted and nothing
+/// else — this does not admit anybody by itself, and cannot: the signature is
+/// useless without a second one from the device it names.
+pub fn cosign(paths: StorePaths, blob: &str) -> Result<()> {
+    let identity = Identity::load(&paths)?;
+
+    let (key, incarnation) = blob
+        .split_once('.')
+        .ok_or_else(|| Error::Usage("that is not a re-admission request".into()))?;
+    let (Some(key), Some(incarnation)) = (unhex(key), unhex(incarnation)) else {
+        return Err(Error::Usage("that is not a re-admission request".into()));
+    };
+    let (Ok(key), Ok(incarnation)) = (
+        <[u8; 32]>::try_from(key.as_slice()),
+        <[u8; 16]>::try_from(incarnation.as_slice()),
+    ) else {
+        return Err(Error::Usage("that is not a re-admission request".into()));
+    };
+
+    if key == identity.public().to_bytes() {
+        return Err(Error::Usage(
+            "a device cannot vouch for itself — that is one device's say-so written twice".into(),
+        ));
+    }
+
+    // A fixed nonce, so the two devices do not have to agree one first. The
+    // digest is domain-separated and says only which device is meant, so a
+    // second copy of the signature re-admits the same device, which is what it
+    // already says.
+    let nonce = [0u8; 16];
+    let digest = brain_core::body::readmit_digest(&key, &incarnation, &nonce);
+    let sig = ed25519_dalek::Signer::sign(identity.signing(), &digest);
+
+    say!("On the other device:");
+    say!();
+    say!(
+        "  brain readmit --cosign {} --by {}",
+        hexed(&sig.to_bytes()),
+        hexed(&identity.public().to_bytes())
+    );
+    say!();
+    say!("This vouches for that device and nothing else. On its own it admits");
+    say!("nobody: it is useless without the signature of the device it names.");
+    Ok(())
+}
+
+/// Re-admit this device, with another's signature.
+pub fn readmit(paths: StorePaths, cosign: Option<&str>, by: Option<&str>) -> Result<()> {
+    let identity = Identity::load(&paths)?;
+
+    let (Some(cosign), Some(by)) = (cosign, by) else {
+        say!("This device needs another to vouch for it.");
+        say!();
+        say!("On a device that still works, run:");
+        say!();
+        say!("  brain cosign {}", subject_blob(&identity));
+        say!();
+        say!("then bring its answer back here.");
+        return Ok(());
+    };
+
+    let (Some(sig), Some(signer)) = (unhex(cosign), unhex(by)) else {
+        return Err(Error::Usage("that is not a co-signature".into()));
+    };
+    let (Ok(sig), Ok(signer)) = (
+        <[u8; 64]>::try_from(sig.as_slice()),
+        <[u8; 32]>::try_from(signer.as_slice()),
+    ) else {
+        return Err(Error::Usage("that is not a co-signature".into()));
+    };
+
+    let subject = Admitted {
+        pubkey: identity.public().to_bytes(),
+        incarnation: identity.incarnation().0,
+        noise: identity.noise_public(),
+    };
+
+    // Checked here as well as in the fold, so a mistyped signature is a
+    // message rather than an event that every device quietly refuses.
+    let digest = brain_core::body::readmit_digest(&subject.pubkey, &subject.incarnation, &[0; 16]);
+    let ok = ed25519_dalek::VerifyingKey::from_bytes(&signer)
+        .ok()
+        .and_then(|k| {
+            k.verify_strict(&digest, &ed25519_dalek::Signature::from_bytes(&sig))
+                .ok()
+        })
+        .is_some();
+    if !ok {
+        return Err(Error::Usage(
+            "that signature does not vouch for this device — check it was copied whole".into(),
+        ));
+    }
+
+    let mut s = Session::open(paths.clone())?;
+    s.readmit_with(&subject, &signer, &sig, [0; 16])?;
+
+    say!("Re-admitted {}.", short(&subject.pubkey));
+    say!("Other devices accept it again as they sync.");
+    Ok(())
+}

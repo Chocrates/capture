@@ -166,8 +166,9 @@ fn sync(a: &Device, b: &Device) {
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
 
         let mut s = Session::open(b_paths.clone()).unwrap();
+        let own = s.identity.public().to_bytes();
         let ops = Ops::open(&b_paths.ops).unwrap();
-        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
+        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own).unwrap();
         let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
         let done = exchange(&mut secure, &mut archive).expect("the responder finished");
         archive.settle().expect("folded what arrived");
@@ -180,8 +181,9 @@ fn sync(a: &Device, b: &Device) {
 
     {
         let mut s = Session::open(a.paths.clone()).unwrap();
+        let own = s.identity.public().to_bytes();
         let ops = Ops::open(&a.paths.ops).unwrap();
-        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
+        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own).unwrap();
         let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
         exchange(&mut secure, &mut archive).expect("the initiator finished");
         archive.settle().expect("folded what arrived");
@@ -502,4 +504,98 @@ fn pairing_admits_in_both_directions() {
         );
     }
     assert_eq!(a.note_count(), b.note_count());
+}
+
+// ------------------------------------------------------------- retirement ---
+
+#[test]
+fn a_retired_device_stops_being_a_member_on_both() {
+    // The remedy for a lost or stolen device, exercised through the same call
+    // the command uses. It had been implemented in the fold and tested there,
+    // with nothing able to author one — which is not a feature, it is a
+    // mechanism.
+    let a = Device::new("a-retire");
+    let b = Device::new("b-retire");
+    pair(&a, &b);
+    a.capture("before it was lost");
+    sync(&a, &b);
+
+    let stolen = b.identity().public().to_bytes();
+    a.session().retire(&stolen, None).unwrap();
+
+    let log = brain_store::log::Log::open_read(&a.paths.events).unwrap();
+    let roster = brain_core::roster::build(&log.all().unwrap());
+    assert!(
+        !roster.keys.contains(&stolen),
+        "the retired key is still a member"
+    );
+    assert!(
+        roster.key_for(&b.identity().dev()).is_some(),
+        "the retired device's past events lost the key they must still be checked against"
+    );
+}
+
+#[test]
+fn a_device_does_not_accept_being_retired_by_someone_else() {
+    // The first lockout guard, and the one that was inert: any member may
+    // retire any member, so one malfunctioning device could retire every
+    // other, and nothing honest could be re-admitted without two signatures.
+    //
+    // It deliberately makes the two disagree. A stolen device is unaffected,
+    // because what retiring it achieves is that its *peers* stop accepting its
+    // events, which they still do.
+    let a = Device::new("a-selfguard");
+    let b = Device::new("b-selfguard");
+    pair(&a, &b);
+    sync(&a, &b);
+
+    let victim = b.identity().public().to_bytes();
+    a.session().retire(&victim, None).unwrap();
+    sync(&a, &b);
+
+    // As a sees it: b is out.
+    let log = brain_store::log::Log::open_read(&a.paths.events).unwrap();
+    let mut as_a = brain_core::roster::build(&log.all().unwrap());
+    as_a.honour_self(&a.identity().public().to_bytes());
+    assert!(!as_a.keys.contains(&victim));
+
+    // As b sees itself: still a member, because it did not issue that.
+    let log = brain_store::log::Log::open_read(&b.paths.events).unwrap();
+    let mut as_b = brain_core::roster::build(&log.all().unwrap());
+    as_b.honour_self(&victim);
+    assert!(
+        as_b.keys.contains(&victim),
+        "a device locked itself out on another device's say-so"
+    );
+}
+
+#[test]
+fn two_signatures_undo_a_lockout() {
+    // Every honest device retired by one compromised member. device_add cannot
+    // help — it needs a signature from a current member and there are none —
+    // and pairing cannot either, because pairing bootstraps transport keys
+    // while the roster entry that gates ingest still has to come from a member.
+    let a = Device::new("a-lockout");
+    let b = Device::new("b-lockout");
+    pair(&a, &b);
+    sync(&a, &b);
+
+    let victim = b.admitted();
+    a.session().retire(&victim.pubkey, None).unwrap();
+
+    let nonce = [0u8; 16];
+    let digest = brain_core::body::readmit_digest(&victim.pubkey, &victim.incarnation, &nonce);
+    let cosigner = a.identity();
+    let sig = ed25519_dalek::Signer::sign(cosigner.signing(), &digest).to_bytes();
+
+    a.session()
+        .readmit_with(&victim, &cosigner.public().to_bytes(), &sig, nonce)
+        .unwrap();
+
+    let log = brain_store::log::Log::open_read(&a.paths.events).unwrap();
+    let roster = brain_core::roster::build(&log.all().unwrap());
+    assert!(
+        roster.keys.contains(&victim.pubkey),
+        "a co-signed re-admission did not restore membership"
+    );
 }

@@ -7,10 +7,10 @@
 //! nothing here to get wrong that a test without a network could catch, and a
 //! test with one would be the skipped test §5 warns about.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::IpAddr;
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::discovery::{
     ADVERTISED, SERVICE, Sighting, TXT_DIGEST, TXT_NAME, decode_value, encode_value,
@@ -42,6 +42,20 @@ impl std::error::Error for DiscoveryError {}
 pub struct Beacon {
     daemon: ServiceDaemon,
     registered: Option<String>,
+    /// The browse, opened once and kept.
+    ///
+    /// mDNS is a continuous conversation rather than a query with an answer:
+    /// a browse takes time to resolve anything, and a fresh one drained
+    /// immediately returns nothing every single time. The first version
+    /// re-opened it on every poll, so discovery silently never found a peer
+    /// and only the remembered-address fallback ever worked.
+    browsing: Option<Receiver<ServiceEvent>>,
+    /// What has been resolved so far, by advertised name.
+    ///
+    /// Kept across polls because the events arrive once. A caller asking "who
+    /// is out there" wants what is out there, not what happened to resolve in
+    /// the last few milliseconds.
+    seen: HashMap<[u8; ADVERTISED], Sighting>,
 }
 
 impl Beacon {
@@ -51,6 +65,8 @@ impl Beacon {
         Ok(Self {
             daemon,
             registered: None,
+            browsing: None,
+            seen: HashMap::new(),
         })
     }
 
@@ -100,14 +116,15 @@ impl Beacon {
     /// Non-blocking: whatever has resolved by the time this is called. mDNS is
     /// a continuous conversation rather than a query with an answer, so a
     /// caller polls this on the same schedule it does anything else.
-    pub fn sightings(&self) -> Result<Vec<Sighting>, DiscoveryError> {
-        let rx = self
-            .daemon
-            .browse(SERVICE)
-            .map_err(|e| DiscoveryError::Unavailable(e.to_string()))?;
-
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
+    pub fn sightings(&mut self) -> Result<Vec<Sighting>, DiscoveryError> {
+        if self.browsing.is_none() {
+            self.browsing = Some(
+                self.daemon
+                    .browse(SERVICE)
+                    .map_err(|e| DiscoveryError::Unavailable(e.to_string()))?,
+            );
+        }
+        let rx = self.browsing.as_ref().expect("just opened");
 
         while let Ok(event) = rx.try_recv() {
             let ServiceEvent::ServiceResolved(svc) = event else {
@@ -124,17 +141,29 @@ impl Beacon {
             let Some(addr) = svc.get_addresses().iter().next() else {
                 continue;
             };
-            if !seen.insert(name) {
-                continue;
-            }
-            out.push(Sighting {
-                pseudonym: name,
-                digest,
-                addr: format!("{}:{}", addr.to_ip_addr(), svc.get_port()),
-            });
+            // Replaced rather than skipped: a device that has rotated its
+            // digest is the case this exists to notice.
+            self.seen.insert(
+                name,
+                Sighting {
+                    pseudonym: name,
+                    digest,
+                    addr: format!("{}:{}", addr.to_ip_addr(), svc.get_port()),
+                },
+            );
         }
 
-        Ok(out)
+        Ok(self.seen.values().cloned().collect())
+    }
+
+    /// Forget what has been seen.
+    ///
+    /// For a network change: the addresses on the old one are wrong, and the
+    /// pseudonyms were derived against a different network so they will not be
+    /// recognised anyway.
+    pub fn forget(&mut self) {
+        self.seen.clear();
+        self.browsing = None;
     }
 }
 
