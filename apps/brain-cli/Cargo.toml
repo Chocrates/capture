@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 brain-core = { path = "../../crates/brain-core", features = ["std"] }
 brain-store = { path = "../../crates/brain-store" }
+# For `brain pair` only: the SPAKE2 exchange and a socket to run it over.
+# Without `mdns` — pairing is told where to look, and browsing is the daemon's.
+brain-sync = { path = "../../crates/brain-sync" }
 brain-parse = { path = "../../crates/brain-parse" }
 brain-time = { path = "../../crates/brain-time" }
 clap = { workspace = true }

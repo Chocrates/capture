@@ -21,6 +21,7 @@
 mod out;
 
 mod ops;
+mod pair;
 
 mod args;
 mod backup;
@@ -119,6 +120,10 @@ fn run(command: Command) -> Result<()> {
         Command::ExportsPruned => ops::exports_pruned(paths()?),
         Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
         Command::Peers { json } => ops::peers(&paths()?, json),
+        Command::Pair { code, at } => match code {
+            Some(c) => pair::accept(paths()?, &c, at.as_deref()),
+            None => pair::offer(paths()?),
+        },
         Command::Export { json } => backup::export(paths()?, json),
         Command::Restore {
             from,

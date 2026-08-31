@@ -120,6 +120,11 @@ pub enum Command {
     AdmissionSeen { key: String },
     /// Every device in the roster, and when this one last reached it.
     Peers { json: bool },
+    /// Admit another device, or join the roster of one.
+    Pair {
+        code: Option<String>,
+        at: Option<String>,
+    },
     /// Write everything appended since the last export.
     Export { json: bool },
     /// Rebuild a store from exported events.
@@ -601,6 +606,20 @@ where
                 }),
             }
         }
+        "pair" => {
+            let rest = &args[1..];
+            let at = rest
+                .iter()
+                .position(|a| a == "--at")
+                .and_then(|i| rest.get(i + 1).cloned());
+            let code = rest.iter().find(|a| !a.starts_with('-')).cloned();
+            let code = match (&code, &at) {
+                // `--at`'s value is not the code.
+                (Some(c), Some(a)) if c == a => None,
+                _ => code,
+            };
+            Ok(Command::Pair { code, at })
+        }
         "peers" => Ok(Command::Peers {
             json: has_json(&args[1..]),
         }),
@@ -842,6 +861,9 @@ OPERATING
   brain export            write everything appended since the last export
   brain restore <dir>     rebuild from exported events
   brain unflag <name>     clear a credential flag so the note is exported again
+  brain pair              show a code, and admit whoever types it
+  brain pair CODE --at ADDR
+                          type a code shown on another device
   brain peers             every device in the roster, and when it was
                           last reached
   brain admission-seen KEY

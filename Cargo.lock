@@ -531,6 +531,7 @@ dependencies = [
  "brain-core",
  "brain-parse",
  "brain-store",
+ "brain-sync",
  "brain-time",
  "clap",
  "ed25519-dalek",

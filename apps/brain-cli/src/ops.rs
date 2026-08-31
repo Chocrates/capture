@@ -487,7 +487,8 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
                     "{{\"key\":\"{}\",\"self\":{},\"addr\":{},\"last_seen\":{}}}",
                     short_key(k),
                     k == &me,
-                    p.map_or("null".into(), |p| format!("\"{}\"", p.addr)),
+                    p.and_then(|p| p.addr.as_deref())
+                        .map_or("null".into(), |a| format!("\"{a}\"")),
                     p.and_then(|p| p.last_seen)
                         .map_or("null".into(), |t| t.to_string()),
                 )
@@ -502,16 +503,21 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
             say!("  {}  this device", short_key(k));
             continue;
         }
+        // The address and the last contact are separate facts, and a peer can
+        // have either without the other: one that only ever dials in is
+        // demonstrably alive at no address this device can call.
         match seen(k) {
-            Some(p) => match p.last_seen {
-                Some(t) => say!(
-                    "  {}  {} — last reached {} ago",
-                    short_key(k),
-                    p.addr,
-                    ms(now.saturating_sub(t))
-                ),
-                None => say!("  {}  {} — never reached", short_key(k), p.addr),
-            },
+            Some(p) => {
+                let at = p.addr.clone().unwrap_or_else(|| "no address".into());
+                match p.last_seen {
+                    Some(t) => say!(
+                        "  {}  {at} — last reached {} ago",
+                        short_key(k),
+                        ms(now.saturating_sub(t))
+                    ),
+                    None => say!("  {}  {at} — never reached", short_key(k)),
+                }
+            }
             None => say!("  {}  never seen on any network", short_key(k)),
         }
     }

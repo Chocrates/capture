@@ -39,6 +39,27 @@ pub const ADVERTISED: usize = 8;
 /// The mDNS service devices advertise and browse.
 pub const SERVICE: &str = "_bsp._tcp.local.";
 
+/// The port a device listens for peers on.
+///
+/// Fixed rather than ephemeral, and named here rather than in the daemon,
+/// because two things need to agree on it: the daemon that listens, and
+/// pairing, which records where a peer can be reached before any daemon has
+/// been seen. A port that changed on every restart would make every
+/// remembered address wrong — on precisely the networks where mDNS is blocked
+/// and a remembered address is all there is.
+///
+/// Overridable for the case of two stores on one machine, which is otherwise
+/// impossible to run and is exactly what testing needs.
+pub const SYNC_PORT: u16 = 41822;
+
+/// The port to listen on, honouring `BRAIN_SYNC_PORT`.
+pub fn sync_port() -> u16 {
+    std::env::var("BRAIN_SYNC_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SYNC_PORT)
+}
+
 /// Which network this is, as far as the device can tell.
 ///
 /// Opaque on purpose. What identifies a network differs by platform and by

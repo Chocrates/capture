@@ -58,6 +58,18 @@ pub fn secret() -> Result<[u8; 32]> {
     Ok(b)
 }
 
+/// Eight bytes, for a pairing code.
+///
+/// The code a person reads across is derived from these rather than chosen, so
+/// it is unguessable in the way the exchange assumes — SPAKE2 makes each wrong
+/// guess cost an online attempt, and that is only worth anything if the right
+/// answer cannot be predicted.
+pub fn pairing_entropy() -> Result<[u8; 8]> {
+    let mut b = [0u8; 8];
+    fill(&mut b)?;
+    Ok(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

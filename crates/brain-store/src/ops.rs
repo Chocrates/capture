@@ -146,18 +146,37 @@ CREATE TABLE IF NOT EXISTS redact_peers (
   PRIMARY KEY (redact_evt, peer_key)
 ) STRICT;
 
+-- The X25519 key a peer answers a handshake with, learned out of band.
+--
+-- Normally this comes from the log: a membership event is where a device says
+-- what it is. A newly joined device has no log yet — that is what it is about
+-- to sync — and it cannot dial anybody to get one without a key to dial with.
+-- The pairing grant carries the admitter's key precisely to break that
+-- deadlock, and this is where it is kept until the log catches up.
+CREATE TABLE IF NOT EXISTS peer_noise (
+  peer_key BLOB PRIMARY KEY,
+  noise    BLOB NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admissions_seen (
   peer_key BLOB PRIMARY KEY,
   seen_at  INTEGER NOT NULL
 ) STRICT;
 ";
 
-/// Where a peer was last reached, and how many dials have failed since.
+/// What is known about a peer: where it lives, and when it was last heard.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PeerAddress {
     /// The peer's public key. Membership is keyed by key, not by origin (§5.3).
     pub key: [u8; 32],
-    pub addr: String,
+    /// Where to dial it, if that is known.
+    ///
+    /// Optional because the two facts are learned separately and one does not
+    /// imply the other: a peer that only ever dials *in* is demonstrably alive
+    /// and has no address here, since the port it called from is ephemeral.
+    /// Collapsing them would mean either inventing an address that never
+    /// answers or reporting a device reached a minute ago as never seen.
+    pub addr: Option<String>,
     /// Consecutive failed dials, which is what the backoff is computed from.
     pub attempts: u32,
     /// When it was last reached, so a peer gone quiet for a week can be
@@ -534,6 +553,22 @@ impl Ops {
     /// bad signature however the roster changes, and retrying those forever
     /// would turn every membership event into a re-verification of the entire
     /// forensic pile.
+    /// Record that a peer answered, without claiming to know where it lives.
+    ///
+    /// An inbound connection proves the peer is alive and says nothing about
+    /// where to call it: the source port is the ephemeral one it dialled out
+    /// from, and dialling it back would never answer. Writing that down as an
+    /// address is worse than writing nothing, because it replaces an address
+    /// that worked with one that cannot.
+    pub fn peer_answered(&self, peer_key: &[u8; 32], at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO peer_state (peer_key, last_seen, attempts) VALUES (?1, ?2, 0)
+             ON CONFLICT(peer_key) DO UPDATE SET last_seen = ?2, attempts = 0",
+            rusqlite::params![&peer_key[..], at as i64],
+        )?;
+        Ok(())
+    }
+
     /// Record that a peer was reached, and what it was advertising.
     ///
     /// Reaching it resets the retry count: backoff exists to stop dialling a
@@ -592,16 +627,18 @@ impl Ops {
         Ok(n as u32)
     }
 
-    /// Every peer this device has an address for, for the static fallback.
+    /// Everything known about every peer.
+    ///
+    /// Including those with no address: they are still the answer to "when was
+    /// this device last heard from", which is what §4.5 promotes.
     pub fn peer_addresses(&self) -> Result<Vec<PeerAddress>> {
         let mut q = self.conn.prepare(
-            "SELECT peer_key, addr, attempts, last_seen FROM peer_state
-             WHERE addr IS NOT NULL ORDER BY peer_key",
+            "SELECT peer_key, addr, attempts, last_seen FROM peer_state ORDER BY peer_key",
         )?;
         let rows = q
             .query_map([], |r| {
                 let key: Vec<u8> = r.get(0)?;
-                let addr: String = r.get(1)?;
+                let addr: Option<String> = r.get(1)?;
                 let attempts: i64 = r.get(2)?;
                 let seen: Option<i64> = r.get(3)?;
                 Ok((key, addr, attempts as u32, seen.map(|s| s as u64)))
@@ -726,6 +763,47 @@ impl Ops {
             }
         }
         Ok(by_event.into_iter().map(|(e, p)| (EventId(e), p)).collect())
+    }
+
+    /// Remember how to open a session with a peer, learned at pairing.
+    pub fn learned_noise(&self, peer_key: &[u8; 32], noise: &[u8; 32]) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO peer_noise (peer_key, noise) VALUES (?1, ?2)
+             ON CONFLICT(peer_key) DO UPDATE SET noise = ?2",
+            rusqlite::params![&peer_key[..], &noise[..]],
+        )?;
+        Ok(())
+    }
+
+    /// The key to open a session with, if one was learned out of band.
+    pub fn noise_for(&self, peer_key: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+        let row: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT noise FROM peer_noise WHERE peer_key = ?1",
+                rusqlite::params![&peer_key[..]],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()))
+    }
+
+    /// Every peer this device knows how to dial, whatever the log says.
+    ///
+    /// A device that has just joined has exactly one of these and no log, so
+    /// this is the only thing that lets it start.
+    pub fn dialable(&self) -> Result<Vec<[u8; 32]>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT peer_key FROM peer_noise ORDER BY peer_key")?;
+        let rows = q.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Ok(k) = <[u8; 32]>::try_from(r?.as_slice()) {
+                out.push(k);
+            }
+        }
+        Ok(out)
     }
 
     pub fn retryable(&self, reason: &str) -> Result<Vec<([u8; 32], Vec<u8>)>> {
@@ -900,7 +978,7 @@ mod tests {
 
         let addrs = ops.peer_addresses().unwrap();
         assert_eq!(addrs.len(), 1);
-        assert_eq!(addrs[0].addr, "192.168.1.40:9999");
+        assert_eq!(addrs[0].addr.as_deref(), Some("192.168.1.40:9999"));
         assert!(!ops.peer_has_news(&[1; 32], &[7; 8]).unwrap());
         clean(&p);
     }
@@ -1072,6 +1150,44 @@ mod tests {
             .query_row("SELECT acked_at FROM redact_peers", [], |r| r.get(0))
             .unwrap();
         assert_eq!(at, Some(2_000), "a duplicate ack moved the time it landed");
+        clean(&p);
+    }
+    #[test]
+    fn answering_does_not_overwrite_a_working_address() {
+        // An inbound connection arrives from an ephemeral source port. Writing
+        // that down as the peer's address replaces one that works with one
+        // that can never answer — and the failure only shows up later, as a
+        // peer that has silently stopped being reachable.
+        let p = tmp("peer-answered");
+        let ops = Ops::open(&p).unwrap();
+        ops.peer_reached(&[1; 32], "192.168.1.40:41822", 1_000)
+            .unwrap();
+
+        ops.peer_answered(&[1; 32], 2_000).unwrap();
+
+        let a = &ops.peer_addresses().unwrap()[0];
+        assert_eq!(a.addr.as_deref(), Some("192.168.1.40:41822"));
+        assert_eq!(
+            a.last_seen,
+            Some(2_000),
+            "answering did not count as being reached"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn answering_from_an_unknown_peer_records_no_address() {
+        let p = tmp("peer-answered-new");
+        let ops = Ops::open(&p).unwrap();
+        ops.peer_answered(&[1; 32], 2_000).unwrap();
+
+        let rows = ops.peer_addresses().unwrap();
+        assert_eq!(rows.len(), 1, "the peer should be known, just not dialable");
+        assert_eq!(
+            rows[0].addr, None,
+            "an address was invented for a peer that only ever dialled in"
+        );
+        assert_eq!(rows[0].last_seen, Some(2_000));
         clean(&p);
     }
 }

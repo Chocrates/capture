@@ -34,14 +34,6 @@ use brain_sync::mdns::Beacon;
 use brain_sync::session::Session as Secure;
 use brain_sync::tcp::Tcp;
 
-/// The port the daemon listens on.
-///
-/// Fixed rather than ephemeral, because the static fallback dials a remembered
-/// address and a port that changed on every restart would make every
-/// remembered address wrong — on precisely the networks where mDNS is blocked
-/// and the fallback is all there is.
-const PORT: u16 = 41822;
-
 /// How often to look around when nothing is happening.
 const IDLE: Duration = Duration::from_secs(30);
 
@@ -75,7 +67,8 @@ fn run() -> Result<(), brain_store::Error> {
     // the shape the transport was written for — `Transport` requires `Send`
     // precisely because of this — and with a handful of devices the count is a
     // handful.
-    let listener = TcpListener::bind(("0.0.0.0", PORT))?;
+    let port = discovery::sync_port();
+    let listener = TcpListener::bind(("0.0.0.0", port))?;
     let (tx, rx) = mpsc::channel();
     {
         let tx = tx.clone();
@@ -99,7 +92,7 @@ fn run() -> Result<(), brain_store::Error> {
 
     let mut round = 0u64;
     loop {
-        if let Err(e) = tick(&paths, &identity, &mut beacon, round) {
+        if let Err(e) = tick(&paths, &identity, &mut beacon, round, port) {
             // A round that fails is a round. The next one may find a different
             // network, a woken peer, or a released lock.
             tracing::warn!(%e, "sync round did not complete");
@@ -130,6 +123,7 @@ fn tick(
     identity: &Identity,
     beacon: &mut Option<Beacon>,
     round: u64,
+    port: u16,
 ) -> Result<(), brain_store::Error> {
     let (roster, heads) = look(paths)?;
     let Some(secret) = roster.secret else {
@@ -152,17 +146,28 @@ fn tick(
     if let Some(b) = beacon {
         let pseudonym = discovery::pseudonym(&secret, &net, epoch, &me);
         let digest = discovery::digest(&secret, &net, epoch, &heads_pairs);
-        if let Err(e) = b.advertise(&pseudonym, &digest, PORT, &local_addresses()) {
+        if let Err(e) = b.advertise(&pseudonym, &digest, port, &local_addresses()) {
             tracing::info!(%e, "could not advertise");
         }
     }
 
-    let members: Vec<[u8; 32]> = roster.keys.iter().copied().filter(|k| k != &me).collect();
+    let ops = Ops::open(&paths.ops)?;
+
+    // The roster, plus anyone pairing taught this device about. A device that
+    // has just joined is not yet in its own roster — the admission lives in
+    // the *other* device's log — so a daemon that only ever dialled roster
+    // members would never make the first connection and would never receive
+    // the log that would put it in the roster. That deadlock is why the
+    // pairing record is consulted here rather than only in the surfaces.
+    let mut members: Vec<[u8; 32]> = roster.keys.iter().copied().filter(|k| k != &me).collect();
+    for k in ops.dialable()? {
+        if k != me && !members.contains(&k) {
+            members.push(k);
+        }
+    }
     if members.is_empty() {
         return Ok(());
     }
-
-    let ops = Ops::open(&paths.ops)?;
     let mut reachable = Vec::new();
 
     // Whoever is advertising, plus whoever was remembered. The two produce the
@@ -178,6 +183,10 @@ fn tick(
         }
     }
     for p in ops.peer_addresses()? {
+        // Only those with a remembered address: this is the fallback for when
+        // nothing is advertising, and a peer with no address is one there is
+        // no way to call.
+        let Some(addr) = p.addr.clone() else { continue };
         if p.key == me || reachable.iter().any(|(k, _, _)| k == &p.key) {
             continue;
         }
@@ -186,7 +195,7 @@ fn tick(
         if p.attempts > 0 && !round.is_multiple_of(u64::from(1 + p.attempts.min(8))) {
             continue;
         }
-        reachable.push((p.key, p.addr, None));
+        reachable.push((p.key, addr, None));
     }
 
     for (peer, addr, digest) in brain_sync::anti_entropy::select(
@@ -251,10 +260,6 @@ fn answer(
     identity: &Identity,
     stream: std::net::TcpStream,
 ) -> Result<(), brain_store::Error> {
-    let peer_addr = stream
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_default();
     let tcp = Tcp::new(stream).map_err(brain_store::Error::Io)?;
 
     // Who dialled is established by the handshake rather than claimed before
@@ -288,7 +293,10 @@ fn answer(
     };
 
     let done = reconcile(paths, &mut secure)?;
-    Ops::open(&paths.ops)?.peer_reached(&member, &peer_addr, now())?;
+    // Alive, but not necessarily reachable at the address it dialled from —
+    // that is an ephemeral source port. Where to call it back comes from the
+    // advertisement, or from a remembered address, not from this.
+    Ops::open(&paths.ops)?.peer_answered(&member, now())?;
     tracing::info!(peer = %short(&member), received = done.received, "answered a peer");
     Ok(())
 }
@@ -326,7 +334,25 @@ fn look(
 }
 
 /// The X25519 key a peer answers a handshake with.
+///
+/// The log first, because a membership event is where a device says what it
+/// is. Then what pairing learned, which is all a freshly joined device has:
+/// it cannot dial anybody without a key, the key normally comes from the log,
+/// and the log is what it is trying to fetch.
 fn noise_key_for(paths: &StorePaths, peer: &[u8; 32]) -> Result<[u8; 32], brain_store::Error> {
+    if let Some(k) = from_log(paths, peer)? {
+        return Ok(k);
+    }
+    if let Some(k) = Ops::open(&paths.ops)?.noise_for(peer)? {
+        return Ok(k);
+    }
+    Err(brain_store::Error::Usage(format!(
+        "device {} has published no key to open a session with",
+        short(peer)
+    )))
+}
+
+fn from_log(paths: &StorePaths, peer: &[u8; 32]) -> Result<Option<[u8; 32]>, brain_store::Error> {
     let log = brain_store::log::Log::open_read(&paths.events)?;
     for e in log.all()? {
         if !matches!(
@@ -344,13 +370,10 @@ fn noise_key_for(paths: &StorePaths, peer: &[u8; 32]) -> Result<[u8; 32], brain_
         if &claim.pubkey == peer
             && let Some(noise) = claim.noise
         {
-            return Ok(noise);
+            return Ok(Some(noise));
         }
     }
-    Err(brain_store::Error::Usage(format!(
-        "device {} has published no key to open a session with",
-        short(peer)
-    )))
+    Ok(None)
 }
 
 fn parse_dev(hex: &str) -> Option<brain_core::Dev> {
