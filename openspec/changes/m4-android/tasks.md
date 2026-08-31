@@ -26,8 +26,8 @@
   - **Enter did nothing at first.** The field was multi-line, so Enter inserted a newline and `ImeAction.Done` never fired. It looked right, accepted the text, and silently did nothing on the commit key. §0.2 argues the capture gesture must not differ between devices, and "Enter commits on the desktop, inserts whitespace on the phone" is exactly that difference — and the kind nobody reports, because it reads as their own mistake.
 - [x] 4.2 Share-sheet target, attaching the source URL where the sharing application offers one. **Done**, and it fills a field §2.3 has carried since M1 with nothing able to write it — the desktop has no share gesture. The URL goes in the envelope, not the text: pasted into the text it would become part of what you wrote, and be searched, edited and redacted as though you had typed it. Also registered for `PROCESS_TEXT`, so selected text in any application can be captured without leaving it.
   - **The first version crashed and lost the shared text.** `Theme.NoDisplay` requires `finish()` before `onResume()` completes, and the capture is asynchronous because it must be committed before reporting success. The platform threw, the process died, and nothing was stored — a failure invisible from the sharing application's side, which shows a share sheet that appears to have worked.
-- [ ] 4.3 Hold-to-talk: record, commit a blob reference, stop. **No transcription on the phone** — the phone's job ends at "the audio exists".
-- [ ] 4.4 Assistant voice intent. Last of the four deliberately: it depends on an integration surface that has changed repeatedly across Android versions, and the other three do not.
+- [~] 4.3 Hold-to-talk: record, commit a blob reference, stop. **No transcription on the phone** — the phone's job ends at "the audio exists". **Blocked on the blob plane, which does not exist**: §5.6 specifies it and M3 did not build it. There is no event kind for a blob, no content-addressed storage, and no `WANT`/`BLOB` messages — the `blobs/` directory is created and nothing writes to it. Voice therefore needs a new frozen event kind, local storage and two wire messages, which is the first change to the log's encodings since M3 was archived. Deferred to section 9 rather than squeezed in here: a frozen encoding decided in a hurry is permanent from its first write.
+- [~] 4.4 Assistant voice intent. Deferred with 4.3 — it is a voice surface and needs the same blob plane underneath.
 - [ ] 4.5 **Measure what each surface costs**, gesture to committed. The desktop's chord has a latency histogram; the phone should be able to answer the same question rather than assert it.
 
 ## 5. Reading
@@ -64,3 +64,18 @@
 - [ ] 8.3 Confirm the desktop capture gesture is unchanged — chord, overlay, commit key, latency histogram. §8.10 freezes it for this milestone.
 - [ ] 8.4 `make ci` still passes, and `make android` passes alongside it.
 - [ ] 8.5 Use it for a week as the primary capture surface, and record what makes capture feel slow or uncertain. This is M1's item 13.6 finally answerable, on the device where most thoughts actually arrive.
+
+## 9. The blob plane (§5.6), before voice can land
+
+Deferred out of section 4 deliberately. Voice capture is not a surface on top
+of existing machinery: it needs a frozen event kind, content-addressed storage
+and two wire messages, and it is the first change to the log's encodings since
+M3 was archived. A frozen encoding decided in a hurry is permanent from its
+first write.
+
+- [ ] 9.1 Content-addressed local storage under `blobs/`, keyed by `blake3`. Verification is then free and duplicates impossible.
+- [ ] 9.2 An event kind referencing a blob, with a golden vector **before anything writes one** — the same discipline every other body got.
+- [ ] 9.3 `WANT`/`BLOB` inside the Noise session, 32 KiB chunks so one fits in a transport message. **Not a separate unencrypted byte-serving path** — §5.2 names that as the easy mistake, and it would put audio in the clear on the LAN while the note describing it is encrypted.
+- [ ] 9.4 Range-resumable, so an interrupted 40 MB transfer resumes rather than restarts.
+- [ ] 9.5 Distinguish **evict** (one device drops bytes, refetchable), **expire** (every replica drops it, not recoverable) and **redact** (every replica, immediately, deliberately unrecoverable). §5.6 says these were conflated in an earlier draft.
+- [ ] 9.6 Then hold-to-talk, and then the assistant intent.
