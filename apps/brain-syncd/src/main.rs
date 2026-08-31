@@ -37,7 +37,35 @@ use brain_sync::tcp::Tcp;
 /// How often to look around when nothing is happening.
 const IDLE: Duration = Duration::from_secs(30);
 
+/// What to say when asked, rather than starting.
+const USAGE: &str = "\
+brain-syncd — find paired devices and reconcile with them
+
+    brain-syncd            run in the foreground until stopped
+    brain-syncd --help     this
+
+It takes no other options. Where the store lives comes from $BRAIN_HOME or the
+usual place, and the port from $BRAIN_SYNC_PORT — which exists for the one case
+of two stores on one machine, and is otherwise best left alone.
+
+It reads the store without the writer lock and takes it only for as long as it
+takes to hand arriving events over, so it can run alongside the overlay and the
+CLI without contending with either.
+
+Sync does nothing until a second device exists. To add one:  brain pair
+";
+
 fn main() {
+    // Anything but a bare invocation prints this. A daemon that answered an
+    // unrecognised flag by opening a listening socket would be one that
+    // started when somebody was trying to find out what it does.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        let asked = args.iter().any(|a| a == "--help" || a == "-h");
+        print!("{USAGE}");
+        std::process::exit(if asked { 0 } else { 2 });
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
