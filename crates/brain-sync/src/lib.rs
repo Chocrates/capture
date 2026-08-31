@@ -40,6 +40,7 @@ extern crate alloc;
 pub mod discovery;
 pub mod mdns;
 pub mod message;
+pub mod pairing;
 pub mod session;
 pub mod transport;
 

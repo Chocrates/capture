@@ -273,6 +273,27 @@ pub fn status(paths: &StorePaths) -> Result<()> {
         attention.push("captures are being spooled — the store could not be written".into());
     }
     let identity = brain_store::identity::Identity::load(paths)?;
+
+    // A device in the roster that this one neither paired nor admitted itself.
+    //
+    // Usually ordinary — a pairing performed on another device, which is the
+    // whole point of the roster replicating. But it is also what a compromised
+    // device admitting an attacker looks like, and §5.3 is explicit that
+    // nothing prevents that: the remedy is that it is *seen*. Nothing here can
+    // tell the two apart, so it asks rather than deciding, and stays until
+    // answered.
+    let own = std::collections::BTreeSet::from([identity.public().to_bytes()]);
+    let unexpected = ops.unexpected_admissions(&state.roster_keys()?, &own)?;
+    for key in &unexpected {
+        attention.push(format!(
+            "a device was admitted that this one did not pair or admit: {}\n\
+             If you paired it on another device, this is expected. If not, it can\n\
+             read everything in the archive. Then: brain admission-seen {}",
+            short_key(key),
+            short_key(key)
+        ));
+    }
+
     let w = identity.watermark();
     let lead = brain_core::hlc::HlcState::restore(w.hlc_wall, w.hlc_counter)
         .lead_ms(jiff::Timestamp::now().as_millisecond().max(0) as u64);
@@ -470,6 +491,49 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
 // ------------------------------------------------------------------ set ----
 
 /// Acknowledge that stale export files have been dealt with.
+/// Accept a device this one did not admit.
+///
+/// Matched by prefix, because the prefix is what `brain health` prints and
+/// what a person can compare against the other device's screen. An ambiguous
+/// prefix is refused rather than guessed: acknowledging the wrong key would
+/// silence the report about a device nobody recognises while leaving the one
+/// that was actually expected still shouting.
+pub fn admission_seen(paths: StorePaths, key: &str) -> Result<()> {
+    let ops = Ops::open(&paths.ops)?;
+    let state = read::open(&paths)?;
+    let identity = brain_store::identity::Identity::load(&paths)?;
+    let own = std::collections::BTreeSet::from([identity.public().to_bytes()]);
+
+    let wanted = key.to_ascii_lowercase();
+    let candidates: Vec<[u8; 32]> = ops
+        .unexpected_admissions(&state.roster_keys()?, &own)?
+        .into_iter()
+        .filter(|k| short_key(k).starts_with(&wanted))
+        .collect();
+
+    match candidates.as_slice() {
+        [] => {
+            say!("No unacknowledged admission matches {key}.");
+            Ok(())
+        }
+        [one] => {
+            let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+            ops.acknowledge_admission(one, now)?;
+            say!("Acknowledged {}.", short_key(one));
+            say!("Recorded as seen, not as paired — this device still did not admit it.");
+            Ok(())
+        }
+        many => {
+            say!("{} admissions start with {key}:", many.len());
+            for k in many {
+                say!("  {}", short_key(k));
+            }
+            say!("Give more of the key.");
+            Ok(())
+        }
+    }
+}
+
 pub fn exports_pruned(paths: StorePaths) -> Result<()> {
     let ops = Ops::open(&paths.ops)?;
     let n = ops.stale_export_count()?;
@@ -553,4 +617,13 @@ mod tests {
         // different fact from a corrupt event and must read as one.
         assert_eq!(kind_name(Kind(9999)), "unknown");
     }
+}
+
+/// Enough of a key for a person to compare against what another device shows.
+///
+/// Not the whole thing: thirty-two bytes of hex is not something anyone reads,
+/// and a prefix nobody checks is worse than a prefix short enough that they
+/// do.
+fn short_key(k: &[u8; 32]) -> String {
+    k[..6].iter().map(|b| format!("{b:02x}")).collect()
 }

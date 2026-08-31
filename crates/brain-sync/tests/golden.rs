@@ -136,3 +136,65 @@ fn the_protocol_version_is_on_the_wire() {
         other => panic!("a hello decoded as {other:?}"),
     }
 }
+
+// ------------------------------------------------------------- pairing ----
+//
+// These cross before either device is on the other's roster, which makes them
+// the only messages a device decodes from something it has not yet admitted.
+// A newcomer running a build older than the admitter's has to read the grant
+// or it joins a mesh it cannot talk to.
+
+#[test]
+fn an_offer_encodes_the_same_way_for_ever() {
+    let m = brain_sync::pairing::Offer {
+        pubkey: [0x11; 32],
+        incarnation: [0x22; 16],
+        noise: [0x33; 32],
+    };
+    let mut b = Vec::new();
+    minicbor::encode(&m, &mut b).expect("encoding into a Vec is infallible");
+    assert_eq!(
+        hex(&b),
+        // array(3) · pubkey(32) · incarnation(16) · noise(32)
+        "8358201111111111111111111111111111111111111111111111111111111111111111502222222222222222222222222222222258203333333333333333333333333333333333333333333333333333333333333333"
+    );
+}
+
+#[test]
+fn a_grant_encodes_the_same_way_for_ever() {
+    let m = brain_sync::pairing::Grant {
+        pubkey: [0x44; 32],
+        noise: [0x55; 32],
+        members: vec![[0x44; 32].into()],
+        secret: Some([0x66; 32]),
+    };
+    let mut b = Vec::new();
+    minicbor::encode(&m, &mut b).expect("encoding into a Vec is infallible");
+    assert_eq!(
+        hex(&b),
+        // array(4) · pubkey(32) · noise(32) · members: array(1) of bytes(32)
+        // · secret(32). The members are byte strings, not arrays of integers.
+        "845820444444444444444444444444444444444444444444444444444444444444444458205555555555555555555555555555555555555555555555555555555555555555815820444444444444444444444444444444444444444444444444444444444444444458206666666666666666666666666666666666666666666666666666666666666666"
+    );
+}
+
+/// An archive that has never rotated its secret has none to give, and a
+/// newcomer must be able to tell that from being given one.
+#[test]
+fn a_grant_without_a_secret_encodes_the_same_way_for_ever() {
+    let m = brain_sync::pairing::Grant {
+        pubkey: [0x44; 32],
+        noise: [0x55; 32],
+        members: vec![],
+        secret: None,
+    };
+    let mut b = Vec::new();
+    minicbor::encode(&m, &mut b).expect("encoding into a Vec is infallible");
+    assert_eq!(
+        hex(&b),
+        // array(3), not array(4): minicbor elides a trailing None, so "no
+        // secret" is one field shorter rather than a null in the fourth slot.
+        // Anything added after `secret` must therefore tolerate its absence.
+        "83582044444444444444444444444444444444444444444444444444444444444444445820555555555555555555555555555555555555555555555555555555555555555580"
+    );
+}

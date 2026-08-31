@@ -22,7 +22,7 @@
 //! - The projection generation pointer, which describes this device's files.
 //! - Peer addresses, and other things learned rather than derived.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use brain_core::EventId;
@@ -113,6 +113,23 @@ CREATE TABLE IF NOT EXISTS export_head (
 CREATE TABLE IF NOT EXISTS pairings (
   peer_key  BLOB PRIMARY KEY,
   paired_at INTEGER NOT NULL
+) STRICT;
+
+-- Admissions the person has seen and accepted.
+--
+-- Separate from `pairings` because they say different things. A pairing is
+-- a statement that this device did the pairing; an acknowledgement is a
+-- statement that it did not, and knows. Storing
+-- an acknowledgement as a pairing would erase the difference, and the next
+-- unexpected admission of the same key would go unreported.
+--
+-- Acknowledgeable rather than self-clearing: a device this one did not admit
+-- appearing in the roster is either an ordinary consequence of pairing on
+-- another device, or the compromise §5.3 admits it cannot prevent. Nothing
+-- here can tell those apart, so it asks rather than deciding.
+CREATE TABLE IF NOT EXISTS admissions_seen (
+  peer_key BLOB PRIMARY KEY,
+  seen_at  INTEGER NOT NULL
 ) STRICT;
 ";
 
@@ -586,6 +603,57 @@ impl Ops {
             .collect())
     }
 
+    /// Record that this device performed a pairing.
+    ///
+    /// What makes "a device was added that you did not expect" computable at
+    /// all. Without it every admission in the log looks the same, including
+    /// the ones this device performed itself.
+    pub fn paired(&self, peer_key: &[u8; 32], at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pairings (peer_key, paired_at) VALUES (?1, ?2)",
+            rusqlite::params![&peer_key[..], at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Accept an admission this device did not perform.
+    pub fn acknowledge_admission(&self, peer_key: &[u8; 32], at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO admissions_seen (peer_key, seen_at) VALUES (?1, ?2)",
+            rusqlite::params![&peer_key[..], at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Of the keys now in the roster, which this device neither paired,
+    /// admitted itself, nor has been told about.
+    ///
+    /// `own` is every key this device authors under — normally one, but a
+    /// restored device keeps its key across incarnations and a device that has
+    /// re-keyed has more than one.
+    pub fn unexpected_admissions(
+        &self,
+        roster: &BTreeSet<[u8; 32]>,
+        own: &BTreeSet<[u8; 32]>,
+    ) -> Result<Vec<[u8; 32]>> {
+        let mut out = Vec::new();
+        for key in roster {
+            if own.contains(key) {
+                continue;
+            }
+            let known: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pairings WHERE peer_key = ?1)
+                     OR EXISTS(SELECT 1 FROM admissions_seen WHERE peer_key = ?1)",
+                rusqlite::params![&key[..]],
+                |r| r.get(0),
+            )?;
+            if !known {
+                out.push(*key);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn retryable(&self, reason: &str) -> Result<Vec<([u8; 32], Vec<u8>)>> {
         let mut st = self
             .conn
@@ -775,6 +843,78 @@ mod tests {
             ops.peer_addresses().unwrap()[0].attempts,
             0,
             "a peer that answered was still being backed off from"
+        );
+        clean(&p);
+    }
+    #[test]
+    fn an_admission_this_device_did_not_make_is_reported() {
+        // The detection §5.3 relies on. It cannot prevent a compromised device
+        // from admitting an attacker, and says so — what it can do is make the
+        // admission visible rather than silent.
+        let p = tmp("admissions");
+        let ops = Ops::open(&p).unwrap();
+
+        let mine = [1u8; 32];
+        let paired = [2u8; 32];
+        let stranger = [3u8; 32];
+        ops.paired(&paired, 1_000).unwrap();
+
+        let roster = BTreeSet::from([mine, paired, stranger]);
+        let own = BTreeSet::from([mine]);
+
+        assert_eq!(
+            ops.unexpected_admissions(&roster, &own).unwrap(),
+            vec![stranger],
+            "an admission this device neither made nor performed went unreported"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn an_acknowledged_admission_stops_being_reported() {
+        let p = tmp("admissions-ack");
+        let ops = Ops::open(&p).unwrap();
+        let stranger = [3u8; 32];
+        let roster = BTreeSet::from([stranger]);
+        let own = BTreeSet::new();
+
+        assert_eq!(ops.unexpected_admissions(&roster, &own).unwrap().len(), 1);
+        ops.acknowledge_admission(&stranger, 2_000).unwrap();
+        assert!(ops.unexpected_admissions(&roster, &own).unwrap().is_empty());
+        clean(&p);
+    }
+
+    #[test]
+    fn acknowledging_is_not_recorded_as_pairing() {
+        // They say different things, and conflating them would mean a device
+        // that was merely acknowledged looks, forever after, like one this
+        // person physically paired.
+        let p = tmp("admissions-distinct");
+        let ops = Ops::open(&p).unwrap();
+        let stranger = [3u8; 32];
+        ops.acknowledge_admission(&stranger, 2_000).unwrap();
+
+        let paired: i64 = ops
+            .conn
+            .query_row("SELECT COUNT(*) FROM pairings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(paired, 0);
+        clean(&p);
+    }
+
+    #[test]
+    fn a_restored_device_does_not_report_itself() {
+        // Membership is keyed by key, and a restore keeps the key. A device
+        // that reported its own admission after every restore would train the
+        // person to dismiss the one report that matters.
+        let p = tmp("admissions-self");
+        let ops = Ops::open(&p).unwrap();
+        let mine = [1u8; 32];
+
+        assert!(
+            ops.unexpected_admissions(&BTreeSet::from([mine]), &BTreeSet::from([mine]))
+                .unwrap()
+                .is_empty()
         );
         clean(&p);
     }

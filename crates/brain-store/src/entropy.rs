@@ -46,6 +46,18 @@ pub fn incarnation() -> Result<Incarnation> {
     Ok(Incarnation(b))
 }
 
+/// A fresh secret for the mesh to advertise under (§5.2).
+///
+/// Thirty-two bytes because it keys a MAC, not because anything about the
+/// advertised values needs that much: the pseudonym and digest are eight bytes
+/// each. What needs the length is the key, since holding it is what
+/// membership means to the discovery layer.
+pub fn secret() -> Result<[u8; 32]> {
+    let mut b = [0u8; 32];
+    fill(&mut b)?;
+    Ok(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

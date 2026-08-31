@@ -37,6 +37,18 @@ use crate::transport::{Transport, TransportError};
 /// negotiating with different ideas of what they are speaking.
 const PATTERN: &str = "Noise_KK_25519_ChaChaPoly_BLAKE2s";
 
+/// The pattern used for pairing, before either side is on the other's roster.
+///
+/// `NNpsk0`: neither device knows the other's static key yet — establishing
+/// that is what pairing is for — so authentication comes entirely from a
+/// pre-shared key mixed in before anything else.
+///
+/// The psk is not the six-digit code. It is the strong key SPAKE2 derives from
+/// it (see [`crate::pairing`]), because a psk *is* the authentication here: a
+/// six-digit one would be a million offline guesses for anyone who recorded
+/// the exchange, and the handshake would confirm the right guess for them.
+const PAIRING_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
+
 /// The largest payload a single Noise message can carry.
 ///
 /// A Noise transport message caps at 65535 bytes including the 16-byte
@@ -118,6 +130,31 @@ impl<T: Transport> Session<T> {
         Self::dance(inner, state, false)
     }
 
+    /// Open a pairing session as the side that dialled.
+    ///
+    /// No static keys: the point of the exchange is to learn them. What
+    /// authenticates it is the psk, and a handshake that completes is proof
+    /// both sides derived the same one — which is proof the code was entered
+    /// correctly, since nothing else could have produced it.
+    pub fn initiate_paired(inner: T, psk: &[u8; 32]) -> Result<Self, HandshakeError> {
+        let state = snow::Builder::new(PAIRING_PATTERN.parse().expect("the pattern is a constant"))
+            .psk(0, psk)
+            .map_err(|_| HandshakeError::Refused)?
+            .build_initiator()
+            .map_err(|_| HandshakeError::Refused)?;
+        Self::dance(inner, state, true)
+    }
+
+    /// Open a pairing session as the side that answered.
+    pub fn accept_paired(inner: T, psk: &[u8; 32]) -> Result<Self, HandshakeError> {
+        let state = snow::Builder::new(PAIRING_PATTERN.parse().expect("the pattern is a constant"))
+            .psk(0, psk)
+            .map_err(|_| HandshakeError::Refused)?
+            .build_responder()
+            .map_err(|_| HandshakeError::Refused)?;
+        Self::dance(inner, state, false)
+    }
+
     /// Run the handshake to completion, or fail without a session.
     ///
     /// Blocking, and deliberately so: there is nothing useful to do on this
@@ -189,10 +226,24 @@ impl<T: Transport> Session<T> {
         let Some(frame) = self.inner.recv()? else {
             return Ok(None);
         };
+        self.open(&frame).map(Some)
+    }
+
+    /// Wait for one payload.
+    ///
+    /// For the exchanges that are a conversation rather than a stream —
+    /// pairing, and the handshake — where there is nothing else this thread
+    /// could usefully do until the peer answers.
+    pub fn recv_blocking(&mut self) -> Result<Vec<u8>, TransportError> {
+        let frame = self.inner.recv_blocking()?;
+        self.open(&frame)
+    }
+
+    fn open(&mut self, frame: &[u8]) -> Result<Vec<u8>, TransportError> {
         let mut out = vec![0u8; frame.len()];
         let n = self
             .noise
-            .read_message(&frame, &mut out)
+            .read_message(frame, &mut out)
             .map_err(|_| TransportError::Malformed)?;
         out.truncate(n);
 
@@ -200,6 +251,6 @@ impl<T: Transport> Session<T> {
         if self.recvd.is_multiple_of(REKEY_AFTER) {
             self.noise.rekey_incoming();
         }
-        Ok(Some(out))
+        Ok(out)
     }
 }

@@ -2080,6 +2080,23 @@ impl Store {
         Ok(())
     }
 
+    /// Every key currently in the roster.
+    ///
+    /// For surfaces, not for ingest. Ingest builds the roster from the log
+    /// because the projection may be stale, and a stale roster admits events
+    /// under keys that were retired.
+    pub fn roster_keys(&self) -> Result<std::collections::BTreeSet<[u8; 32]>> {
+        let mut q = self.conn.prepare("SELECT pubkey FROM roster")?;
+        let rows = q.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = std::collections::BTreeSet::new();
+        for r in rows {
+            if let Ok(k) = <[u8; 32]>::try_from(r?.as_slice()) {
+                out.insert(k);
+            }
+        }
+        Ok(out)
+    }
+
     /// The key an origin is entitled to be verified against.
     ///
     /// `None` means this device cannot check the origin's events at all — not

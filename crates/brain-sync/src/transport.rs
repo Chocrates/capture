@@ -86,7 +86,16 @@ pub struct Pair {
     a: Queue,
     b: Queue,
     closed: Arc<AtomicBool>,
+    wire: Wire,
 }
+
+/// A copy of every frame that crossed, in order.
+///
+/// Recording rather than intercepting: an exchange of several messages cannot
+/// be inspected by stealing frames off the queue, because the frames stolen
+/// are the ones the other side then never receives. This observes without
+/// participating, which is exactly the position a passive attacker is in.
+type Wire = Arc<Mutex<Vec<u8>>>;
 
 /// Shared rather than borrowed, and shareable *across threads*, because each
 /// end's inbox is the other's outbox and both are held at once — by two
@@ -114,13 +123,20 @@ impl Pair {
                 inbox: Arc::clone(&self.a),
                 outbox: Arc::clone(&self.b),
                 closed: Arc::clone(&self.closed),
+                wire: Arc::clone(&self.wire),
             },
             End {
                 inbox: Arc::clone(&self.b),
                 outbox: Arc::clone(&self.a),
                 closed: Arc::clone(&self.closed),
+                wire: Arc::clone(&self.wire),
             },
         )
+    }
+
+    /// Everything that has crossed, as a passive observer would have it.
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.lock().map(|w| w.clone()).unwrap_or_default()
     }
 }
 
@@ -129,12 +145,16 @@ pub struct End {
     inbox: Queue,
     outbox: Queue,
     closed: Arc<AtomicBool>,
+    wire: Wire,
 }
 
 impl Transport for End {
     fn send(&mut self, frame: &[u8]) -> Result<(), TransportError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(TransportError::Closed);
+        }
+        if let Ok(mut wire) = self.wire.lock() {
+            wire.extend_from_slice(frame);
         }
         self.outbox
             .lock()

@@ -117,6 +117,7 @@ fn run(command: Command) -> Result<()> {
         Command::Rebuild => ops::rebuild(paths()?),
         Command::Verify { json } => verify::run(&paths()?, json),
         Command::ExportsPruned => ops::exports_pruned(paths()?),
+        Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
         Command::Export { json } => backup::export(paths()?, json),
         Command::Restore {
             from,
@@ -189,6 +190,7 @@ fn init() -> Result<()> {
     // the log: it is what says which key this origin authors under.
     let mut log = brain_store::log::Log::open(&paths.events)?;
     log.append(&fresh.root)?;
+    log.append(&fresh.roster_key)?;
 
     let ops = brain_store::ops::Ops::open(&paths.ops)?;
     let generation = ops.generation()?;
@@ -199,7 +201,7 @@ fn init() -> Result<()> {
 
     let (wall, counter) = fresh.clock.persist();
     let mut identity = fresh.identity;
-    identity.advance(&paths, fresh.root.header.seq, wall, counter)?;
+    identity.advance(&paths, fresh.roster_key.header.seq, wall, counter)?;
 
     say!("store created at {}", paths.root.display());
     say!("device {}", hex(&identity.dev().short()));

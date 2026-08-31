@@ -116,6 +116,8 @@ pub enum Command {
     Verify { json: bool },
     /// Acknowledge that stale export files were dealt with by hand.
     ExportsPruned,
+    /// Acknowledge a device admitted by some other device.
+    AdmissionSeen { key: String },
     /// Write everything appended since the last export.
     Export { json: bool },
     /// Rebuild a store from exported events.
@@ -598,6 +600,13 @@ where
             }
         }
         "exports-pruned" => flagless("exports-pruned", &args[1..], Command::ExportsPruned),
+        "admission-seen" => match &args[1..] {
+            [key] => Ok(Command::AdmissionSeen { key: key.clone() }),
+            _ => Err(Bad::Value {
+                command: "admission-seen".into(),
+                problem: "give the key shown in brain health".into(),
+            }),
+        },
         "verify" => Ok(Command::Verify {
             json: has_json(&args[1..]),
         }),
@@ -828,6 +837,8 @@ OPERATING
   brain export            write everything appended since the last export
   brain restore <dir>     rebuild from exported events
   brain unflag <name>     clear a credential flag so the note is exported again
+  brain admission-seen KEY
+                          say you know about a device another device admitted
   brain exports-pruned    say you have dealt with export files holding
                           destroyed content — redaction cannot reach them
 

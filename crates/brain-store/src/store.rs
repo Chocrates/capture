@@ -30,6 +30,14 @@ pub struct FreshStore {
     pub identity: Identity,
     /// The roster root, authored but not yet stored.
     pub root: Envelope,
+    /// The first rotation of the secret the mesh advertises under (§5.2).
+    ///
+    /// Authored here rather than when sync is first switched on, so that
+    /// every archive has one from its first moment and "no secret" means
+    /// "written by a build that predates sync" rather than "sync has not been
+    /// used yet" — two states that would otherwise be indistinguishable and
+    /// need different handling.
+    pub roster_key: Envelope,
     /// The clock, carrying the stamp the root consumed.
     pub clock: HlcState,
 }
@@ -73,11 +81,25 @@ pub fn create(paths: &StorePaths, physical_now: u64) -> Result<FreshStore> {
         identity.noise_public(),
     )?;
 
+    let roster_key = genesis::roster_key(
+        identity.signing(),
+        &identity.incarnation(),
+        &mut clock,
+        physical_now,
+        crate::entropy::nonce()?,
+        crate::entropy::secret()?,
+        // Sequence 2, chained to the root: the second event this origin ever
+        // authors, and the first with a predecessor.
+        2,
+        Some(root.header.id()),
+    )?;
+
     tracing::info!(origin = ?identity.dev().short(), "store created");
 
     Ok(FreshStore {
         identity,
         root,
+        roster_key,
         clock,
     })
 }
@@ -184,5 +206,44 @@ mod tests {
         assert_eq!(f.root.header.seq, 1);
         assert!(!p.events.exists(), "no schema exists yet to store it in");
         cleanup(&p);
+    }
+    #[test]
+    fn a_fresh_store_can_advertise() {
+        // Without a secret the device cannot be recognised by any peer and
+        // cannot recognise one, so it would be a device that pairs and then
+        // never finds anybody. Minting it at creation is what makes "no
+        // secret" mean "written before sync existed" rather than "sync has
+        // not been switched on".
+        let p = tmp("fresh-secret");
+        let fresh = create(&p, 1_700_000_000_000).unwrap();
+
+        let r = brain_core::roster::build(&[fresh.root.clone(), fresh.roster_key.clone()]);
+        assert!(
+            r.secret.is_some(),
+            "a fresh archive had nothing to advertise under"
+        );
+        assert!(r.refused.is_empty(), "{:?}", r.refused);
+
+        // And it is chained, so it is part of the origin's history rather than
+        // a second root.
+        assert_eq!(fresh.roster_key.header.seq, 2);
+        assert_eq!(fresh.roster_key.header.chain, Some(fresh.root.header.id()));
+
+        cleanup(&p);
+    }
+
+    #[test]
+    fn two_stores_do_not_share_a_secret() {
+        let a = tmp("secret-a");
+        let b = tmp("secret-b");
+        let fa = create(&a, 1_700_000_000_000).unwrap();
+        let fb = create(&b, 1_700_000_000_000).unwrap();
+
+        let ra = brain_core::roster::build(&[fa.root, fa.roster_key]);
+        let rb = brain_core::roster::build(&[fb.root, fb.roster_key]);
+        assert_ne!(ra.secret, rb.secret);
+
+        cleanup(&a);
+        cleanup(&b);
     }
 }
