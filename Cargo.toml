@@ -6,6 +6,7 @@ members = [
     "crates/capture-time",
     "crates/capture-store",
     "crates/capture-sync",
+    "crates/capture-ffi",
     "apps/capture-cli",
     "apps/capture-overlay",
     "apps/capture-syncd",
@@ -31,6 +32,14 @@ x25519-dalek = { version = "2", default-features = false, features = ["static_se
 # Noise_KK for the sync transport (DESIGN.md §5.2). The handshake state
 # machine, nonce handling and rekeying are not ours to get subtly wrong.
 snow = "0.10"
+
+# --- Android bindings (group M4). ---
+#
+# uniffi generates the Kotlin the phone calls. Hand-written JNI for a surface
+# this size would be a permanent tax, and every hand-written binding is a place
+# where the two sides can disagree about a type without either failing to
+# compile.
+uniffi = "0.32"
 
 # Slug derivation (task 2.11). Pinned exactly: their Unicode tables are part of
 # the frozen algorithm — a table change would silently alter existing slugs on

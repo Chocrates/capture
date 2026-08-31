@@ -51,10 +51,26 @@ ALLOW = ROOT / "tools" / "unwired-allow.txt"
 # for rather than a finding.
 SCAFFOLDING = {"crates/capture-core/src/testing.rs"}
 
+# Crates whose callers are outside this workspace entirely.
+#
+# `capture-ffi` exists to be called from Kotlin. The scan cannot see that, and
+# counting the generated bindings as callers would be worse than not checking:
+# uniffi emits a symbol containing every method's snake_case name, so every
+# method would appear called whether the application used it or not — a check
+# that always passes, which is indistinguishable from no check while looking
+# like one.
+#
+# What guards this surface instead is that it is small and enumerable by
+# design, and that the application's own tests call through it. If it grows
+# past what one file can hold, that is the signal it has stopped being a
+# boundary.
+FOREIGN_CALLERS = {"crates/capture-ffi"}
+
 SOURCES = [
     p
     for p in sorted(ROOT.glob("crates/*/src/**/*.rs")) + sorted(ROOT.glob("apps/*/src/**/*.rs"))
     if str(p.relative_to(ROOT)) not in SCAFFOLDING
+    and not any(str(p.relative_to(ROOT)).startswith(c) for c in FOREIGN_CALLERS)
 ]
 CALLERS = SOURCES + sorted(ROOT.glob("crates/*/tests/**/*.rs")) + sorted(
     ROOT.glob("apps/*/tests/**/*.rs")

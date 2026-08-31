@@ -58,7 +58,7 @@ ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired deny
 # `ci` proves the code is correct. This proves it is still correct somewhere
 # that is not Linux, which is a different question and the one that matters
 # once a phone holds the archive.
-android: android-build android-test
+android: android-build android-test android-kotlin
 
 ## android-build: cross-compile the core for the emulator and a real phone
 android-build:
@@ -68,6 +68,22 @@ android-build:
 	@set -e; . ./tools/android-env.sh; \
 	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API build -p capture-store; \
 	 cargo ndk -t x86_64 -P $$ANDROID_NDK_API test -p capture-store --no-run
+
+## android-kotlin: generate the Kotlin the app calls
+#
+# Generated from the built library rather than from a UDL file, so the Kotlin
+# cannot describe a surface the Rust does not have. The generator lives in
+# capture-ffi rather than being installed: a version skew between generator and
+# runtime produces Kotlin that compiles and then fails on the first call, which
+# is the worst place to find out.
+android-kotlin:
+	@echo '--- android: generating Kotlin from the built library'
+	@set -e; . ./tools/android-env.sh; \
+	 cargo ndk -t x86_64 -P $$ANDROID_NDK_API build -p capture-ffi; \
+	 cargo run -q -p capture-ffi --bin uniffi-bindgen -- \
+	   generate --library target/x86_64-linux-android/debug/libcapture_ffi.so \
+	   --language kotlin --no-format --out-dir android/app/src/main/java
+	@echo '    android/app/src/main/java/uniffi/capture_ffi/capture_ffi.kt'
 
 ## android-test: run the store's suite on a connected device or emulator
 #
