@@ -143,6 +143,22 @@ pub struct Grant {
     /// The secret the mesh advertises under (§5.2).
     #[cbor(n(3), with = "minicbor::bytes")]
     pub secret: Option<[u8; 32]>,
+    /// The admitter's incarnation, so the newcomer can admit it back.
+    ///
+    /// Pairing is a *mutual* exchange (§5.3), and this is what makes the
+    /// second half possible: an admission derives the subject's origin from
+    /// its key and incarnation rather than being told it, so without the
+    /// incarnation the newcomer can hold the admitter's key and still not
+    /// vouch for it.
+    ///
+    /// It matters because two devices that have each run `brain init` have a
+    /// root apiece, and only one root confers membership. If the newcomer's
+    /// own root happens to win the ordering, the admitter is not a member of
+    /// the merged roster and every event it authors is unverifiable there —
+    /// permanently, and silently. One-directional pairing left that to a
+    /// coin toss.
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub incarnation: Option<[u8; 16]>,
 }
 
 /// Derive the strong key both sides will authenticate with.

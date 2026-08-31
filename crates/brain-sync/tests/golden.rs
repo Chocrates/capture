@@ -180,14 +180,17 @@ fn a_grant_encodes_the_same_way_for_ever() {
         noise: [0x55; 32],
         members: vec![[0x44; 32].into()],
         secret: Some([0x66; 32]),
+        incarnation: Some([0x77; 16]),
     };
     let mut b = Vec::new();
     minicbor::encode(&m, &mut b).expect("encoding into a Vec is infallible");
     assert_eq!(
         hex(&b),
-        // array(4) · pubkey(32) · noise(32) · members: array(1) of bytes(32)
-        // · secret(32). The members are byte strings, not arrays of integers.
-        "845820444444444444444444444444444444444444444444444444444444444444444458205555555555555555555555555555555555555555555555555555555555555555815820444444444444444444444444444444444444444444444444444444444444444458206666666666666666666666666666666666666666666666666666666666666666"
+        // array(5) · pubkey(32) · noise(32) · members: array(1) of bytes(32)
+        // · secret(32) · incarnation(16). The members are byte strings, not
+        // arrays of integers. The incarnation is what lets the newcomer admit
+        // the admitter back, which is what makes pairing mutual.
+        "8558204444444444444444444444444444444444444444444444444444444444444444582055555555555555555555555555555555555555555555555555555555555555558158204444444444444444444444444444444444444444444444444444444444444444582066666666666666666666666666666666666666666666666666666666666666665077777777777777777777777777777777"
     );
 }
 
@@ -200,6 +203,7 @@ fn a_grant_without_a_secret_encodes_the_same_way_for_ever() {
         noise: [0x55; 32],
         members: vec![],
         secret: None,
+        incarnation: None,
     };
     let mut b = Vec::new();
     minicbor::encode(&m, &mut b).expect("encoding into a Vec is infallible");

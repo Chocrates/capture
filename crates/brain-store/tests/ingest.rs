@@ -66,7 +66,7 @@ fn an_event_arriving_before_its_predecessor_is_held() {
     let (_, events) = member(1, 3);
 
     let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
-    let mut archive = StoreArchive::new(&mut g, 100);
+    let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
 
     assert!(archive.ingest(events[0].clone()), "the root");
     // Skip one: offer the third before the second.
@@ -96,7 +96,7 @@ fn the_same_event_arriving_twice_changes_nothing() {
     let (_, events) = member(1, 2);
 
     let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
-    let mut archive = StoreArchive::new(&mut g, 100);
+    let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     for e in &events {
         archive.ingest(e.clone());
     }
@@ -126,7 +126,7 @@ fn relaying_confers_no_authority() {
     forged.sig = other[0].sig;
 
     let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
-    let mut archive = StoreArchive::new(&mut g, 100);
+    let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     archive.ingest(events[0].clone());
 
     assert!(
@@ -154,7 +154,7 @@ fn a_rejected_event_never_occupies_a_position() {
     forged.sig = other[0].sig;
 
     let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
-    let mut archive = StoreArchive::new(&mut g, 100);
+    let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     archive.ingest(events[0].clone());
     archive.ingest(events[1].clone());
     let before = archive.heads();
@@ -179,7 +179,7 @@ fn a_range_comes_back_in_sequence_order() {
     let (o, events) = member(1, 5);
 
     let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
-    let mut archive = StoreArchive::new(&mut g, 100);
+    let mut archive = StoreArchive::new(&mut g, &b.ops, 100);
     for e in &events {
         archive.ingest(e.clone());
     }

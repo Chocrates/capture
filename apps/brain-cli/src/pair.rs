@@ -157,6 +157,31 @@ pub fn accept(paths: StorePaths, code: &str, at: Option<&str>) -> Result<()> {
     // that deadlock.
     ops.learned_noise(&grant.pubkey, &grant.noise)?;
 
+    // The other half of the mutual exchange. Each device has a root of its
+    // own, and only one root survives the merge — so a device that only ever
+    // *was* admitted is a device whose admitter may turn out not to be a
+    // member of the combined roster, leaving everything it writes
+    // unverifiable here. Admitting it back makes membership hold whichever
+    // root wins.
+    match grant.incarnation {
+        Some(incarnation) => {
+            let mut s = Session::open(paths.clone())?;
+            s.admit(&Admitted {
+                pubkey: grant.pubkey,
+                incarnation,
+                noise: grant.noise,
+            })?;
+        }
+        None => {
+            // A grant from a build that predates this. Say so rather than
+            // proceeding quietly: the pairing half-works, and the failure it
+            // leads to is silent and permanent.
+            say!("The other device is running an older version and did not say");
+            say!("which origin it authors under, so this device cannot vouch for");
+            say!("it. Update it and pair again.");
+        }
+    }
+
     say!("Joined. {} vouched for this device.", short(&grant.pubkey));
     say!(
         "{} device(s) in the roster; the archive arrives on the next sync.",
@@ -180,6 +205,7 @@ fn grant_from(paths: &StorePaths, identity: &Identity) -> Result<Grant> {
         noise: identity.noise_public(),
         members: roster.keys.iter().map(|k| (*k).into()).collect(),
         secret: roster.secret,
+        incarnation: Some(identity.incarnation().0),
     })
 }
 

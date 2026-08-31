@@ -17,6 +17,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use brain_core::EventId;
 use brain_core::envelope::Envelope;
 
 use alloc::collections::BTreeSet;
@@ -118,6 +119,23 @@ pub trait Archive {
     /// Every event this origin authored in the range, in sequence order.
     fn range(&self, dev: &str, from: u64, to: u64) -> Vec<Envelope>;
 
+    /// Redactions this device still owes a peer, most urgent first.
+    ///
+    /// Handed over inside the ordinary exchange rather than in a phase of
+    /// their own. A separate blocking round-trip deadlocks the moment both
+    /// sides have one to send: each waits for an acknowledgement the other is
+    /// not yet reading for.
+    fn owed_redactions(&self, _peer: Option<[u8; 32]>) -> Vec<Envelope> {
+        Vec::new()
+    }
+
+    /// The peer says it has folded this redaction.
+    ///
+    /// Only ever called on a real acknowledgement. "Gone everywhere" is the
+    /// single claim a redaction makes, and recording it on send rather than on
+    /// acknowledgement would make that claim false exactly when it matters.
+    fn redaction_acked(&mut self, _id: EventId, _peer: Option<[u8; 32]>) {}
+
     /// Take an event that arrived from a peer.
     ///
     /// Fallible because ingest verifies: a signature that does not check out,
@@ -137,6 +155,8 @@ pub struct Exchanged {
     pub sent: usize,
     /// Events that arrived and were refused.
     pub refused: usize,
+    /// Redactions the peer confirmed it had folded.
+    pub redactions_acked: usize,
 }
 
 /// Run one round of anti-entropy to completion.
@@ -195,6 +215,15 @@ pub fn exchange<T: Transport, A: Archive>(
     // actually saves, and it saves nothing on a first sync — which is correct,
     // because a first sync is exactly when the events are needed.
     let settled = agreed(&my_seals, &their_seals, archive.roster_digest());
+    // Before anything else this side asks for. For every other event arriving
+    // late costs nothing and anti-entropy is the mechanism; for a redaction
+    // the delivery window is exactly the window in which the content can still
+    // be read, which is the thing the feature exists to close (§5.4).
+    let peer = session.peer();
+    for e in archive.owed_redactions(peer) {
+        send(session, &Message::Redact(e))?;
+    }
+
     for ask in wanted(&mine, &theirs) {
         if let Message::Range { dev, .. } = &ask
             && settled.contains(dev.as_str())
@@ -228,6 +257,22 @@ pub fn exchange<T: Transport, A: Archive>(
                 } else {
                     out.refused += 1;
                 }
+            }
+            Some(Message::Redact(e)) => {
+                // Acknowledged only after the store has taken it. An
+                // acknowledgement sent on receipt would report a destruction
+                // that has not happened.
+                let id = e.header.id();
+                if archive.ingest(e) {
+                    out.received += 1;
+                    send(session, &Message::RedactAck { id })?;
+                } else {
+                    out.refused += 1;
+                }
+            }
+            Some(Message::RedactAck { id }) => {
+                archive.redaction_acked(id, peer);
+                out.redactions_acked += 1;
             }
             Some(Message::Asked) => {
                 // No more requests are coming, and every one that did arrive

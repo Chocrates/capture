@@ -272,6 +272,17 @@ impl Log {
         Ok(out)
     }
 
+    /// One event by id, if this device holds it.
+    pub fn by_id(&self, id: &EventId) -> Result<Option<Envelope>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events WHERE id = ?1",
+        )?;
+        let mut rows = st.query_map(params![id.0.to_vec()], row_to_envelope)?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
     /// One origin's events over a range of sequence numbers, in order.
     ///
     /// What a peer asked for by name. In sequence order rather than timestamp

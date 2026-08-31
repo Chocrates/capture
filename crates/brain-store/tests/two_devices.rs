@@ -25,6 +25,10 @@ struct Device {
 }
 
 impl Device {
+    fn ops(&self) -> Ops {
+        Ops::open(&self.paths.ops).unwrap()
+    }
+
     fn new(name: &str) -> Device {
         let root = std::env::temp_dir().join(format!(
             "brain-2dev-{name}-{}-{:?}",
@@ -164,7 +168,7 @@ fn sync(a: &Device, b: &Device) {
         let mut s = Session::open(b_paths.clone()).unwrap();
         let ops = Ops::open(&b_paths.ops).unwrap();
         let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
-        let mut archive = StoreArchive::new(&mut gate, 1_700_000_100_000);
+        let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
         let done = exchange(&mut secure, &mut archive).expect("the responder finished");
         archive.settle().expect("folded what arrived");
         done
@@ -178,7 +182,7 @@ fn sync(a: &Device, b: &Device) {
         let mut s = Session::open(a.paths.clone()).unwrap();
         let ops = Ops::open(&a.paths.ops).unwrap();
         let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
-        let mut archive = StoreArchive::new(&mut gate, 1_700_000_100_000);
+        let mut archive = StoreArchive::new(&mut gate, &ops, 1_700_000_100_000);
         exchange(&mut secure, &mut archive).expect("the initiator finished");
         archive.settle().expect("folded what arrived");
     }
@@ -349,4 +353,153 @@ fn a_redaction_ordered_while_the_other_slept_takes_effect_when_it_wakes() {
         !b.still_holds_body(&id),
         "the note is hidden but its bytes are still on the other device's disk"
     );
+}
+
+#[test]
+fn a_redaction_is_reported_outstanding_until_the_other_device_confirms_it() {
+    // The claim a redaction makes is that the content is gone *everywhere*, so
+    // "not yet acknowledged by that device" has to be an observed state rather
+    // than an assumption. This is the whole path: the pending set is written
+    // when the redaction is issued, the exchange carries it, and the
+    // acknowledgement is recorded only after the peer has folded it.
+    let a = Device::new("a-ack");
+    let b = Device::new("b-ack");
+    pair(&a, &b);
+
+    let note = a.capture("something that should not have been written down");
+    sync(&a, &b);
+    let on_b = b.id_of(&note);
+
+    brain_store::mutate::redact(&a.paths, &note).unwrap();
+
+    let owed = a.ops().redactions_outstanding().unwrap();
+    assert_eq!(
+        owed.len(),
+        1,
+        "the redaction was not recorded as owed to anybody, so every surface \
+         would report it complete"
+    );
+    assert_eq!(owed[0].1.len(), 1, "owed to the one other device");
+
+    sync(&a, &b);
+
+    assert!(
+        a.ops().redactions_outstanding().unwrap().is_empty(),
+        "the peer folded the redaction and it is still reported outstanding"
+    );
+
+    // And it was a real destruction, not merely a delivery.
+    let after = a.read().redact_queue().unwrap()[0].2 + 1;
+    b.session().drain_due_at(after).unwrap();
+    assert!(
+        !b.still_holds_body(&on_b),
+        "the redaction was acknowledged but the bytes survived"
+    );
+}
+
+#[test]
+fn a_redaction_stays_outstanding_against_a_device_that_never_confirms() {
+    // A phone that is off holds the content until it is not. Reporting
+    // completion because the sync round finished would be reporting it for the
+    // one device that never received anything.
+    let a = Device::new("a-unacked");
+    let b = Device::new("b-unacked");
+    pair(&a, &b);
+
+    let note = a.capture("still on the other device");
+    sync(&a, &b);
+
+    brain_store::mutate::redact(&a.paths, &note).unwrap();
+
+    // No sync. The phone never wakes.
+    let owed = a.ops().redactions_outstanding().unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(
+        owed[0].1.len(),
+        1,
+        "a redaction that reached nobody was reported as complete"
+    );
+}
+
+#[test]
+fn a_redaction_is_acknowledged_whichever_side_dialled() {
+    // The device that owes the redaction is not necessarily the one that opens
+    // the connection — in practice it is often the one sitting still while a
+    // laptop wakes up and calls it. If only the dialling side handed its
+    // redactions over, a device that never dials would hold content it had
+    // been told to destroy, and report nothing.
+    let a = Device::new("a-ack-responder");
+    let b = Device::new("b-ack-responder");
+    pair(&a, &b);
+
+    let note = a.capture("owed by the side that answers");
+    sync(&a, &b);
+
+    brain_store::mutate::redact(&a.paths, &note).unwrap();
+    assert_eq!(a.ops().redactions_outstanding().unwrap().len(), 1);
+
+    // b dials; a answers, and a is the one that owes.
+    sync(&b, &a);
+
+    assert!(
+        a.ops().redactions_outstanding().unwrap().is_empty(),
+        "a redaction owed by the answering side was never acknowledged"
+    );
+}
+
+#[test]
+fn a_device_that_cannot_verify_a_redaction_does_not_acknowledge_it() {
+    // Acknowledgement means "I have folded this". A device that does not hold
+    // the roster cannot check who authored the redaction, so it has folded
+    // nothing — and acknowledging anyway would report a destruction on the
+    // strength of having been handed some bytes.
+    let a = Device::new("a-unverifiable");
+    let b = Device::new("b-unverifiable");
+
+    // Deliberately not paired. b has never admitted a, so a's signature means
+    // nothing to it.
+    let note = a.capture("offered to a device that cannot check it");
+    brain_store::mutate::redact(&a.paths, &note).unwrap();
+
+    // Recorded as owed to nobody, because a's roster holds only itself — and
+    // that is the true statement rather than a gap.
+    assert!(
+        a.ops().redactions_outstanding().unwrap().is_empty(),
+        "a redaction was recorded as owed to a device that is not a member"
+    );
+
+    sync(&a, &b);
+    assert!(a.ops().redactions_outstanding().unwrap().is_empty());
+}
+
+#[test]
+fn pairing_admits_in_both_directions() {
+    // Each device that has run `brain init` has a root of its own, and only
+    // one root confers membership once the two archives meet. If pairing
+    // admitted in one direction only, the device whose root lost the ordering
+    // would not be a member of the combined roster — and every event it
+    // authored would be unverifiable on the other, permanently and silently.
+    //
+    // Which root wins depends on generated key bytes, so a one-directional
+    // pairing works about half the time. That is the worst kind of defect, and
+    // it is why this asserts both memberships rather than "it synced".
+    let a = Device::new("a-mutual");
+    let b = Device::new("b-mutual");
+    pair(&a, &b);
+
+    a.capture("from a");
+    b.capture("from b");
+    sync(&a, &b);
+    sync(&a, &b);
+
+    for (who, d) in [("a", &a), ("b", &b)] {
+        let log = brain_store::log::Log::open_read(&d.paths.events).unwrap();
+        let roster = brain_core::roster::build(&log.all().unwrap());
+        assert_eq!(
+            roster.keys.len(),
+            2,
+            "{who} does not hold both devices as members"
+        );
+    }
+    assert_eq!(a.note_count(), b.note_count());
 }

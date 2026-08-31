@@ -56,6 +56,10 @@ pub struct Session {
     _writer: Writer,
 }
 
+fn alloc_vec(id: brain_core::EventId) -> Vec<brain_core::EventId> {
+    vec![id]
+}
+
 /// What a pairing learned about the device being admitted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Admitted {
@@ -447,6 +451,52 @@ impl Session {
         let e = self.author(kind, tgt, prev, body(nonce.0))?;
         let id = e.header.id();
         self.commit(&[e])?;
+        Ok(id)
+    }
+
+    /// Order the destruction of a note, and record who it has to reach.
+    ///
+    /// The two halves are one call because they must not come apart. Appending
+    /// the event without recording the pending set leaves a redaction that
+    /// every surface reports as complete the moment it is written — for a
+    /// device that has not received it and may never — and that is the one
+    /// claim a redaction must never make falsely.
+    ///
+    /// This exists because there were two places authoring `redact` and only
+    /// one of them recorded anything, which is exactly the second-path problem
+    /// the ingest gate exists to avoid.
+    pub fn redact(&mut self, tgt: brain_core::EventId) -> Result<brain_core::EventId> {
+        let id = self.append(Kind::REDACT, Some(tgt), None, |nonce| {
+            let body = brain_core::body::RedactBody {
+                nonce,
+                scope: brain_core::body::RedactScope::WholeNote,
+                targets: alloc_vec(tgt),
+            };
+            let mut b = Vec::new();
+            minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
+            b
+        })?;
+
+        // Fixed now, and never recomputed from the roster. The realistic
+        // sequence is that the phone is stolen, you retire it, and *then* you
+        // redact — and a set read from the roster at report time would drop
+        // the phone and announce success for the one device that never
+        // received anything (§5.4).
+        //
+        // Membership from the log, not the projection: the projection's copy
+        // is only written when a gate opens, and a local capture never opens
+        // one, so a device that had not yet ingested from a peer would record
+        // the redaction as owed to nobody.
+        let me = self.identity.public().to_bytes();
+        let members: Vec<[u8; 32]> = brain_core::roster::build(&self.log.all()?)
+            .keys
+            .into_iter()
+            .filter(|k| k != &me)
+            .collect();
+
+        if !members.is_empty() {
+            Ops::open(&self.paths.ops)?.redact_awaits(&id, &members, now_ms())?;
+        }
         Ok(id)
     }
 

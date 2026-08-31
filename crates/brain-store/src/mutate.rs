@@ -22,8 +22,8 @@
 use brain_core::{
     EventId,
     body::{
-        AliasBody, EditBody, MuteBody, MuteScope, PinBody, RedactBody, RedactCancelBody,
-        RedactScope, ResolveBody, TagBody, UntagBody,
+        AliasBody, EditBody, MuteBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody,
+        UntagBody,
     },
     event::Kind,
 };
@@ -293,13 +293,7 @@ pub fn redact(paths: &StorePaths, name: &str) -> Result<String> {
         return Err(Error::Usage(format!("{name} has already been destroyed")));
     }
 
-    let id = s.append(Kind::REDACT, Some(tgt), None, |nonce| {
-        encode(&RedactBody {
-            nonce,
-            scope: RedactScope::WholeNote,
-            targets: vec![tgt],
-        })
-    })?;
+    let id = s.redact(tgt)?;
     Ok(short(&id))
 }
 

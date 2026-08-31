@@ -23,8 +23,8 @@
 use brain_core::{
     EventId,
     body::{
-        AliasBody, EditBody, MuteScope, PinBody, RedactBody, RedactCancelBody, RedactScope,
-        ResolveBody, TagBody, UnflagBody, UntagBody,
+        AliasBody, EditBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody,
+        UnflagBody, UntagBody,
     },
     event::Kind,
 };
@@ -528,13 +528,11 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
         }
     }
 
-    let id = s.append(Kind::REDACT, Some(tgt), None, |nonce| {
-        encode(&RedactBody {
-            nonce,
-            scope: RedactScope::WholeNote,
-            targets: vec![tgt],
-        })
-    })?;
+    // Through the session's own redact, which records who the destruction has
+    // to reach as well as writing the event. Authoring the event here directly
+    // is what left every redaction reported complete the moment it was
+    // written.
+    let id = s.redact(tgt)?;
 
     say!();
     say!(

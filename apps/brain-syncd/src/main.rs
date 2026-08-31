@@ -279,6 +279,7 @@ fn dial(
     let tcp = Tcp::connect(addr).map_err(brain_store::Error::Io)?;
     let mut secure = Secure::initiate(tcp, &identity.noise_secret(), &noise)
         .map_err(|e| brain_store::Error::Usage(format!("handshake refused: {e:?}")))?;
+
     reconcile(paths, &mut secure)
 }
 
@@ -337,7 +338,7 @@ fn reconcile<T: brain_sync::transport::Transport>(
     let mut s = Session::open(paths.clone())?;
     let ops = Ops::open(&paths.ops)?;
     let mut gate = Gate::open(&mut s.log, &mut s.state, &ops)?;
-    let mut archive = StoreArchive::new(&mut gate, now());
+    let mut archive = StoreArchive::new(&mut gate, &ops, now());
 
     let done = exchange(secure, &mut archive)
         .map_err(|e| brain_store::Error::Usage(format!("exchange failed: {e:?}")))?;

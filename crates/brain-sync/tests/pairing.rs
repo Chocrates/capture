@@ -17,6 +17,7 @@ fn grant() -> Grant {
         noise: [5; 32],
         members: vec![[4; 32].into(), [6; 32].into()],
         secret: Some([7; 32]),
+        incarnation: Some([8; 16]),
     }
 }
 

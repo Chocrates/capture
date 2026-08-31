@@ -15,10 +15,17 @@ use brain_sync::anti_entropy::Archive;
 use brain_sync::message::{Seal, VersionVector};
 
 use crate::gate::{Gate, Outcome};
+use crate::ops::Ops;
 
 /// This device's archive, as the protocol sees it.
 pub struct StoreArchive<'a, 'g> {
     gate: &'g mut Gate<'a>,
+    /// Where the record of what a redaction still owes lives.
+    ///
+    /// Separate from the log on purpose: what has been *delivered* is local
+    /// knowledge, not a fact about the archive, and replicating it would make
+    /// every device's view of it disagree.
+    ops: &'g Ops,
     /// Wall-clock milliseconds, supplied rather than read, so a sync is
     /// testable without waiting for time to pass.
     now: u64,
@@ -33,12 +40,45 @@ pub struct StoreArchive<'a, 'g> {
 }
 
 impl<'a, 'g> StoreArchive<'a, 'g> {
-    pub fn new(gate: &'g mut Gate<'a>, now: u64) -> Self {
+    pub fn new(gate: &'g mut Gate<'a>, ops: &'g Ops, now: u64) -> Self {
         Self {
             gate,
+            ops,
             now,
             taken: Vec::new(),
         }
+    }
+
+    /// Which member a Noise key belongs to.
+    ///
+    /// The handshake establishes an X25519 key; everything else about a device
+    /// — membership, who a redaction is owed to, who paired it — is keyed by
+    /// its Ed25519 signing key. The two are deliberately separate (one proves
+    /// authorship, the other secures a conversation), so the translation has
+    /// to happen somewhere, and doing it here means no caller can forget.
+    ///
+    /// The first version of this compared the two directly. Nothing failed to
+    /// compile, nothing errored, and every redaction simply stayed outstanding
+    /// for ever — which is the safe direction, and still wrong.
+    fn member_behind(&self, noise: &[u8; 32]) -> Option<[u8; 32]> {
+        for e in self.gate.log().all().ok()? {
+            if !matches!(
+                e.header.kind,
+                brain_core::event::Kind::DEVICE_ADD | brain_core::event::Kind::ORIGIN_CLAIM
+            ) {
+                continue;
+            }
+            let Some(body) = e.body.as_deref() else {
+                continue;
+            };
+            let Ok(claim) = minicbor::decode::<brain_core::body::OriginClaimBody>(body) else {
+                continue;
+            };
+            if claim.noise.as_ref() == Some(noise) {
+                return Some(claim.pubkey);
+            }
+        }
+        None
     }
 
     /// Fold everything this round took into the projection.
@@ -79,6 +119,31 @@ impl Archive for StoreArchive<'_, '_> {
 
     fn range(&self, dev: &str, from: u64, to: u64) -> Vec<Envelope> {
         self.gate.log().range(dev, from, to).unwrap_or_default()
+    }
+
+    fn owed_redactions(&self, peer: Option<[u8; 32]>) -> Vec<Envelope> {
+        let Some(peer) = peer.and_then(|n| self.member_behind(&n)) else {
+            return Vec::new();
+        };
+        let Ok(outstanding) = self.ops.redactions_outstanding() else {
+            return Vec::new();
+        };
+
+        outstanding
+            .into_iter()
+            .filter(|(_, owed)| owed.contains(&peer))
+            // Owed but not held is possible — a redaction can be recorded as
+            // owed on a device that has since been rebuilt from an export
+            // taken before it. Nothing here can produce the bytes, so it stays
+            // owed and stays reported, which is the true statement.
+            .filter_map(|(id, _)| self.gate.log().by_id(&id).ok().flatten())
+            .collect()
+    }
+
+    fn redaction_acked(&mut self, id: brain_core::EventId, peer: Option<[u8; 32]>) {
+        if let Some(peer) = peer.and_then(|n| self.member_behind(&n)) {
+            let _ = self.ops.redact_acked(&id, &peer, self.now);
+        }
     }
 
     fn ingest(&mut self, e: Envelope) -> bool {
