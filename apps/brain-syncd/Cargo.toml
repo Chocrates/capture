@@ -1,0 +1,22 @@
+[package]
+name = "brain-syncd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The protocol, and this time with the network: this is the one binary that
+# browses and dials.
+brain-sync = { path = "../../crates/brain-sync", features = ["mdns"] }
+brain-store = { path = "../../crates/brain-store" }
+brain-core = { path = "../../crates/brain-core", features = ["std"] }
+minicbor = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+jiff = { workspace = true }
+
+[[bin]]
+name = "brain-syncd"
+path = "src/main.rs"

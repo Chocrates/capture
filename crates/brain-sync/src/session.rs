@@ -1,16 +1,33 @@
-//! Noise_KK: the only way a byte crosses between two devices.
+//! Noise_IK: the only way a byte crosses between two devices.
 //!
-//! # Why KK, and what it assumes
+//! # Why IK, and not the KK the design first named
 //!
-//! Both sides already know each other's static public key — that is what
-//! pairing established, and the roster is where it is kept. So there is no
-//! certificate, no authority to operate, and nothing to expire: authentication
-//! is mutual and falls out of key material the log already carries (§5.2).
+//! Both patterns give mutual authentication from key material the log already
+//! carries — no certificate, no authority to operate, nothing to expire
+//! (§5.2). The difference is *when* each side learns who the other is.
 //!
-//! A device that is not on the roster cannot complete the handshake. Not
-//! "is rejected afterwards" — cannot complete it, because it does not hold a
-//! key the other side will mix in. That is the property §5.3 wants, and it is
-//! the reason this crate has no notion of an unauthenticated peer at all.
+//! KK requires both statics to be known before the handshake starts. That is
+//! true of the side that dials — it picked who to call — and false of the side
+//! that answers, which has a TCP connection and no idea who opened it. It
+//! cannot ask, because §5.2 forbids any message outside an established
+//! session, and it cannot try each member in turn, because a failed attempt
+//! consumes the connection. KK is simply not implementable for an inbound
+//! connection in this topology, and that was discovered by writing the daemon
+//! rather than by reading the design.
+//!
+//! IK keeps what mattered and moves what did not. The initiator must still
+//! know the responder's static key, and that key lives in the log — so a
+//! device without the archive cannot produce a valid first message and cannot
+//! complete the handshake. The responder learns the initiator's key as part of
+//! the handshake and checks it against the roster.
+//!
+//! What this costs, stated plainly: a **retired** device still holds the log,
+//! so it can complete the handshake and is refused on the roster check
+//! afterwards rather than being unable to start. §5.3 already requires that
+//! check — "drops existing sessions with that origin immediately and refuses
+//! new ones" — so the mechanism exists; under IK it is load-bearing rather
+//! than belt-and-braces. A device that was never a member is still unable to
+//! begin.
 //!
 //! # The rule this module makes unbreakable
 //!
@@ -31,11 +48,12 @@ use crate::transport::{Transport, TransportError};
 
 /// The Noise pattern, named once.
 ///
-/// `KK` because both statics are known in advance; X25519 for the
-/// Diffie-Hellman, ChaChaPoly for the cipher, BLAKE2s for the hash. Written
-/// down here rather than assembled at a call site so two devices cannot end up
-/// negotiating with different ideas of what they are speaking.
-const PATTERN: &str = "Noise_KK_25519_ChaChaPoly_BLAKE2s";
+/// `IK`: the initiator knows the responder's static in advance and transmits
+/// its own; X25519 for the Diffie-Hellman, ChaChaPoly for the cipher, BLAKE2s
+/// for the hash. Written down here rather than assembled at a call site so two
+/// devices cannot end up negotiating with different ideas of what they are
+/// speaking.
+const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 
 /// The pattern used for pairing, before either side is on the other's roster.
 ///
@@ -95,6 +113,8 @@ pub struct Session<T: Transport> {
     inner: T,
     sent: u64,
     recvd: u64,
+    /// Who is at the other end, as the handshake established it.
+    peer: Option<[u8; 32]>,
 }
 
 impl<T: Transport> Session<T> {
@@ -114,20 +134,28 @@ impl<T: Transport> Session<T> {
         Self::dance(inner, state, true)
     }
 
-    /// Open a session as the side that answered.
-    pub fn accept(
-        inner: T,
-        local_secret: &[u8; 32],
-        peer_public: &[u8; 32],
-    ) -> Result<Self, HandshakeError> {
+    /// Open a session as the side that answered, learning who called.
+    ///
+    /// Takes no peer key, because the whole point is that this side does not
+    /// have one yet. [`Session::peer`] carries what the handshake established,
+    /// and the caller must check it against the roster: a retired device still
+    /// holds the log and can therefore still complete this.
+    pub fn accept(inner: T, local_secret: &[u8; 32]) -> Result<Self, HandshakeError> {
         let state = snow::Builder::new(PATTERN.parse().expect("the pattern is a constant"))
             .local_private_key(local_secret)
-            .map_err(|_| HandshakeError::Refused)?
-            .remote_public_key(peer_public)
             .map_err(|_| HandshakeError::Refused)?
             .build_responder()
             .map_err(|_| HandshakeError::Refused)?;
         Self::dance(inner, state, false)
+    }
+
+    /// The static key of the device at the other end.
+    ///
+    /// Established by the handshake rather than claimed by the peer. `None`
+    /// only for a pairing session, where neither side has a static key yet —
+    /// which is what pairing exists to fix.
+    pub fn peer(&self) -> Option<[u8; 32]> {
+        self.peer
     }
 
     /// Open a pairing session as the side that dialled.
@@ -187,6 +215,10 @@ impl<T: Transport> Session<T> {
             my_turn = !my_turn;
         }
 
+        let peer = state
+            .get_remote_static()
+            .and_then(|k| <[u8; 32]>::try_from(k).ok());
+
         Ok(Session {
             noise: state
                 .into_transport_mode()
@@ -194,6 +226,7 @@ impl<T: Transport> Session<T> {
             inner,
             sent: 0,
             recvd: 0,
+            peer,
         })
     }
 

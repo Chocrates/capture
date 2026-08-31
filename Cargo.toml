@@ -8,6 +8,7 @@ members = [
     "crates/brain-sync",
     "apps/brain-cli",
     "apps/brain-capture",
+    "apps/brain-syncd",
     "apps/brain-desktop",
 ]
 

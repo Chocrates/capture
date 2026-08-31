@@ -18,11 +18,15 @@ fn keypair(seed: u8) -> ([u8; 32], [u8; 32]) {
 /// The two ends have to be driven together because the pattern alternates and
 /// neither side can finish alone — which is exactly what a handshake is, and
 /// what a mock that just returned "connected" would fail to model.
+///
+/// `b_expects` is unused under IK and kept in the signature so the tests read
+/// as "these two devices, each holding what it holds": the responder
+/// deliberately does not know who is calling until the handshake tells it.
 fn handshake(
     a_secret: [u8; 32],
     a_expects: [u8; 32],
     b_secret: [u8; 32],
-    b_expects: [u8; 32],
+    _b_expects: [u8; 32],
 ) -> (
     Result<Session<brain_sync::transport::End>, HandshakeError>,
     Result<Session<brain_sync::transport::End>, HandshakeError>,
@@ -32,7 +36,7 @@ fn handshake(
 
     // The initiator writes first, so it is stepped first; each side's messages
     // are already queued for the other by the time it looks.
-    let responder = std::thread::spawn(move || Session::accept(eb, &b_secret, &b_expects));
+    let responder = std::thread::spawn(move || Session::accept(eb, &b_secret));
     let initiator = Session::initiate(ea, &a_secret, &a_expects);
     let responder = responder
         .join()
@@ -109,12 +113,12 @@ fn nothing_readable_is_on_the_wire() {
     // would pass every other test in this file.
     use brain_sync::transport::Transport;
 
-    let (a_sec, a_pub) = keypair(1);
+    let (a_sec, _a_pub) = keypair(1);
     let (b_sec, b_pub) = keypair(2);
 
     let pair = Pair::new();
     let (ea, eb) = pair.ends();
-    let responder = std::thread::spawn(move || Session::accept(eb, &b_sec, &a_pub));
+    let responder = std::thread::spawn(move || Session::accept(eb, &b_sec));
     let mut a = Session::initiate(ea, &a_sec, &b_pub).unwrap();
     let _b = responder.join().unwrap().unwrap();
 
@@ -199,4 +203,66 @@ fn rekeying_is_per_direction() {
             assert_eq!(a.recv().expect("recv").expect("payload"), b"ack");
         }
     }
+}
+
+// ------------------------------------------------------------------- IK ----
+
+#[test]
+fn the_side_that_answered_learns_who_called() {
+    // The whole reason for IK. A device answering a TCP connection has no idea
+    // who opened it, cannot ask — §5.2 forbids any message outside a session —
+    // and cannot try each member in turn, because a failed attempt consumes
+    // the connection. The handshake itself has to say.
+    let (a_sec, a_pub) = keypair(1);
+    let (b_sec, b_pub) = keypair(2);
+    let (a, b) = handshake(a_sec, b_pub, b_sec, a_pub);
+
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(
+        b.peer(),
+        Some(a_pub),
+        "the responder does not know which device it is talking to, so it \
+         cannot check the roster and cannot refuse a retired one"
+    );
+    assert_eq!(a.peer(), Some(b_pub), "and the initiator knows too");
+}
+
+#[test]
+fn a_device_without_the_archive_cannot_begin() {
+    // The property KK gave and IK keeps: the responder's X25519 key lives in
+    // the log, so a device that has never been a member cannot produce a valid
+    // first message. It is not refused after the fact — it cannot start.
+    let (_a_sec, a_pub) = keypair(1);
+    let (b_sec, _b_pub) = keypair(2);
+    let (outsider_sec, _) = keypair(99);
+    let (_, guessed) = keypair(50);
+
+    // An outsider guessing at the responder's static key.
+    let (outsider, b) = handshake(outsider_sec, guessed, b_sec, a_pub);
+    assert!(outsider.is_err(), "an outsider reached a session");
+    assert!(b.is_err(), "the responder accepted an outsider");
+}
+
+#[test]
+fn a_retired_device_completes_and_must_be_refused_afterwards() {
+    // The honest cost of IK, asserted rather than left in a comment. A retired
+    // device still holds the log, so it still knows the responder's static key
+    // and still completes the handshake. What stops it is the roster check on
+    // `peer()` — which §5.3 already requires ("refuses new ones"), and which
+    // under IK is load-bearing rather than belt-and-braces.
+    let (retired_sec, retired_pub) = keypair(1);
+    let (b_sec, b_pub) = keypair(2);
+
+    let (retired, b) = handshake(retired_sec, b_pub, b_sec, retired_pub);
+    assert!(
+        retired.is_ok(),
+        "a retired device can still complete a handshake"
+    );
+
+    let b = b.unwrap();
+    let roster = [[7u8; 32], [8u8; 32]]; // the retired key is not in it
+    assert!(
+        !roster.contains(&b.peer().expect("the handshake said who")),
+        "the caller was in the roster after all, so this test proves nothing"
+    );
 }

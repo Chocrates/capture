@@ -2695,10 +2695,30 @@ other; nobody else can correlate or count.
 mDNS is blocked on many corporate and guest networks, so there is a static fallback: last-known
 addresses cached from previous sessions, with jittered exponential backoff.
 
-**Transport.** TCP with the **Noise_KK** handshake pattern: both sides already know each
-other's static public key, giving mutual authentication and forward secrecy with no PKI, no
-certificates, and no CA to operate. A device not on the roster cannot complete the handshake
-and cannot read, inject, or observe anything beyond connection metadata.
+**Transport.** TCP with the **Noise_IK** handshake pattern: the initiator already knows the
+responder's static public key, and transmits its own inside the first message. Mutual
+authentication and forward secrecy with no PKI, no certificates, and no CA to operate. A device
+not on the roster cannot complete the handshake and cannot read, inject, or observe anything
+beyond connection metadata.
+
+**Why IK and not KK, which this section originally specified.** KK requires *both* statics to be
+known before the handshake begins. That is true of the side that dials — it chose who to call —
+and false of the side that answers, which has a TCP connection and no idea who opened it. It
+cannot ask, because the rule below forbids any message outside an established session, and it
+cannot try each member in turn, because a failed attempt consumes the connection. **KK is not
+implementable for an inbound connection in this topology**, which was discovered by writing the
+daemon rather than by reading this document.
+
+IK keeps the property that mattered and moves the one that did not. The responder's X25519 key
+lives in the log, so a device without the archive cannot produce a valid first message and cannot
+begin. The responder learns the initiator's key from the handshake and checks it against the
+roster.
+
+The honest cost: a **retired** device still holds the log, so it completes the handshake and is
+refused on the roster check rather than being unable to start. §5.3 already requires that check —
+retirement tears down live sessions and refuses new ones — so the mechanism exists; under IK it is
+load-bearing rather than belt-and-braces. A device that was never a member is still unable to
+begin.
 
 **Everything on the wire is inside the Noise session. No exceptions.** Stated explicitly because
 it is otherwise easy to violate by accident — the blob plane moves large byte ranges and it is
@@ -2708,7 +2728,7 @@ encrypted. Every message type — `EVENT`, `REDACT`/`REDACT_ACK`, `HELLO`, `RANG
 `WANT_TGT` — is a Noise transport message inside an established session:
 
 ```
-TCP connect → Noise_KK handshake (mutual auth, forward secrecy)
+TCP connect → Noise_IK handshake (mutual auth, forward secrecy)
             → every subsequent frame encrypted and authenticated
 ```
 
@@ -2739,11 +2759,19 @@ about four devices. Instead, **the roster lives in the log**.
 Each device generates an Ed25519/X25519 static keypair on first run. A new device is paired
 **once, out of band, with any single existing device**.
 
-Pairing must be a **mutual** exchange, not a one-way scan. Noise_KK requires *both* parties to
-know each other's static public key before the handshake begins — so a newcomer that has only
+Pairing must be a **mutual** exchange, not a one-way scan. Even under Noise_IK the initiator must
+know the responder's static public key before the handshake begins — so a newcomer that has only
 published its own key knows no peer keys, cannot complete a handshake with anyone, and therefore
 cannot read the roster, which lives in the log, which is only reachable through a handshake. A
 one-directional QR flow deadlocks.
+
+**What was built instead of the QR exchange below.** The desktop has no camera, so the gesture is
+six digits shown on one device and typed into the other, with **SPAKE2** turning that code into a
+strong key and a `Noise_NNpsk0` handshake confirming it. Six digits used directly as a key would
+be a million guesses tried offline in seconds by anyone who recorded the exchange — and the
+handshake would confirm the right guess for them. With a PAKE a wrong code yields a different key
+and no information about the right one, so guessing has to be online, one attempt at a time. The
+mutual-exchange requirement below is unchanged; only the channel that carries it differs.
 
 ```
 1. newcomer displays QR: its public key + a short-lived pairing token
@@ -2896,7 +2924,7 @@ acceptable for a single-user home LAN and would not be acceptable for a multi-us
 
 The threat model worth designing against here is not a targeted attacker; it is **a guest
 phone, an IoT device, or a housemate's laptop on the same wifi**, which is an ordinary
-situation rather than a hypothetical one. Roster-gated Noise_KK handles that case completely.
+situation rather than a hypothetical one. Roster-gated Noise_IK handles that case completely.
 
 ### 5.4 Live push
 
@@ -3201,7 +3229,7 @@ versions shown side by side. No modal dialog, no blocking, no interruption at ca
 | 5 | **Concurrent append on n devices** | Structurally impossible to conflict — disjoint `(dev, seq)` spaces, and no device ever writes another's origin. |
 | 6 | **Disk full** | A 10 MB **plain preallocated file** — not a ring buffer (which by definition overwrites its oldest entries and so cannot honour "never drop") and **not a SQLite table** (which would need the very disk that just filled, and whose free-page reservation trick conflicts with the `secure_delete` used by redaction). Written full at install; length-prefixed records appended. `seq` is allocated at **drain** time, not spool time, so a partial or out-of-order drain cannot leave a gap in the origin's stream. Spooled events carry their true capture time and timezone; their HLC is assigned at drain and may lag. At ~200 bytes an event this holds on the order of 50,000 captures, which is far more headroom than needed — the actual protection is the immediate tier-1 notification the moment the spool is in use (§8.7), not capacity. If the spool itself fills, capture fails loudly rather than discarding silently. **Voice capture would exhaust any spool size immediately; when audio lands it needs its own answer, either a blob spool or refusing audio capture while the disk is full.** |
 | 7 | **Thundering herd on network rejoin** | Digest-first (version vector before data), jittered backoff, one sync session per peer pair, range requests capped and pipelined. |
-| 8 | **Non-roster device on the LAN** | Cannot complete Noise_KK. Sees that traffic exists and roughly how much, and nothing readable — every message type including blob transfer is inside the session (§5.2). No TOFU, no auto-pair, no plaintext fallback on handshake failure. |
+| 8 | **Non-roster device on the LAN** | Cannot complete Noise_IK — the responder's static key lives in the log, so it cannot even produce a valid first message. Sees that traffic exists and roughly how much, and nothing readable — every message type including blob transfer is inside the session (§5.2). No TOFU, no auto-pair, no plaintext fallback on handshake failure. |
 | 9 | **Forged or corrupted event** | Per-event Ed25519 signature verified on ingest, independent of transport. Failures quarantined and logged, never folded. |
 | 10 | **Long partition (weeks)** | Converges to the union on reconnect. Only same-note concurrent edits need arbitration (§6). |
 | 11 | **Enrichment failure** (transcription crashes, model unavailable) | Non-fatal by design. The capture stands alone; enrichment retries later. Never blocks, never discards. |
@@ -3270,7 +3298,7 @@ brain/
     brain-store/      # SQLite: events.db + state.db, projections, FTS
     brain-time/       # instants vs floating dates, RRULE expansion, DST policy
     brain-parse/      # sigils + grammar recognizer, confidence scoring
-    brain-sync/       # BSP: Noise_KK, discovery, anti-entropy, gossip, blobs
+    brain-sync/       # BSP: Noise_IK, discovery, anti-entropy, gossip, blobs
     brain-engine/     # composition: enrichment queue, intent cues, scheduler
     brain-ffi/        # uniffi bindings surface for Android
   apps/
@@ -3302,7 +3330,7 @@ stating as a rule: **the fold takes the event set and nothing else.**
 | Canonical encoding | **`minicbor`**, explicit field indices | Event ids are content hashes, so encoding must be byte-identical across platforms or ids diverge and dedup breaks. A correctness requirement, not a preference — see below. |
 | Hashing | `blake3` | Fast, and already the id scheme in §1. |
 | Signatures | `ed25519-dalek` | Per-event signing (§5.3). |
-| Transport crypto | `snow` | Noise_KK, which is exactly the pattern specced. |
+| Transport crypto | `snow` | Noise_IK for peers, `NNpsk0` for pairing. Both are stock patterns; none of the state machine, nonce handling or rekeying is ours to get subtly wrong. |
 | Discovery | `mdns-sd` | Pure Rust, no platform daemon dependency. |
 | Time | `jiff` | The tz/DST semantics in §3.2 are the hard part of this whole domain. Jiff models zoned vs civil time as distinct types, which makes the instants-versus-floating-dates split a type error rather than a code review. |
 | Recurrence | `rrule` | RFC 5545 expansion; wrap rather than expose, so the crate stays swappable. |
