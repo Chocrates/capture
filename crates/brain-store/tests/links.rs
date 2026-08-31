@@ -321,8 +321,6 @@ fn a_page_sits_under_another_and_comes_back_out() {
     let row = named.iter().find(|n| n.alias == "acme-budget").unwrap();
     assert_eq!(row.parent.as_deref(), Some(parent.as_str()));
 
-    let tgt = s.state.resolve("acme").unwrap().unwrap();
-    assert_eq!(s.state.children_of(&tgt).unwrap().len(), 1);
     drop(s);
 
     brain_store::mutate::set_parent(&p, "acme-budget", None).unwrap();

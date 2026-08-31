@@ -29,7 +29,6 @@ use brain_core::{
     Dev, EventId,
     envelope::Envelope,
     fold::{Held, Names, Projection},
-    hlc::Hlc,
     roster::Roster,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -1397,7 +1396,7 @@ impl Store {
     /// changed and would otherwise resolve every link to nothing.
     /// The names among these that the projection knows.
     ///
-    /// The bounded form of [`known_names`]. An incremental fold asks its seed
+    /// Bounded on purpose. An incremental fold asks its seed
     /// two questions — what a `[[link]]` in these events points at, and whether
     /// an alias being assigned is already taken — so it needs those names and
     /// no others. Reading every name in the archive to answer them made a write
@@ -1452,43 +1451,6 @@ impl Store {
                     ),
                 );
             }
-        }
-        Ok(out)
-    }
-
-    pub fn known_names(&self) -> Result<Names> {
-        // Slugs and aliases both, because they share one namespace and a link
-        // may be written against either. Each carries the moment it started
-        // denoting its note — a slug from the capture, an alias from its
-        // assignment — so a link written earlier does not resolve through it.
-        let mut st = self.conn.prepare(
-            "SELECT slug, tgt, created_wall, created_counter FROM notes
-             UNION ALL
-             SELECT alias, tgt, alias_wall, alias_counter FROM notes
-             WHERE alias IS NOT NULL",
-        )?;
-        let rows = st.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                id_from(r.get::<_, Vec<u8>>(1)?).unwrap_or(EventId([0; 32])),
-                r.get::<_, i64>(2)? as u64,
-                r.get::<_, i64>(3)? as u32,
-            ))
-        })?;
-        let mut out = Names::new();
-        for row in rows {
-            let (name, tgt, wall, counter) = row?;
-            out.insert(
-                name,
-                (
-                    tgt,
-                    Hlc {
-                        wall,
-                        counter,
-                        origin: Dev([0; 32]),
-                    },
-                ),
-            );
         }
         Ok(out)
     }
@@ -1584,24 +1546,6 @@ impl Store {
         );
         let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map(params![tag, now as i64], note_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// The pages sitting directly under one.
-    pub fn children_of(&self, tgt: &EventId) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare(
-            "SELECT COALESCE(n.alias, n.slug), n.slug FROM notes n
-             JOIN parents p ON p.tgt = n.tgt
-             WHERE p.parent = ?1 AND n.redacted_at IS NULL
-             ORDER BY COALESCE(n.alias, n.slug)",
-        )?;
-        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -2095,28 +2039,6 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
-    }
-
-    /// Every key currently in the roster.
-    ///
-    /// For surfaces, not for ingest. Ingest builds the roster from the log
-    /// because the projection may be stale, and a stale roster admits events
-    /// under keys that were retired.
-    pub fn roster_keys(&self) -> Result<std::collections::BTreeSet<[u8; 32]>> {
-        // Current members only. A retired key is a row here so that its
-        // origins' past events still verify, and reporting it as a member
-        // would undo the retirement everywhere the projection is read.
-        let mut q = self
-            .conn
-            .prepare("SELECT pubkey FROM roster WHERE retired = 0")?;
-        let rows = q.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
-        let mut out = std::collections::BTreeSet::new();
-        for r in rows {
-            if let Ok(k) = <[u8; 32]>::try_from(r?.as_slice()) {
-                out.insert(k);
-            }
-        }
-        Ok(out)
     }
 
     /// The key an origin is entitled to be verified against.

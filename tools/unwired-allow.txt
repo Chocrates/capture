@@ -1,0 +1,9 @@
+# Public items with no caller in the source, and why each is allowed.
+#
+# Every line is a claim somebody made in writing. An entry here says "this is
+# reachable in a way the scan cannot see" or "this is a known gap with a
+# recorded owner" — never "the check is inconvenient".
+#
+#   name: reason
+
+split_series: M2 recurrence, built and tested with no surface to invoke it. Splitting a series at an occurrence needs a recurrence rule parsed from text, which is a command design rather than a wiring job. Recorded in openspec/changes/m3-sync/tasks.md under follow-ups; the gate found it, which is the gate working.

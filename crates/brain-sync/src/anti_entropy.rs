@@ -53,14 +53,6 @@ pub fn wanted(mine: &VersionVector, theirs: &VersionVector) -> Vec<Message> {
     out
 }
 
-/// Whether two replicas have anything to say to each other.
-///
-/// Both directions, because a session is opened by one side and the other may
-/// be the one that is behind. A device that only pushed would never receive.
-pub fn in_agreement(mine: &VersionVector, theirs: &VersionVector) -> bool {
-    wanted(mine, theirs).is_empty() && wanted(theirs, mine).is_empty()
-}
-
 /// Which peers to sync with this round.
 ///
 /// Fanout two or three, per §5.5. With two devices this degenerates to a full

@@ -1,6 +1,6 @@
 //! What two replicas ask each other for.
 
-use brain_sync::anti_entropy::{FANOUT, in_agreement, select, wanted};
+use brain_sync::anti_entropy::{FANOUT, select, wanted};
 use brain_sync::message::{Message, VersionVector};
 
 fn vv(pairs: &[(&str, u64)]) -> VersionVector {
@@ -18,7 +18,6 @@ fn range(m: &Message) -> (&str, u64, u64) {
 fn two_replicas_holding_the_same_events_ask_for_nothing() {
     let a = vv(&[("aa", 40), ("bb", 12)]);
     assert!(wanted(&a, &a).is_empty());
-    assert!(in_agreement(&a, &a));
 }
 
 #[test]
@@ -60,7 +59,7 @@ fn being_ahead_is_not_a_reason_to_ask() {
     let theirs = vv(&[("aa", 40)]);
     assert!(wanted(&mine, &theirs).is_empty());
     assert!(
-        !in_agreement(&mine, &theirs),
+        !wanted(&theirs, &mine).is_empty(),
         "the peer is behind and needs telling"
     );
 }

@@ -42,7 +42,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool redact purity deny
+ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired deny
 	@echo
 	@echo 'ci: all gates passed'
 
@@ -128,6 +128,21 @@ redact:
 # store renders what the original rendered. `ci` runs it.
 roundtrip:
 	$(CARGO) test -p brain-cli --test roundtrip -- --ignored --test-threads=1
+
+## unwired: fail when something public has no caller
+#
+# A tested mechanism with no caller is not a shipped feature, and this project
+# has lost three rounds to that exact shape — `device_retire` correct in the
+# fold and authored by nothing, `honour_self` tested and never called,
+# `discovery::backoff` replaced at the call site by an untested copy. Each had
+# passing tests, and the passing tests are what made them look finished.
+#
+# Deliberately crude: it matches names, not a call graph. The crude version
+# found six real things on its first run and stays something a person can read
+# and argue with.
+unwired:
+	@echo '--- everything public has a caller'
+	@python3 tools/unwired.py
 
 # ---------------------------------------------------------------- purity ----
 
