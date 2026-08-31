@@ -7,8 +7,8 @@ is not measurable from inside the process.
 ## What is measured forever
 
 The overlay times every appearance, from **the show request arriving** to **the
-first frame drawn**, into a local histogram (`brain_store::latency`). It is
-reported by `brain status`:
+first frame drawn**, into a local histogram (`capture_store::latency`). It is
+reported by `capture status`:
 
 ```
 overlay     5 shown, half within 2ms, 95% within 2ms
@@ -52,7 +52,7 @@ it. The parts outside are:
 
 The first two happen before any of this code runs; the last two after it stops.
 Reporting the in-process figure as though it were the whole gesture would be the
-most flattering possible lie, which is why `brain status` labels it.
+most flattering possible lie, which is why `capture status` labels it.
 
 To measure it properly: film the screen and the keyboard together at a known
 frame rate — 240 fps gives about 4 ms of resolution — and count frames from key
@@ -64,7 +64,7 @@ while the gesture felt slow.
 
 ## Confirmed on the target
 
-2026-08-25, GNOME 46 on Wayland. `brain-capture --register` bound
+2026-08-25, GNOME 46 on Wayland. `capture-overlay --register` bound
 `<Control><Super>space` through a gsettings custom keybinding, the chord was
 pressed, and the overlay recorded the request arriving — the whole path, on real
 hardware, not a simulation of it:
@@ -72,13 +72,13 @@ hardware, not a simulation of it:
 ```
 Ctrl-Super-Space
   → GNOME matches the binding
-  → spawns `brain-capture --show`
+  → spawns `capture-overlay --show`
   → connects to /run/user/1000/brain-<hash>.sock
   → overlay records the gesture and shows the window
 ```
 
 The first histogram sample from that press: drawn within 2 ms of the request
-arriving. The dead-gesture condition in `brain status` cleared itself, which is
+arriving. The dead-gesture condition in `capture status` cleared itself, which is
 the detection confirming its own signal rather than being asserted to work.
 
 ## Status

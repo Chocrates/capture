@@ -37,7 +37,7 @@ Three ways in. They differ in where you are, not in what they do.
 **From a terminal** — add this to your shell rc, then start a new shell:
 
 ```sh
-eval "$(brain shell-init zsh)"     # or bash, in ~/.bashrc
+eval "$(capture shell-init zsh)"     # or bash, in ~/.bashrc
 ```
 
 Type at your prompt and press **Ctrl-B**. The line clears; that is the receipt.
@@ -57,8 +57,8 @@ run `date` before deploy   →  nothing executed
 **From anywhere** — bind a global chord. Two commands, once:
 
 ```sh
-brain-capture --autostart    # be running from login
-brain-capture --register     # bind Ctrl-Super-Space, then press it to confirm
+capture-overlay --autostart    # be running from login
+capture-overlay --register     # bind Ctrl-Super-Space, then press it to confirm
 ```
 
 After that it works the way the desktop's own overview does. Pressing Super does
@@ -69,7 +69,7 @@ and font loading first, which is a visible pause on a gesture that has to feel
 like it already happened.
 
 While it waits it costs about 30 MB of private memory and no measurable
-processor time. `brain-capture --no-autostart` undoes it; the terminal chord is
+processor time. `capture-overlay --no-autostart` undoes it; the terminal chord is
 unaffected either way.
 
 Registering ends by asking you to press the chord, because "the setting was
@@ -79,19 +79,19 @@ matters.
 **From a script**
 
 ```sh
-brain + some text                  # everything after + is content
-echo "from a pipe" | brain +
-brain + -- --looks-like-a-flag     # stored as text
+capture + some text                  # everything after + is content
+echo "from a pipe" | capture +
+capture + -- --looks-like-a-flag     # stored as text
 ```
 
 ## Read
 
 ```sh
-brain timeline              # newest first, grouped by the day you captured
-brain show <name>           # one note, with its links
-brain search <words>        # full text, most relevant first
-brain links <name>          # what it points at, and what points at it
-brain-desktop               # the same, in a window
+capture timeline              # newest first, grouped by the day you captured
+capture show <name>           # one note, with its links
+capture search <words>        # full text, most relevant first
+capture links <name>          # what it points at, and what points at it
+capture-desktop               # the same, in a window
 ```
 
 Every read command takes `--json`.
@@ -99,13 +99,13 @@ Every read command takes `--json`.
 ## Change
 
 ```sh
-brain edit <name> <text>    # the old version is kept
-brain tag <name> <tag>
-brain alias <name> <new>    # a chosen name
-brain pin <name>
-brain mute <name>           # stays in the timeline, leaves search
-brain mute '#tag'           # everything carrying it, now or later
-brain resolve <name>        # dismiss a divergence; both versions stay
+capture edit <name> <text>    # the old version is kept
+capture tag <name> <tag>
+capture alias <name> <new>    # a chosen name
+capture pin <name>
+capture mute <name>           # stays in the timeline, leaves search
+capture mute '#tag'           # everything carrying it, now or later
+capture resolve <name>        # dismiss a divergence; both versions stay
 ```
 
 Nothing here removes anything. Every command appends an event, and the current
@@ -116,9 +116,9 @@ state is computed from the log.
 One command does, and it is the only irreversible thing here.
 
 ```sh
-brain redact <name>                 # names what will go; type the name to confirm
-brain redact --cancel <id>          # within the window
-brain redact --cancel --all-since <t>
+capture redact <name>                 # names what will go; type the name to confirm
+capture redact --cancel <id>          # within the window
+capture redact --cancel --all-since <t>
 ```
 
 Thirty minutes pass before anything is destroyed, and the content stays readable
@@ -128,17 +128,17 @@ payload is gone from the log, the projection and the search index.
 Two things it cannot reach, and says so:
 
 - **Export files already written.** They get copied offsite by tools this
-  program has no access to. `brain status` reports the gap until you say you
+  program has no access to. `capture status` reports the gap until you say you
   have dealt with it.
 - **Anything you copied elsewhere by hand.**
 
 ## Look after it
 
 ```sh
-brain status     # what the store holds, and anything needing attention
-brain verify     # every id, signature, body hash and origin chain
-brain export     # incremental, into ~/brain/export
-brain restore <dir>
+capture status     # what the store holds, and anything needing attention
+capture verify     # every id, signature, body hash and origin chain
+capture export     # incremental, into ~/capture/export
+capture restore <dir>
 ```
 
 `status` reads counters and opens no event, so it names `verify` for the rest
@@ -147,16 +147,16 @@ its own code, because a script has to tell "you typed it wrong" from "the
 archive is broken".
 
 Export is manual, never scheduled. Scheduling it would invite the belief that
-backups are handled; copying `~/brain/export` somewhere else is your job and an
+backups are handled; copying `~/capture/export` somewhere else is your job and an
 ordinary backup tool's.
 
 ## More than one device
 
 ```sh
-brain pair                    # shows a six-digit code, and waits
-brain pair 418302 --at 192.168.1.40   # on the other device
-brain peers                   # who is in the roster, and when each was reached
-brain-syncd                   # the daemon: finds paired devices and reconciles
+capture pair                    # shows a six-digit code, and waits
+capture pair 418302 --at 192.168.1.40   # on the other device
+capture peers                   # who is in the roster, and when each was reached
+capture-syncd                   # the daemon: finds paired devices and reconciles
 ```
 
 One gesture per device, not one per pair of devices: the roster lives in the
@@ -173,14 +173,14 @@ Discovery advertises a rotating pseudonym rather than a device name, so an
 observer on a café network cannot tell that your laptop and your phone belong
 together, or count what you captured.
 
-`brain-syncd` is installed but not started from login. It opens a listening
+`capture-syncd` is installed but not started from login. It opens a listening
 socket, and that is a thing to switch on deliberately rather than inherit from
 having run an installer.
 
 ## What is where
 
 ```
-~/brain/
+~/capture/
   events.db      the log — the only thing that cannot be recomputed
   state.N.db     the projection, rebuilt from the log at will
   ops.db         local state: this device's bookkeeping, and who it has paired
@@ -189,7 +189,7 @@ having run an installer.
   export/        what you copy offsite
 ```
 
-If `state.N.db` is lost, `brain rebuild` recreates it. If `events.db` is lost,
+If `state.N.db` is lost, `capture rebuild` recreates it. If `events.db` is lost,
 restore from an export — nothing else can bring it back.
 
 ## Building on it

@@ -31,8 +31,8 @@ work to answer.
   that mints a fresh origin incarnation so a restored replica can never reuse sequence positions.
 - **Browse** — timeline, note page with backlinks, full-text search, and a health surface that
   reports the system's state honestly rather than optimistically.
-- **A single `brain` CLI** that is both a capture path and the integration test harness, including
-  `brain verify` for the integrity claims and `--json` on every read command.
+- **A single `capture` CLI** that is both a capture path and the integration test harness, including
+  `capture verify` for the integrity claims and `--json` on every read command.
 - **First run** — four startup states (not three), identity generation, roster genesis, and hotkey
   registration that is *confirmed* rather than assumed.
 
@@ -59,8 +59,8 @@ No breaking changes: there is nothing yet to break.
   (`DESIGN.md` §1.2, §1 incarnation)
 - `browse`: timeline, note page, links and backlinks, full-text search, and the three-tier health
   surface. (`DESIGN.md` §4.1, §4.2, §4.3, §4.5)
-- `cli`: the single `brain` binary — capture that survives shell metacharacters, read/write/ops
-  commands, `--json`, exit codes, and `brain verify`. (`DESIGN.md` §8.6)
+- `cli`: the single `capture` binary — capture that survives shell metacharacters, read/write/ops
+  commands, `--json`, exit codes, and `capture verify`. (`DESIGN.md` §8.6)
 - `first-run`: startup state detection, identity and incarnation, roster genesis, and hotkey
   registration with confirmation and dead-key detection. (`DESIGN.md` §8.7)
 
@@ -70,10 +70,10 @@ None. This is the first change; `openspec/specs/` is empty.
 
 ## Impact
 
-- **New cargo workspace**: `crates/brain-core` (I/O-free, async-free — the fold and the conflict
-  rules live here so they are exhaustively testable without a runtime), `crates/brain-store`
-  (SQLite, both databases), `apps/brain-cli`, `apps/brain-capture` (egui overlay),
-  `apps/brain-desktop` (Tauri, timeline and note page only).
+- **New cargo workspace**: `crates/capture-core` (I/O-free, async-free — the fold and the conflict
+  rules live here so they are exhaustively testable without a runtime), `crates/capture-store`
+  (SQLite, both databases), `apps/capture-cli`, `apps/capture-overlay` (egui overlay),
+  `apps/capture-desktop` (Tauri, timeline and note page only).
 - **Dependencies**: `rusqlite` (bundled SQLite, FTS5, `contentless_delete`), `blake3`,
   `ed25519-dalek`, deterministic CBOR, `jiff` for the capture timezone. No async runtime in M1 —
   `tokio` arrives with sync in M3.
@@ -94,7 +94,7 @@ Deliberately deferred, each to a named milestone:
 - **Enrichment** — M5. Transcription, entity extraction, link suggestion, the specificity pass. An
   un-enriched capture is a complete capture; nothing in M1 depends on enrichment existing.
 - **Recognizer promotion, tasks, events, recurrence, calendar** — M2. M1 captures notes; typed
-  promotion arrives with `brain-time` and `brain-parse`.
+  promotion arrives with `capture-time` and `capture-parse`.
 - **Scheduled review, intents, activation** — M2. These are the evidence-backed components and they
   ship in M2 rather than last (`DESIGN.md` §8.8), but they need the recurrence machinery M2 builds.
 - **At-rest encryption, app lock, expiry wipe, panic redact** — deferred as a cluster

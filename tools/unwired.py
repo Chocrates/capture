@@ -46,10 +46,10 @@ ALLOW = ROOT / "tools" / "unwired-allow.txt"
 # Where public API lives, and where a caller may be found.
 # Files that exist to be called by tests, and nothing else.
 #
-# `brain-core::testing` is a fixture library behind a feature flag: every
+# `capture-core::testing` is a fixture library behind a feature flag: every
 # consumer is a test by construction, so "only tests call this" is what it is
 # for rather than a finding.
-SCAFFOLDING = {"crates/brain-core/src/testing.rs"}
+SCAFFOLDING = {"crates/capture-core/src/testing.rs"}
 
 SOURCES = [
     p

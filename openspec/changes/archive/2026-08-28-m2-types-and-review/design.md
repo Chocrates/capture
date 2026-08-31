@@ -4,9 +4,9 @@ M1 is complete and in use on one machine: capture, store, fold, search, a GUI
 covering the timeline, the note page and every mutation. Every capture is text,
 and nothing reads it.
 
-Two things exist that this milestone builds directly on. `brain-parse` holds the
+Two things exist that this milestone builds directly on. `capture-parse` holds the
 recognizer's vocabulary, grammar and confidence bands (`DESIGN.md` §3.1.5) as
-tested tables with no parser over them. `brain-core` holds a frozen encoding, a
+tested tables with no parser over them. `capture-core` holds a frozen encoding, a
 deterministic fold, and event kinds up to `UNFLAG(15)`.
 
 Two constraints shape everything below. The encoding is **permanent from its
@@ -36,7 +36,7 @@ convergence testable by property rather than by hand.
 
 ## Decisions
 
-### `brain-time` is a separate crate, `no_std`, and cannot read a clock
+### `capture-time` is a separate crate, `no_std`, and cannot read a clock
 
 Recurrence expansion is the one place in this design where a wrong answer is
 invisible: an occurrence at the wrong instant looks exactly like an occurrence.
@@ -44,7 +44,7 @@ Putting expansion in a crate that cannot reach a clock makes "the same rule
 expands identically everywhere" a property the type system enforces rather than
 a convention.
 
-*Alternative considered:* expansion inside `brain-store`, where the clock already
+*Alternative considered:* expansion inside `capture-store`, where the clock already
 lives. Rejected — it would make the expansion untestable by the convergence
 property that already exists for the fold, and §8.3 records the two earlier
 violations of exactly this rule that the property test could not catch because
@@ -186,11 +186,11 @@ without these kinds holds them rather than misreading them.
 
 Order of work, each step usable before the next:
 
-1. `brain-time` — instants, floating dates, RRULE subset, DST policy. No
+1. `capture-time` — instants, floating dates, RRULE subset, DST policy. No
    dependants yet.
-2. New event kinds and bodies in `brain-core`, with golden vectors. Fold rules
+2. New event kinds and bodies in `capture-core`, with golden vectors. Fold rules
    and conflict rules with property tests. Nothing authors them yet.
-3. The parser in `brain-parse` over the existing tables, returning candidates.
+3. The parser in `capture-parse` over the existing tables, returning candidates.
 4. Promotion: authoring `promote`, the reparse path, pinning.
 5. Projection: occurrence expansion, the widened due queue.
 6. Surfaces: agenda and calendar in the desktop, then the CLI equivalents.
@@ -233,7 +233,7 @@ never overridden — and says nothing about when it happens. Nothing in the syst
 observes a build, so without a trigger a note captured in March could never
 benefit from a grammar fix shipped in June.
 
-So `brain-parse` carries a version, bumped whenever the vocabulary or grammar
+So `capture-parse` carries a version, bumped whenever the vocabulary or grammar
 changes, and every promotion records the version it was parsed under. Startup
 reparses anything parsed under an older one. The trigger becomes a fact in the
 data rather than an event nobody observes, and the cost is the one §2.5.1

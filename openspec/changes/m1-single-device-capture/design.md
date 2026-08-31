@@ -11,7 +11,7 @@ now, in a milestone where nothing is replicating and nothing appears to depend o
 Three rounds of adversarial review found the majority of their defects in exactly these rules,
 including several introduced *as fixes* for earlier defects. `DESIGN.md` records each rejected
 approach alongside the accepted one; those records are load-bearing and should be read before
-changing anything in `brain-core`.
+changing anything in `capture-core`.
 
 ## Goals / Non-Goals
 
@@ -19,9 +19,9 @@ changing anything in `brain-core`.
 
 - A single-device system usable every day: capture, browse, search, redact, export.
 - The durable layer correct enough that M3 can replicate against it without a format break.
-- `brain-core` I/O-free and async-free, so the fold and conflict rules are exhaustively testable
+- `capture-core` I/O-free and async-free, so the fold and conflict rules are exhaustively testable
   with no runtime, no clock, and no filesystem.
-- Integrity claims that are runnable (`brain verify`) rather than asserted.
+- Integrity claims that are runnable (`capture verify`) rather than asserted.
 
 **Non-Goals**
 
@@ -46,7 +46,7 @@ audit trail.
 *Consequence that must not be forgotten:* the id then authenticates the body's hash rather than the
 body, so `blake3(body) == bhash` becomes a **mandatory ingest check**. Without it a relaying device
 can substitute content that still verifies. This is cheap and easy to omit, which is why it is a
-requirement and a `brain verify` check rather than an implementation note.
+requirement and a `capture verify` check rather than an implementation note.
 
 ### D2: Every body begins with a 16-byte random nonce
 
@@ -152,18 +152,18 @@ one, when a clock correction or a reboot would otherwise produce descending time
 
 ### D12: Entropy, clocks and filesystem access are injected, never taken
 
-`brain-core` is I/O-free, async-free and clock-free, but several things assigned to it are none of
+`capture-core` is I/O-free, async-free and clock-free, but several things assigned to it are none of
 those: the 16-byte body nonce, the 128-bit incarnation, key generation, the HLC stamp, and
 timezone resolution.
 
 All of them are **values passed in at the boundary** — `Envelope::build(body, HlcStamp, Nonce,
-&SigningKey)` — with `brain-store` and the applications supplying them. Only the fold, the conflict
+&SigningKey)` — with `capture-store` and the applications supplying them. Only the fold, the conflict
 rules and slug derivation are genuinely pure, and those are the things that must stay pure.
 
 *Alternative considered:* a `Clock` trait object threaded through the core. Rejected — it is exactly
 D6's rejected draft wearing an interface, and once it exists nothing stops the fold taking it.
 
-Enforcement is structural rather than aspirational: `no_std` on `brain-core` so `SystemTime` and
+Enforcement is structural rather than aspirational: `no_std` on `capture-core` so `SystemTime` and
 `std::fs` are not nameable, clippy `disallowed-methods` for the rest, and a dependency ban so
 `getrandom`, `rusqlite` and `tokio` cannot enter its tree.
 
@@ -205,7 +205,7 @@ is destroyed and stops the name leaking the words it was built from.
 - **The durable rules are unexercised in M1.** Contiguous heads, quarantine/rejected separation and
   incarnation minting have almost no observable effect on one device, so defects will not surface
   until M3 — by which time the log is full of events written under them. → Property-test them
-  directly in `brain-core` against synthetic multi-origin event sets, rather than waiting for real
+  directly in `capture-core` against synthetic multi-origin event sets, rather than waiting for real
   replication.
 
 - **Plaintext at rest.** M1 stores the log, the projection and the export directory unencrypted.
@@ -231,10 +231,10 @@ is destroyed and stops the name leaking the words it was built from.
 Nothing exists, so there is no migration in the usual sense. What matters is the ordering that
 keeps the irrevocable decisions ahead of the code that depends on them:
 
-1. `brain-core` first: canonical encoding, envelope, identity, signing, fold, conflict rules. No
+1. `capture-core` first: canonical encoding, envelope, identity, signing, fold, conflict rules. No
    I/O. Property tests before any storage exists.
-2. `brain-store` second: both databases, ingest checks, heads maintenance, rebuild-by-re-fold.
-3. `brain-cli` third: it is the harness. `brain verify` lands here and gates everything after.
+2. `capture-store` second: both databases, ingest checks, heads maintenance, rebuild-by-re-fold.
+3. `capture-cli` third: it is the harness. `capture verify` lands here and gates everything after.
 4. Capture overlay and desktop app last, against a core that is already proven.
 
 Rollback: the log format is the only thing that cannot be rolled back. Everything above it is
@@ -251,7 +251,7 @@ treat the encoding as frozen.
   keybinding → X11 grab → none, with the gsettings path being what actually works here. A GNOME
   Shell extension was rejected (separate install, breaks across GNOME versions). See `DESIGN.md`
   §8.5. Note the portal backend needs D-Bus and a runtime **in the overlay** — permitted there;
-  the Non-Goal forbids network sockets and a runtime in `brain-core`, not that.
+  the Non-Goal forbids network sockets and a runtime in `capture-core`, not that.
 - ~~**Wayland ambient context.**~~ **Settled.** Confirmed unavailable on the target: no Wayland
   protocol for focused-window identity, `org.gnome.Shell.Eval` disabled in release builds, and
   Xwayland's `_NET_ACTIVE_WINDOW` returns `0x0` — which must be explicitly refused rather than
@@ -281,7 +281,7 @@ treat the encoding as frozen.
   with indexed encoding physical position is not something you state. Both are corrected in
   `DESIGN.md` §8.3.
 - ~~**Whether the credential heuristic is in M1.**~~ **Settled: yes, as a pure predicate in
-  `brain-core`, inside the frozen slug algorithm.** Not the recogniser — it cannot wait for M2,
+  `capture-core`, inside the frozen slug algorithm.** Not the recogniser — it cannot wait for M2,
   because adding the check later would change existing slugs on the next rebuild, which is exactly
   what freezing prevents. Safe to freeze because it may only ever become *more* conservative: notes
   already slugged by words keep their slugs, so tightening never rewrites history. Tuned to
@@ -296,10 +296,10 @@ treat the encoding as frozen.
 - ~~**What runs on a schedule.**~~ **Settled: a due-work queue in the projection, drained on every
   process startup and on a low-frequency timer in the resident overlay** (`DESIGN.md` §8.7). No
   daemon — a fourth binary is one more thing that can be silently down; no systemd timer — it puts
-  scheduling where `brain status` cannot see it. Without the overlay the system falls back to
+  scheduling where `capture status` cannot see it. Without the overlay the system falls back to
   startup-only, which costs latency rather than correctness.
 
-  Two riders. `brain status` reports **when due work was last processed**, or a long-dead overlay
+  Two riders. `capture status` reports **when due work was last processed**, or a long-dead overlay
   means redactions sitting undestroyed while the UI claims otherwise. And **spool drain is not on
   the queue** — it is event-driven, on the next successful append and on startup, because retrying
   against a still-full disk is waste and disk recovery is invisible to a clock.
@@ -312,7 +312,7 @@ treat the encoding as frozen.
   due-work queue — WAL prevents interleaved transactions but not two processes independently folding
   the same events, which is a correctness problem rather than a locking one.
 
-  Read commands and `brain verify` open read-only with no dependency on the writer: diagnostics that
+  Read commands and `capture verify` open read-only with no dependency on the writer: diagnostics that
   stop working when the system is unhealthy are unusable at the only moment they matter.
 
   Two riders. `synchronous=FULL` is a **connection-open invariant**, not a property of the capture

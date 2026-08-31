@@ -42,11 +42,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y zsh
-      - run: cargo test -p brain-cli --test pty -- --ignored --test-threads=1
-      - run: cargo test -p brain-cli --test tamper -- --ignored --test-threads=1
-      - run: cargo test -p brain-cli --test roundtrip -- --ignored --test-threads=1
-      - run: cargo test -p brain-cli --test spool -- --ignored --test-threads=1
-      - run: cargo test -p brain-cli --test scenarios -- --ignored --test-threads=1
+      - run: cargo test -p capture-cli --test pty -- --ignored --test-threads=1
+      - run: cargo test -p capture-cli --test tamper -- --ignored --test-threads=1
+      - run: cargo test -p capture-cli --test roundtrip -- --ignored --test-threads=1
+      - run: cargo test -p capture-cli --test spool -- --ignored --test-threads=1
+      - run: cargo test -p capture-cli --test scenarios -- --ignored --test-threads=1
 
   purity:
     # The three-layer boundary from DESIGN.md D12. no_std makes a clock
@@ -57,33 +57,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: brain-core builds without std
-        run: cargo build -p brain-core
+      - name: capture-core builds without std
+        run: cargo build -p capture-core
 
-      - name: brain-core dependency tree is clean
+      - name: capture-core dependency tree is clean
         run: |
-          tree=$(cargo tree -p brain-core -e normal)
+          tree=$(cargo tree -p capture-core -e normal)
           fail=0
           for crate in tokio rusqlite getrandom jiff serde_cbor; do
             if grep -qE "[[:space:]]$crate v" <<<"$tree"; then
-              echo "::error::$crate must not be a dependency of brain-core"
+              echo "::error::$crate must not be a dependency of capture-core"
               fail=1
             fi
           done
           exit $fail
 
-      - name: a clock cannot be reached from brain-core
+      - name: a clock cannot be reached from capture-core
         # Guards the property directly rather than trusting that no_std stays on.
         run: |
-          cp crates/brain-core/src/lib.rs /tmp/lib.rs.bak
+          cp crates/capture-core/src/lib.rs /tmp/lib.rs.bak
           echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' \
-            >> crates/brain-core/src/lib.rs
-          if cargo build -p brain-core 2>/dev/null; then
-            echo "::error::brain-core compiled a std::time reference; the purity boundary is off"
-            cp /tmp/lib.rs.bak crates/brain-core/src/lib.rs
+            >> crates/capture-core/src/lib.rs
+          if cargo build -p capture-core 2>/dev/null; then
+            echo "::error::capture-core compiled a std::time reference; the purity boundary is off"
+            cp /tmp/lib.rs.bak crates/capture-core/src/lib.rs
             exit 1
           fi
-          cp /tmp/lib.rs.bak crates/brain-core/src/lib.rs
+          cp /tmp/lib.rs.bak crates/capture-core/src/lib.rs
           echo "purity boundary holds"
 
   deny:

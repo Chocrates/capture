@@ -217,7 +217,7 @@ would allow a relaying device to substitute different content that still verifie
 
 #### Scenario: Redacted rows still verify
 
-- **WHEN** `brain verify` runs over a log containing redacted events
+- **WHEN** `capture verify` runs over a log containing redacted events
 - **THEN** those rows' ids recompute and signatures verify, and the body check is skipped for them.
 
 ### Requirement: Origin identity includes a random incarnation

@@ -509,139 +509,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-capture"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-parse",
- "brain-store",
- "eframe",
- "jiff",
- "tracing",
- "tracing-subscriber",
- "winit",
- "x11rb",
- "zbus",
-]
-
-[[package]]
-name = "brain-cli"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-parse",
- "brain-store",
- "brain-sync",
- "brain-time",
- "clap",
- "ed25519-dalek",
- "jiff",
- "minicbor",
- "rustix 1.1.4",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "brain-core"
-version = "0.1.0"
-dependencies = [
- "any_ascii",
- "blake3",
- "brain-core",
- "ed25519-dalek",
- "minicbor",
- "proptest",
- "unicode-normalization",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "brain-desktop"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-parse",
- "brain-store",
- "brain-time",
- "jiff",
- "minicbor",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "brain-parse"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-time",
- "proptest",
-]
-
-[[package]]
-name = "brain-store"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-parse",
- "brain-sync",
- "brain-time",
- "ed25519-dalek",
- "getrandom 0.3.4",
- "jiff",
- "minicbor",
- "proptest",
- "rusqlite",
- "rustix 1.1.4",
- "thiserror 2.0.20",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "brain-sync"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "brain-core",
- "mdns-sd",
- "minicbor",
- "proptest",
- "snow",
- "spake2",
- "x25519-dalek",
-]
-
-[[package]]
-name = "brain-syncd"
-version = "0.1.0"
-dependencies = [
- "brain-core",
- "brain-store",
- "brain-sync",
- "if-addrs",
- "jiff",
- "minicbor",
- "tracing",
- "tracing-subscriber",
- "zbus",
-]
-
-[[package]]
-name = "brain-time"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "chrono-tz",
- "proptest",
-]
-
-[[package]]
 name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -801,6 +668,139 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "capture-cli"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-parse",
+ "capture-store",
+ "capture-sync",
+ "capture-time",
+ "clap",
+ "ed25519-dalek",
+ "jiff",
+ "minicbor",
+ "rustix 1.1.4",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "capture-core"
+version = "0.1.0"
+dependencies = [
+ "any_ascii",
+ "blake3",
+ "capture-core",
+ "ed25519-dalek",
+ "minicbor",
+ "proptest",
+ "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "capture-desktop"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-parse",
+ "capture-store",
+ "capture-time",
+ "jiff",
+ "minicbor",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "capture-overlay"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-parse",
+ "capture-store",
+ "eframe",
+ "jiff",
+ "tracing",
+ "tracing-subscriber",
+ "winit",
+ "x11rb",
+ "zbus",
+]
+
+[[package]]
+name = "capture-parse"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-time",
+ "proptest",
+]
+
+[[package]]
+name = "capture-store"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-parse",
+ "capture-sync",
+ "capture-time",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "jiff",
+ "minicbor",
+ "proptest",
+ "rusqlite",
+ "rustix 1.1.4",
+ "thiserror 2.0.20",
+ "tracing",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "capture-sync"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "capture-core",
+ "mdns-sd",
+ "minicbor",
+ "proptest",
+ "snow",
+ "spake2",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "capture-syncd"
+version = "0.1.0"
+dependencies = [
+ "capture-core",
+ "capture-store",
+ "capture-sync",
+ "if-addrs",
+ "jiff",
+ "minicbor",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
+name = "capture-time"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "proptest",
 ]
 
 [[package]]

@@ -16,9 +16,9 @@ context: |
   reported rather than verified.
 
   Tech stack: Rust. One cargo workspace, one shared core, thin platform shells.
-    crates/  brain-core (I/O-free, async-free), brain-store (SQLite), brain-time (jiff),
-             brain-parse, brain-sync, brain-engine, brain-ffi (uniffi)
-    apps/    brain-cli (`brain`), brain-capture (egui overlay), brain-desktop (Tauri)
+    crates/  capture-core (I/O-free, async-free), capture-store (SQLite), capture-time (jiff),
+             capture-parse, capture-sync, brain-engine, brain-ffi (uniffi)
+    apps/    capture-cli (`brain`), capture-overlay (egui overlay), capture-desktop (Tauri)
     android/ Kotlin + Compose over the same core
 
   Key architectural invariants that specs must preserve:

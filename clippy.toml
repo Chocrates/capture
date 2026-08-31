@@ -1,6 +1,6 @@
-# Purity enforcement for brain-core (task 1.4, DESIGN.md D12).
+# Purity enforcement for capture-core (task 1.4, DESIGN.md D12).
 #
-# `no_std` already makes std::time and std::fs unnameable in brain-core. These
+# `no_std` already makes std::time and std::fs unnameable in capture-core. These
 # catch what the type system does not: crates that reach for a clock or entropy
 # without going through std.
 #
@@ -13,14 +13,14 @@
 disallowed-methods = [
     { path = "std::time::SystemTime::now", reason = "the fold takes the event set and nothing else; pass an HLC stamp in at the boundary" },
     { path = "std::time::Instant::now", reason = "no wall-clock or monotonic reads below the boundary" },
-    { path = "getrandom::fill", reason = "entropy is produced in brain-store and passed in as a Nonce or Incarnation" },
+    { path = "getrandom::fill", reason = "entropy is produced in capture-store and passed in as a Nonce or Incarnation" },
     # `allow-invalid` because nothing here links rand directly — it arrives only
     # under proptest, and whether clippy can name the path at all depends on
     # which target is being checked. Without this the lint config warns on the
     # crates where it cannot resolve, which is noise about a guard that is doing
     # its job. The guard is against a *future* direct use, and it still fires
     # wherever rand is nameable.
-    { path = "rand::random", allow-invalid = true, reason = "entropy is produced in brain-store and passed in as a Nonce or Incarnation" },
+    { path = "rand::random", allow-invalid = true, reason = "entropy is produced in capture-store and passed in as a Nonce or Incarnation" },
 ]
 
 disallowed-types = [

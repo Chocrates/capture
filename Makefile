@@ -1,4 +1,4 @@
-# brain — development commands.
+# capture — development commands.
 #
 # These mirror .github/workflows/ci.yml deliberately. A local check that runs a
 # different set of things from the one that gates merges is worse than no local
@@ -11,9 +11,9 @@ SHELL := /bin/sh
 CARGO ?= cargo
 
 # Where the demo and smoke targets put their store. Never the real one at
-# ~/brain — a smoke test that writes into the archive it is testing is a smoke
+# ~/capture — a smoke test that writes into the archive it is testing is a smoke
 # test nobody dares run twice.
-SCRATCH ?= /tmp/brain-scratch-$(USER)
+SCRATCH ?= /tmp/capture-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
@@ -21,7 +21,7 @@ SCRATCH ?= /tmp/brain-scratch-$(USER)
 
 ## help: list these commands
 help:
-	@echo 'brain — make targets'
+	@echo 'capture — make targets'
 	@echo
 	@sed -n 's/^## \([a-z-]*\): \(.*\)/  \1|\2/p' $(MAKEFILE_LIST) \
 	  | awk -F'|' '{printf "  \033[1m%-14s\033[0m %s\n", $$1, $$2}'
@@ -71,7 +71,7 @@ test-fast:
 
 ## crash: the crash harness alone, with output
 crash:
-	$(CARGO) test -p brain-store --test crash -- --nocapture
+	$(CARGO) test -p capture-store --test crash -- --nocapture
 
 ## pty: drive real bash and zsh through a terminal and press the chord
 #
@@ -79,22 +79,22 @@ crash:
 # about half a minute. It is the only thing that checks the claim the terminal
 # gesture rests on, so `ci` runs it.
 pty:
-	$(CARGO) test -p brain-cli --test pty -- --ignored --test-threads=1
+	$(CARGO) test -p capture-cli --test pty -- --ignored --test-threads=1
 
-## tamper: damage a store on purpose and check `brain verify` notices
+## tamper: damage a store on purpose and check `capture verify` notices
 #
 # Separate because it shells out to sqlite3 to corrupt real stored bytes. A
 # `verify` that has never been shown a damaged archive is an assertion, not a
 # check, so `ci` runs this too.
 tamper:
-	$(CARGO) test -p brain-cli --test tamper -- --ignored --test-threads=1
+	$(CARGO) test -p capture-cli --test tamper -- --ignored --test-threads=1
 
 ## spool: take the store away mid-capture and check nothing is lost
 #
 # Revokes write permission on the log, which is the same failure a full disk
 # produces at the same layer, without needing a spare filesystem.
 spool:
-	$(CARGO) test -p brain-cli --test spool -- --ignored --test-threads=1
+	$(CARGO) test -p capture-cli --test spool -- --ignored --test-threads=1
 
 ## accept: the M1 exit criteria — every suite that gates the milestone
 #
@@ -116,18 +116,18 @@ accept: ci scenarios
 
 ## scenarios: the spec's scenarios, driven through the binary
 scenarios:
-	$(CARGO) test -p brain-cli --test scenarios -- --ignored --test-threads=1
+	$(CARGO) test -p capture-cli --test scenarios -- --ignored --test-threads=1
 
 ## redact: destroy content and check what has to survive it
 redact:
-	$(CARGO) test -p brain-store --test redact
+	$(CARGO) test -p capture-store --test redact
 
 ## roundtrip: export a store, restore it elsewhere, compare
 #
 # The only check of the claim that matters on the day it matters: a restored
 # store renders what the original rendered. `ci` runs it.
 roundtrip:
-	$(CARGO) test -p brain-cli --test roundtrip -- --ignored --test-threads=1
+	$(CARGO) test -p capture-cli --test roundtrip -- --ignored --test-threads=1
 
 ## unwired: fail when something public has no caller
 #
@@ -148,45 +148,45 @@ unwired:
 
 ## purity: the three-layer boundary — no_std, dependency tree, clock probe
 #
-# Layer three temporarily appends a clock reference to brain-core and expects
+# Layer three temporarily appends a clock reference to capture-core and expects
 # the build to *fail*. The file is restored on every path out, including a
 # failure and an interrupt: leaving a probe line in a frozen crate would be a
 # genuinely bad outcome for a convenience target.
 purity:
-	@echo '--- brain-core builds without std'
-	@$(CARGO) build -p brain-core --quiet
-	@echo '--- brain-core dependency tree is clean'
-	@tree=$$($(CARGO) tree -p brain-core -e normal); \
+	@echo '--- capture-core builds without std'
+	@$(CARGO) build -p capture-core --quiet
+	@echo '--- capture-core dependency tree is clean'
+	@tree=$$($(CARGO) tree -p capture-core -e normal); \
 	 fail=0; \
 	 for crate in tokio rusqlite getrandom jiff serde_cbor; do \
 	   if printf '%s\n' "$$tree" | grep -qE "[[:space:]]$$crate v"; then \
-	     echo "  $$crate must not be a dependency of brain-core"; fail=1; \
+	     echo "  $$crate must not be a dependency of capture-core"; fail=1; \
 	   fi; \
 	 done; \
 	 [ $$fail -eq 0 ] || exit 1; \
 	 echo '  clean'
-	@echo '--- a clock cannot be reached from brain-core'
-	@lib=crates/brain-core/src/lib.rs; \
+	@echo '--- a clock cannot be reached from capture-core'
+	@lib=crates/capture-core/src/lib.rs; \
 	 backup=$$(mktemp); cp "$$lib" "$$backup"; \
 	 trap 'cp "$$backup" "$$lib"; rm -f "$$backup"' EXIT HUP INT TERM; \
 	 echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' >> "$$lib"; \
-	 if $(CARGO) build -p brain-core --quiet 2>/dev/null; then \
-	   echo '  FAILED: brain-core compiled a std::time reference'; exit 1; \
+	 if $(CARGO) build -p capture-core --quiet 2>/dev/null; then \
+	   echo '  FAILED: capture-core compiled a std::time reference'; exit 1; \
 	 fi; \
 	 echo '  holds'
-	@echo '--- brain-time builds without std'
-	@$(CARGO) build -p brain-time --quiet
-	@echo '--- a clock cannot be reached from brain-time'
-	@lib=crates/brain-time/src/lib.rs; \
+	@echo '--- capture-time builds without std'
+	@$(CARGO) build -p capture-time --quiet
+	@echo '--- a clock cannot be reached from capture-time'
+	@lib=crates/capture-time/src/lib.rs; \
 	 backup=$$(mktemp); cp "$$lib" "$$backup"; \
 	 trap 'cp "$$backup" "$$lib"; rm -f "$$backup"' EXIT HUP INT TERM; \
 	 echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' >> "$$lib"; \
-	 if $(CARGO) build -p brain-time --quiet 2>/dev/null; then \
-	   echo '  FAILED: brain-time compiled a std::time reference'; exit 1; \
+	 if $(CARGO) build -p capture-time --quiet 2>/dev/null; then \
+	   echo '  FAILED: capture-time compiled a std::time reference'; exit 1; \
 	 fi; \
 	 echo '  holds'
-	@echo '--- chrono cannot reach a clock from brain-time'
-	@if $(CARGO) tree -p brain-time -e normal -f '{p} {f}' | grep -qE 'chrono v[^ ]+ .*(^| )clock'; then \
+	@echo '--- chrono cannot reach a clock from capture-time'
+	@if $(CARGO) tree -p capture-time -e normal -f '{p} {f}' | grep -qE 'chrono v[^ ]+ .*(^| )clock'; then \
 	   echo '  FAILED: chrono is compiled with its clock feature'; exit 1; \
 	 fi; \
 	 echo '  holds'
@@ -240,20 +240,20 @@ install-chord:
 # because the log is append-only and that is the point of it.
 #
 # So testing gets its own store instead of a way to damage the real one. The
-# whole store is one directory named by BRAIN_HOME, and deleting notes is
+# whole store is one directory named by CAPTURE_HOME, and deleting notes is
 # deleting it.
 scratch: build
 	@rm -rf $(SCRATCH)
-	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain init >/dev/null
+	@CAPTURE_HOME=$(SCRATCH) ./target/debug/capture init >/dev/null
 	@echo 'empty store at $(SCRATCH)'
 	@echo
 	@echo 'Use it:'
-	@echo '  export BRAIN_HOME=$(SCRATCH)'
+	@echo '  export CAPTURE_HOME=$(SCRATCH)'
 	@echo
 	@echo 'The overlay takes it too, and binds its own socket under it — so'
 	@echo 'this one runs alongside the real one rather than replacing it:'
-	@echo '  BRAIN_HOME=$(SCRATCH) ./target/debug/brain-capture --run &'
-	@echo '  BRAIN_HOME=$(SCRATCH) ./target/debug/brain-capture --show'
+	@echo '  CAPTURE_HOME=$(SCRATCH) ./target/debug/capture-overlay --run &'
+	@echo '  CAPTURE_HOME=$(SCRATCH) ./target/debug/capture-overlay --show'
 	@echo
 	@echo 'Throw it away:'
 	@echo '  make scratch      # or: rm -rf $(SCRATCH)'
@@ -263,14 +263,14 @@ scratch: build
 ## demo: create a scratch store and capture into it
 demo: build
 	@rm -rf $(SCRATCH)
-	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain init
+	@CAPTURE_HOME=$(SCRATCH) ./target/debug/capture init
 	@echo
-	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain + pick up the dry cleaning
-	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain + '#idea' a tool that never asks you to file anything
+	@CAPTURE_HOME=$(SCRATCH) ./target/debug/capture + pick up the dry cleaning
+	@CAPTURE_HOME=$(SCRATCH) ./target/debug/capture + '#idea' a tool that never asks you to file anything
 	@echo
-	@BRAIN_HOME=$(SCRATCH) ./target/debug/brain status
+	@CAPTURE_HOME=$(SCRATCH) ./target/debug/capture status
 	@echo
-	@echo 'store: $(SCRATCH) — export BRAIN_HOME=$(SCRATCH) to poke at it'
+	@echo 'store: $(SCRATCH) — export CAPTURE_HOME=$(SCRATCH) to poke at it'
 
 ## smoke: check the CLI contract end to end, exit codes included
 #
@@ -280,7 +280,7 @@ demo: build
 smoke: build
 	@rm -rf $(SCRATCH)
 	@set -e; \
-	 B=./target/debug/brain; export BRAIN_HOME=$(SCRATCH); \
+	 B=./target/debug/capture; export CAPTURE_HOME=$(SCRATCH); \
 	 fail() { echo "  FAILED: $$1"; exit 1; }; \
 	 code() { if "$$@" >/dev/null 2>&1; then echo 0; else echo $$?; fi; }; \
 	 echo '--- a missing store is "not found", not a crash'; \

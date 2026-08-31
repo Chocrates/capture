@@ -1,10 +1,10 @@
 # cargo-deny — the third layer of the purity boundary (task 1.4).
 #
 # no_std makes the mistake unnameable; clippy catches crate-level reaches for a
-# clock or entropy; this stops the offending crates entering brain-core's
+# clock or entropy; this stops the offending crates entering capture-core's
 # dependency tree in the first place.
 #
-# Verify with:  cargo tree -p brain-core -e normal
+# Verify with:  cargo tree -p capture-core -e normal
 # Nothing impure should appear.
 
 [bans]
@@ -16,7 +16,7 @@ wildcards = "deny"
 
 # A path dependency inside this workspace is not that. It has no version to pin
 # because it is the same source tree, checked out together and built together —
-# `brain-cli` depending on `brain-store` cannot drift, because there is nothing
+# `capture-cli` depending on `capture-store` cannot drift, because there is nothing
 # for it to drift from.
 #
 # Without this the gate fails on every internal crate, which is precisely what
@@ -28,17 +28,17 @@ allow-wildcard-paths = true
 # not here.
 #
 # These four — tokio, rusqlite, getrandom, jiff — were listed as global bans
-# with the comment "legitimate dependencies of brain-store and the applications;
-# they must never become dependencies of brain-core". The comment is right and
+# with the comment "legitimate dependencies of capture-store and the applications;
+# they must never become dependencies of capture-core". The comment is right and
 # the rule was not: a `[[bans.deny]]` entry bans a crate from the whole
 # workspace, so it rejected the very uses the comment calls legitimate. The
 # gate could never have passed with them in, and — because cargo-deny was not
 # installed on any developer machine — nobody found out.
 #
 # What was meant is a statement about *one crate's tree*, which `make purity`
-# already makes and makes exactly: it asks `cargo tree -p brain-core` and fails
+# already makes and makes exactly: it asks `cargo tree -p capture-core` and fails
 # if any of them appears. That check also proves more than a ban list could,
-# because it additionally compiles brain-core under no_std and demonstrates that
+# because it additionally compiles capture-core under no_std and demonstrates that
 # a `std::time` reference fails to build.
 #
 # So the enforcement lives there, and this file keeps the one ban that really is

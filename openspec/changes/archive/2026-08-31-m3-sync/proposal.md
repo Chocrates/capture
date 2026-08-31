@@ -22,7 +22,7 @@ complexity lives in the data model, where it has been since M1.
 
 ## What Changes
 
-A new crate, `brain-sync`, and the operational surface to pair a second device
+A new crate, `capture-sync`, and the operational surface to pair a second device
 and watch it work.
 
 - **Transport.** TCP with the Noise_KK handshake: mutual authentication and
@@ -41,7 +41,7 @@ and watch it work.
 - **Membership.** The roster lives in the log (§5.3). A device is paired once,
   out of band, with any single existing device; `device_add` is what admits it,
   and every other device learns of it by folding the log rather than by being
-  paired again. `brain-core` already has the roster fold and the event kinds —
+  paired again. `capture-core` already has the roster fold and the event kinds —
   what is missing is the pairing gesture and the transport that uses them.
 - **Anti-entropy**, which is where correctness lives. `HELLO` exchanges version
   vectors, each side computes its own diff, `RANGE` requests fill it. Runs on
@@ -86,14 +86,14 @@ and watch it work.
 
 ## Impact
 
-- **New crate**: `brain-sync`. Its first dependencies on a network stack and on
+- **New crate**: `capture-sync`. Its first dependencies on a network stack and on
   Noise — the first code in this project that opens a socket.
-- **`brain-core`**: no new event kinds are expected. The roster fold, `device_add`
+- **`capture-core`**: no new event kinds are expected. The roster fold, `device_add`
   and `origin_claim` already exist and were built for this.
-- **`brain-store`**: ingest from a peer, the version vector read off `heads`, and
+- **`capture-store`**: ingest from a peer, the version vector read off `heads`, and
   the sealed-origin bookkeeping.
-- **`brain-cli`**: `brain pair`, `brain peers`, and the status surface for both.
-- **`brain-capture`**: untouched. §8.10 freezes the capture gesture for the
+- **`capture-cli`**: `capture pair`, `capture peers`, and the status surface for both.
+- **`capture-overlay`**: untouched. §8.10 freezes the capture gesture for the
   duration, and the overlay is the elected writer — the sync daemon must not
   take that role from it.
 - **Threat model**: this is the first milestone where an attacker on the network

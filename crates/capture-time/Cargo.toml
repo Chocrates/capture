@@ -1,0 +1,23 @@
+[package]
+name = "capture-time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Time, for a log that has to fold identically on every device that ever reads
+# it (DESIGN.md §3.2, §3.4).
+#
+# `no_std` by construction, for the same reason capture-core is: under no_std a
+# clock is not nameable, so recurrence expansion cannot consult one by accident.
+# That matters more here than anywhere else in the system — an occurrence at the
+# wrong instant looks exactly like an occurrence, and the only thing that can
+# catch it is expansion being a pure function of its inputs.
+
+[dependencies]
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name = "capture-overlay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The overlay. Owns the capture gesture, the pre-warmed window, and the
+# platform-specific business of registering a global hotkey.
+
+[[bin]]
+name = "capture-overlay"
+path = "src/main.rs"
+
+[dependencies]
+capture-core = { path = "../../crates/capture-core", features = ["std"] }
+capture-parse = { path = "../../crates/capture-parse" }
+capture-store = { path = "../../crates/capture-store" }
+eframe = { workspace = true }
+jiff = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+winit = { workspace = true }
+x11rb = { workspace = true }
+zbus = { workspace = true }

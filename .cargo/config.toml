@@ -1,6 +1,6 @@
 # mold, which links this workspace's binaries.
 #
-# Measured on one changed line in `brain-store`, rebuilding the three binaries,
+# Measured on one changed line in `capture-store`, rebuilding the three binaries,
 # against the same profile settings:
 #
 #     gold   91.7  91.4  92.4  93.9      mean 92.3, spread 2.5

@@ -1,0 +1,27 @@
+[package]
+name = "capture-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The recognizer's vocabulary (DESIGN.md §3.1.5). Tables and shapes only — the
+# parser over them is M2. `no_std` and dependency-free for the same reason
+# capture-core is: the language a capture is read in must not be able to depend on
+# a clock, a locale, or the filesystem, or the same note parses differently on
+# two devices.
+
+[dependencies]
+# The recogniser resolves "thursday 2pm" against a moment and a zone, which is
+# what capture-time exists to do. It cannot reach a clock either — the current
+# instant arrives as an argument, so a parse is reproducible.
+capture-core = { path = "../capture-core" }
+capture-time = { path = "../capture-time" }
+
+[dev-dependencies]
+# Only for the property test that hands the parser arbitrary text. A capture is
+# stored verbatim and may contain anything, and the parser runs inside a commit
+# — so "does not panic on any input" is a correctness property here rather than
+# a robustness nicety.
+proptest = { workspace = true }

@@ -1,0 +1,31 @@
+[package]
+name = "capture-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The browse surface. A webview for the views, with the core linked directly
+# rather than spoken to over HTTP — there is no server here, and inventing one
+# would put a network boundary inside a single-user desktop application.
+
+[[bin]]
+name = "capture-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+capture-core = { path = "../../crates/capture-core", features = ["std"] }
+capture-store = { path = "../../crates/capture-store" }
+capture-parse = { path = "../../crates/capture-parse" }
+capture-time = { path = "../../crates/capture-time" }
+minicbor = { workspace = true }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -15,10 +15,10 @@ because they are cheap here.
 
 ## What Changes
 
-- **`brain-time`** — a new crate. Instants (UTC ms + IANA zone) versus floating
+- **`capture-time`** — a new crate. Instants (UTC ms + IANA zone) versus floating
   dates (`YYYY-MM-DD`, never converted), the RFC 5545 recurrence subset, and the
   DST policy §3.2 already fixes. It does not exist in any form.
-- **The recognizer** — `brain-parse` holds the vocabulary, the grammar and the
+- **The recognizer** — `capture-parse` holds the vocabulary, the grammar and the
   confidence bands (§3.1.5) as tables and nothing that reads them. This adds the
   parser: tier 1 sigils, tier 2 grammar, the guards that keep it off ordinary
   prose, and a confidence score against the 0.75 floor.
@@ -38,7 +38,7 @@ because they are cheap here.
 - **Calendar and agenda** — the views M1 deliberately excluded (`DESIGN.md`:3796).
 - **New event kinds** — `promote`, `intent`, `review`, and the occurrence
   exception family `occ_move` / `occ_edit` / `occ_cancel` / `occ_done` /
-  `occ_undone`. `brain-core` currently stops at `UNFLAG(15)`.
+  `occ_undone`. `capture-core` currently stops at `UNFLAG(15)`.
 
 ## Capabilities
 
@@ -98,17 +98,17 @@ because they are cheap here.
 
 ## Impact
 
-- **New crates**: `brain-time`. `brain-parse` grows a parser over its existing
-  tables and gains its first dependency on `brain-time`.
-- **`brain-core`**: new event kinds and bodies, new fold rules, new conflict
+- **New crates**: `capture-time`. `capture-parse` grows a parser over its existing
+  tables and gains its first dependency on `capture-time`.
+- **`capture-core`**: new event kinds and bodies, new fold rules, new conflict
   rules. The frozen encoding means every new body is permanent from its first
   write — golden vectors required before anything writes one.
-- **`brain-store`**: occurrence expansion, the widened due queue, new projection
+- **`capture-store`**: occurrence expansion, the widened due queue, new projection
   tables and their rebuild path.
-- **`brain-desktop`**: calendar and agenda views, the note page's structured half.
-- **`brain-cli`**: the same, in text, plus the correction path.
-- **`brain-capture`**: untouched by requirement, not by accident.
-- **Purity**: `brain-time` must not reach a clock. Recurrence expansion takes
+- **`capture-desktop`**: calendar and agenda views, the note page's structured half.
+- **`capture-cli`**: the same, in text, plus the correction path.
+- **`capture-overlay`**: untouched by requirement, not by accident.
+- **Purity**: `capture-time` must not reach a clock. Recurrence expansion takes
   "now" as a value at the boundary like everything else, or the same log folds
   differently on two machines and §8.3's property test cannot catch it.
 

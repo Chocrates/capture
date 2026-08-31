@@ -1,0 +1,29 @@
+[package]
+name = "capture-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "capture"
+path = "src/main.rs"
+
+[dependencies]
+capture-core = { path = "../../crates/capture-core", features = ["std"] }
+capture-store = { path = "../../crates/capture-store" }
+# For `capture pair` only: the SPAKE2 exchange and a socket to run it over.
+# Without `mdns` — pairing is told where to look, and browsing is the daemon's.
+capture-sync = { path = "../../crates/capture-sync" }
+capture-parse = { path = "../../crates/capture-parse" }
+capture-time = { path = "../../crates/capture-time" }
+clap = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["std"] }
+jiff = { workspace = true }
+minicbor = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+rustix = { workspace = true, features = ["pty", "termios"] }

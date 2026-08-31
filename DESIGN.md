@@ -249,7 +249,7 @@ always have everything. A `leaf` device (§5.5) may need to range-fetch an old n
 editing it, and will say so rather than silently presenting a partial history as complete.
 
 ```
-~/brain/
+~/capture/
   events.db        # every event from every origin. Append-only, immutable, replicated.
   state.db         # derived projection (§1.4). Disposable, rebuildable, never synced.
   ops.db           # local operational state. Not derivable, not synced, survives re-fold.
@@ -430,7 +430,7 @@ the *hash* of the body, not the body — so without this check a relaying device
 different body and every downstream replica accepts it: id recomputes, signature verifies, and
 two replicas hold permanently different content under the same id, deduplicating each other's
 copies on sight. Since events are relayed by design (§5.3), that is precisely the attack per-event
-signatures exist to prevent. `brain verify` (§8.6) checks it too. On redacted rows the check is
+signatures exist to prevent. `capture verify` (§8.6) checks it too. On redacted rows the check is
 skipped, because `body IS NULL`.
 
 **`id` must cover the whole envelope, not just the body.** This is load-bearing three separate
@@ -480,7 +480,7 @@ obvious. Adoption is mandatory, so a peer whose clock is ahead — a phone that 
 NTP server this week is enough — really does drag this device's logical clock forward. Refusing
 to author in that state closes the capture path on a device that is working perfectly, because of
 a clock on a different machine. **Capture always wins.** The lead is measured
-(`HlcState::lead_ms`), surfaced as a tier-1 health item in `brain status`, and the event is
+(`HlcState::lead_ms`), surfaced as a tier-1 health item in `capture status`, and the event is
 written regardless. Ordering can be repaired from a log that contains the note; nothing repairs a
 note that was never captured.
 
@@ -890,7 +890,7 @@ CREATE TABLE held_ranges (dev TEXT NOT NULL, lo INTEGER NOT NULL, hi INTEGER NOT
 
 -- ---------- settings, with provenance ----------
 CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL, set_by TEXT, hlc BLOB) STRICT;
--- Absent key = compiled-in default. §8.9 requires `brain status` to distinguish
+-- Absent key = compiled-in default. §8.9 requires `capture status` to distinguish
 -- "default" from "set by you", which needs the row to be absent rather than seeded.
 
 -- ---------- intents (§2.4) ----------
@@ -993,7 +993,7 @@ CREATE TABLE tasks (
 
 -- One-off timed and all-day events. An earlier draft had only `series` + `occurrences`,
 -- with occurrences.series_tgt NOT NULL — so a dentist appointment had nowhere to live and
--- the calendar, agenda and `brain cal` had no data behind them.
+-- the calendar, agenda and `capture cal` had no data behind them.
 CREATE TABLE events_at (
   tgt        BLOB PRIMARY KEY REFERENCES notes(tgt),
   start_utc  INTEGER,               -- timed: instant
@@ -1150,7 +1150,7 @@ CREATE TABLE peers        (origin TEXT PRIMARY KEY, last_addr TEXT, last_seen IN
 CREATE TABLE pairings     (peer_key BLOB PRIMARY KEY, paired_at INTEGER NOT NULL) STRICT;
                            -- so "unexpected device_add" is computable (§4.5)
 -- NOTE: the capture spool is NOT a table. It is a plain 10 MB preallocated file at
--- ~/brain/spool, because a SQLite table would need the same disk that just filled up.
+-- ~/capture/spool, because a SQLite table would need the same disk that just filled up.
 -- See §7 mode 6.
 CREATE TABLE blob_local   (hash BLOB PRIMARY KEY, bytes INTEGER, last_used INTEGER) STRICT;
 CREATE TABLE cal_mirror   (cal_id TEXT NOT NULL, uid TEXT NOT NULL, start_utc INTEGER,
@@ -1346,7 +1346,7 @@ Your choice is a `setting` event, so it converges to every device like anything 
 **Until you choose, the notifier follows a compiled-in default rule** — "the most recently paired
 device that can notify" — evaluated locally and never written to the log. An earlier draft had the
 first Android device paired *emit a `setting` on your behalf*, which is precisely what §8.9
-forbids: a machine-authored preference recorded as a user decision, that `brain status` would then
+forbids: a machine-authored preference recorded as a user decision, that `capture status` would then
 report as "set by you" and that could never be centrally improved. Defaults are rules; settings
 are decisions; conflating them makes the distinction §8.9 exists to preserve unrecoverable.
 
@@ -1503,7 +1503,7 @@ score(device) = blake3(device_id ‖ capture_id ‖ job_class)
 
 sorts the devices capable of that class by score, and finds its own rank. **No messages are
 exchanged and no coordination events are written.** Assignment is a pure function of data
-every replica already has, which also means it lives in `brain-core` and is exhaustively
+every replica already has, which also means it lives in `capture-core` and is exhaustively
 testable with no runtime, network, or clock.
 
 Rendezvous rather than modulo because retiring a device reassigns only its share instead of
@@ -2421,7 +2421,7 @@ change existing slugs on the next rebuild, which is the exact breakage freezing 
 It was written in two sessions and the contradiction went unnoticed.
 
 **So a minimal detector ships in M1, inside the frozen algorithm.** Not the recognizer — a pure
-predicate over the capture text, in `brain-core` alongside the other frozen primitives: high-entropy
+predicate over the capture text, in `capture-core` alongside the other frozen primitives: high-entropy
 tokens, long base64 or hex runs, `password`/`token`/`secret`/`key` adjacent to a value, PEM headers,
 connection strings. A flagged capture takes a date-based prefix instead of a word-based one.
 
@@ -3294,21 +3294,21 @@ with each other.
 ```
 brain/
   crates/
-    brain-core/       # events, log, fold, conflict rules — no I/O, no async
-    brain-store/      # SQLite: events.db + state.db, projections, FTS
-    brain-time/       # instants vs floating dates, RRULE expansion, DST policy
-    brain-parse/      # sigils + grammar recognizer, confidence scoring
-    brain-sync/       # BSP: Noise_IK, discovery, anti-entropy, gossip, blobs
+    capture-core/       # events, log, fold, conflict rules — no I/O, no async
+    capture-store/      # SQLite: events.db + state.db, projections, FTS
+    capture-time/       # instants vs floating dates, RRULE expansion, DST policy
+    capture-parse/      # sigils + grammar recognizer, confidence scoring
+    capture-sync/       # BSP: Noise_IK, discovery, anti-entropy, gossip, blobs
     brain-engine/     # composition: enrichment queue, intent cues, scheduler
     brain-ffi/        # uniffi bindings surface for Android
   apps/
-    brain-cli/        # `brain` — one binary: capture, read, write, ops, test harness (§8.6)
-    brain-capture/    # resident overlay, egui. The low-latency binary.
-    brain-desktop/    # main app: timeline, note page, calendar, browse, review
+    capture-cli/        # `capture` — one binary: capture, read, write, ops, test harness (§8.6)
+    capture-overlay/    # resident overlay, egui. The low-latency binary.
+    capture-desktop/    # main app: timeline, note page, calendar, browse, review
   android/            # Kotlin + Compose, links libbrain.so
 ```
 
-`brain-core` is deliberately I/O-free and async-free — pure data in, events out. That is what
+`capture-core` is deliberately I/O-free and async-free — pure data in, events out. That is what
 makes the conflict rules in §6 testable exhaustively rather than by hand: the interesting cases
 are all "given these events in this order, what does the fold say," which needs no runtime at
 all. Property tests can assert convergence directly — shuffle any event set, fold it, and the
@@ -3465,12 +3465,12 @@ Not blockers, but each is a genuine "spent a weekend on it" item rather than a l
 
 ### 8.6 Command line and test harness
 
-One binary, `brain`, doing double duty: the fastest capture path when a terminal is already
+One binary, `capture`, doing double duty: the fastest capture path when a terminal is already
 focused, and the harness that makes everything else testable.
 
 #### Capture without stealing words
 
-`brain budget 40k revisit Q2` cannot mean capture, because then `brain search foo` is ambiguous
+`capture budget 40k revisit Q2` cannot mean capture, because then `capture search foo` is ambiguous
 and some captures become unreachable — with no way to know which words were stolen. So capture is
 explicitly marked with `+`, which cannot collide with any subcommand name, now or later.
 
@@ -3502,7 +3502,7 @@ working-memory tax §3.1.1 rejects a DSL to avoid.
 **A shell function cannot fix this**, and an earlier draft of this section proposed one:
 
 ```sh
-b() { printf '%s\n' "$READLINE_LINE" | brain + --stdin; }   # DOES NOT WORK
+b() { printf '%s\n' "$READLINE_LINE" | capture + --stdin; }   # DOES NOT WORK
 ```
 
 That is wrong twice over. `READLINE_LINE` is bash-only *and* is set only inside a function invoked
@@ -3519,12 +3519,12 @@ keybinding rather than a command.
 
 ```sh
 # bash — reads the raw buffer, then clears it
-_brain_capture() { printf '%s\n' "$READLINE_LINE" | brain + --stdin; READLINE_LINE=''; READLINE_POINT=0; }
-bind -x '"\C-b": _brain_capture'
+_capture_overlay() { printf '%s\n' "$READLINE_LINE" | capture + --stdin; READLINE_LINE=''; READLINE_POINT=0; }
+bind -x '"\C-b": _capture_overlay'
 
 # zsh — ZLE widget over $BUFFER
-_brain_capture() { print -r -- "$BUFFER" | brain + --stdin; BUFFER=''; }
-zle -N _brain_capture; bindkey '^B' _brain_capture
+_capture_overlay() { print -r -- "$BUFFER" | capture + --stdin; BUFFER=''; }
+zle -N _capture_overlay; bindkey '^B' _capture_overlay
 ```
 
 So the terminal gesture is **type the text, press Ctrl-B** — not "type `b` then the text". That is
@@ -3532,13 +3532,13 @@ a different gesture from the one an earlier draft described, and it is the one t
 It is also closer to the overlay: a chord, not a command.
 
 **Fallback where a keybinding is unavailable** — a non-interactive shell, an unusual shell, a
-restricted environment: `brain +` with no arguments reads a line with its own in-process editor,
+restricted environment: `capture +` with no arguments reads a line with its own in-process editor,
 which involves no shell parsing at all. Slower by one keystroke, correct everywhere.
 
 **Quoting is never required of the user.** Requiring it is the same failure in a politer form —
 they would still have to notice, at the moment they can least afford to.
 
-Argument-form capture remains for scripts (`brain + -- <text>`, everything after `--` taken
+Argument-form capture remains for scripts (`capture + -- <text>`, everything after `--` taken
 literally). It is not the human path, and the docs must not present it as one — an implementer who
 wires the interactive gesture to this form makes the metacharacter test pass while the human path
 stays broken.
@@ -3559,15 +3559,15 @@ The hotkey mechanism is chosen at runtime behind a trait (§8.6), so adding a pl
 
 #### stdin, editor, and empty input
 
-Three cases that must not be conflated, since `brain +` with piped input and `brain +` with no
+Three cases that must not be conflated, since `capture +` with piped input and `capture +` with no
 input look identical to an argument parser:
 
 | Invocation | Behaviour |
 |---|---|
-| `brain + --stdin` | read stdin to EOF, verbatim |
-| `brain +` with stdin **not a tty** | read stdin (pipes work without the flag) |
-| `brain +` with stdin a tty | open `$EDITOR` |
-| `brain + -- <text>` | capture the literal remainder |
+| `capture + --stdin` | read stdin to EOF, verbatim |
+| `capture +` with stdin **not a tty** | read stdin (pipes work without the flag) |
+| `capture +` with stdin a tty | open `$EDITOR` |
+| `capture + -- <text>` | capture the literal remainder |
 | empty result, any path | **capture nothing and say so** — never a blank note |
 
 Capture through the CLI carries the same guarantees as the GUI because it is the same core: never
@@ -3591,13 +3591,13 @@ drive the states the property tests care about.
 
 | Command | Why it earns its place |
 |---|---|
-| `brain log <slug>` | The raw events behind a note. Every fold bug reduces to "what events actually produced this row", so this is the highest-value debugging command in the set. |
-| `brain verify` | Recomputes every `id`, checks every signature, **checks `blake3(body) == bhash`**, and walks every origin's hash chain. The body check is not optional: `id` and `sig` authenticate the body's *hash*, so without it a relaying device can substitute content and every downstream replica accepts it (§1). Turns §1's integrity claims into something runnable, including that redacted rows still verify (§1.1). |
-| `brain fold --rebuild` | Forced re-fold, timed. Exercises the §1.3 migration story on demand rather than only during an upgrade. |
-| `brain status` | §4.5's status page as text |
-| `brain quarantine [--reason]` | What did not fold, and why |
-| `brain peers` / `pair` / `sync --now` | M3 |
-| `brain export` / `restore [--ignore-redactions-after T]` | §1.2, including the deliberate undo path |
+| `capture log <slug>` | The raw events behind a note. Every fold bug reduces to "what events actually produced this row", so this is the highest-value debugging command in the set. |
+| `capture verify` | Recomputes every `id`, checks every signature, **checks `blake3(body) == bhash`**, and walks every origin's hash chain. The body check is not optional: `id` and `sig` authenticate the body's *hash*, so without it a relaying device can substitute content and every downstream replica accepts it (§1). Turns §1's integrity claims into something runnable, including that redacted rows still verify (§1.1). |
+| `capture fold --rebuild` | Forced re-fold, timed. Exercises the §1.3 migration story on demand rather than only during an upgrade. |
+| `capture status` | §4.5's status page as text |
+| `capture quarantine [--reason]` | What did not fold, and why |
+| `capture peers` / `pair` / `sync --now` | M3 |
+| `capture export` / `restore [--ignore-redactions-after T]` | §1.2, including the deliberate undo path |
 
 **`--json` on every read command.** This is what makes it a harness rather than a convenience:
 integration tests assert against structured output instead of parsing tables. Human-readable by
@@ -3607,15 +3607,15 @@ default, JSON on request, meaningful exit codes throughout.
 
 **`--force` skips the prompt, not the safeguards.** §1.1 calls the confirmation the only
 destructive gate in the system and warns it must not be trained away — and a flag that removes it
-is how `while read s; do brain redact --force "$s"; done` becomes the "one loop in one buggy
+is how `while read s; do capture redact --force "$s"; done` becomes the "one loop in one buggy
 build" §1.1 names as the threat. So `--force` is explicitly defined as: the 64-target cap holds,
 the receiver-side rate limit holds (256 targets/hour/origin, then held for confirmation), the
 six-hour window holds, and the pre-redact snapshot is still written. It suppresses a prompt and
-nothing else. `brain redact --cancel` accepts a redact event id, and `--cancel --all-since <t>`
+nothing else. `capture redact --cancel` accepts a redact event id, and `--cancel --all-since <t>`
 exists precisely because cancelling a runaway loop by hand would otherwise be impossible inside
 the window.
 
-**Exit codes.** `0` success; `1` usage; `2` not found; `3` integrity failure. `brain verify`
+**Exit codes.** `0` success; `1` usage; `2` not found; `3` integrity failure. `capture verify`
 returns `0` when every *authentic* event verifies — the presence of rows in the `rejected` table
 (§5.3) is expected operation on a live network, is reported in the summary, and is not itself a
 failure. It returns `3` only when an event that is stored as authentic fails to verify, which is
@@ -3640,11 +3640,11 @@ correctness — nothing is lost, it just happens later.
 
 Deliberately not a separate daemon: a fourth binary means service files per platform, a supervision
 story, and one more thing that can be silently down. Deliberately not a systemd timer either — it
-would move scheduling outside the application, where `brain status` cannot see it, and the whole
+would move scheduling outside the application, where `capture status` cannot see it, and the whole
 point of the health surface is that the system reports its own state honestly.
 
 **Consequence that must be surfaced:** destruction latency now depends on the overlay running, so
-`brain status` reports **when due work was last processed**. Without that, a long-dead overlay means
+`capture status` reports **when due work was last processed**. Without that, a long-dead overlay means
 redactions sitting undestroyed while the interface reports them complete — which is precisely the
 failure that put the redaction queue in the rebuildable projection rather than in local state
 (§1.4).
@@ -3653,7 +3653,7 @@ failure that put the redaction queue in the rebuildable projection rather than i
 the disk is still full is pure waste, and a disk recovering is invisible to a clock. It drains on
 the next successful append and on startup.
 
-**Export is manual.** `brain export`, run by you, or wired to cron or a systemd timer if you want
+**Export is manual.** `capture export`, run by you, or wired to cron or a systemd timer if you want
 it. Scheduling it inside the application would invite the assumption that backups are handled —
 and §1.2 is explicit that offsite copying is out of scope and that replication is not backup. A
 backup you believe in and do not have is worse than one you know you lack.
@@ -3673,9 +3673,9 @@ two processes from independently deciding to fold the same events, which is a co
 rather than a locking one. One elected writer gives a single owner for the fold, for rebuilds, and
 for the due-work queue (§8.7): the same problem three times, answered once.
 
-**Reads go direct, always.** Read commands and `brain verify` open the store read-only without
+**Reads go direct, always.** Read commands and `capture verify` open the store read-only without
 involving the writer. Diagnostics that stop working when the system is unhealthy are diagnostics you
-cannot use at the moment you need them, and `brain verify` in particular exists for exactly that
+cannot use at the moment you need them, and `capture verify` in particular exists for exactly that
 moment.
 
 **`synchronous=FULL` is a connection-open invariant, not a property of the capture path.**
@@ -3702,7 +3702,7 @@ start, which breaks the one rule §0.2 rates highest at precisely the wrong mome
 #### Startup states — three, and confusing two of them corrupts the log
 
 ```
-no ~/brain                                     → fresh
+no ~/capture                                     → fresh
 identity + events.db present, agreeing         → normal
 events.db present, identity missing/mismatched → RESTORE  (mint a new incarnation)
 identity present, events.db missing or empty   → RESTORE  (mint a new incarnation)
@@ -3746,7 +3746,7 @@ sequenced later. Nothing is lost, and nothing is written to a position that may 
 
 #### Fresh install
 
-1. Create `~/brain`, generate the static keypair, set incarnation 1.
+1. Create `~/capture`, generate the static keypair, set incarnation 1.
 2. Preallocate the 10 MB spool (§7 mode 6) — done now, while there is definitely disk, because
    its entire purpose is working when there is not.
 3. Emit a **self-signed `device_add`** for itself, establishing the roster root.
@@ -3779,7 +3779,7 @@ records it as a decision the user made rather than a value the software chose. I
 the ability to answer "was this deliberate, or just the default?", which is the question you
 actually want answered when something behaves oddly a year later.
 
-Cost: `brain status` distinguishes *default* from *set by you*. One column, worth it.
+Cost: `capture status` distinguishes *default* from *set by you*. One column, worth it.
 
 #### The empty state
 
@@ -3823,7 +3823,7 @@ Not silently, and not by blocking first run. In that state the empty timeline **
 to the CLI instruction** — otherwise a GUI with no `+` button (§4.2) and a dead hotkey has zero
 capture affordances while advertising a gesture that does nothing.
 
-- Blocking would be worse: `brain +` is a genuinely usable capture surface, and refusing to start
+- Blocking would be worse: `capture +` is a genuinely usable capture surface, and refusing to start
   over a hotkey turns a degraded install into no install.
 - Silence would be much worse. "I installed it and never used it" and "I installed it and the
   hotkey never registered" are indistinguishable from the inside — and the second one would get
@@ -3837,8 +3837,8 @@ rather than a generic error.
 
 Deliberately not sync-first, even though sync is the most interesting part to build.
 
-**M1 — one device, no sync.** `brain-core` + `brain-store` + `brain-capture` + `brain-cli` +
-`brain-desktop`. Capture, store, fold, search. Use it daily on the desktop.
+**M1 — one device, no sync.** `capture-core` + `capture-store` + `capture-overlay` + `capture-cli` +
+`capture-desktop`. Capture, store, fold, search. Use it daily on the desktop.
 
 M1 ships a **GUI**, and it is the first-party surface (§8.4) — the reading surface is half of
 whether this is pleasant to live with, and a terminal-only trial would risk concluding the concept
@@ -3856,7 +3856,7 @@ The CLI is not thereby demoted; it has two jobs the GUI cannot do. It is the **b
 surface from a terminal**, because it is the only one that can collect context (§2.2), and it is
 the **test harness** (§8.6).
 
-`brain verify` is in M1 rather than deferred to M3. It is cheap, and it catches encoding and id
+`capture verify` is in M1 rather than deferred to M3. It is cheap, and it catches encoding and id
 mistakes at the point where they are still fixable rather than after a year of events have been
 written under a wrong rule — which is precisely the class of bug that adversarial review found in
 this document.
@@ -3893,7 +3893,7 @@ mitigation is to freeze the M1 capture gesture — the chord, the overlay, the c
 treat it as fixed for the duration, changing everything else around it. Whether that is enough is
 not knowable in advance, but building the capture surface *last* would be worse.
 
-**M2 — types, and the evidence-backed components.** `brain-time` + `brain-parse`. Promotion,
+**M2 — types, and the evidence-backed components.** `capture-time` + `capture-parse`. Promotion,
 tasks, events, recurrence, calendar view — **plus scheduled review (§2.8), intents firing locally
 (§2.4), and activation (§3.9).** Still one device.
 
@@ -3910,7 +3910,7 @@ need a clock and a notification. Activation needs the recurrence machinery M2 al
 one event kind. They are in M2 because they are cheap there and because putting them last was a
 choice that made the project's stated worst case structurally certain.
 
-**M3 — sync.** `brain-sync`. Second device, pairing, anti-entropy, live push. Conflict rules
+**M3 — sync.** `capture-sync`. Second device, pairing, anti-entropy, live push. Conflict rules
 exercised by property tests long before this point.
 
 **M4 — Android.** uniffi bindings, Compose shell, capture surfaces, geofence cues. Location cues

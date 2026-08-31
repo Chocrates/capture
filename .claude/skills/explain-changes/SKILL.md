@@ -188,7 +188,7 @@ anything was skipped.
 
 A real example from the first page produced by this skill:
 
-> The crate is `no_std`. `brain-core` cannot read a clock, generate randomness, or touch the
+> The crate is `no_std`. `capture-core` cannot read a clock, generate randomness, or touch the
 > filesystem — not by convention but because those things are unnameable in it.
 
 Every word is accurate. It also assumes the reader knows that Rust's standard library splits into

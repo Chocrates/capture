@@ -1,7 +1,7 @@
 ## Context
 
-`brain-core` already folds a roster and knows `device_add` and `origin_claim`;
-`brain-store` already keeps a gap-free `seq` per origin in `heads`, which is a
+`capture-core` already folds a roster and knows `device_add` and `origin_claim`;
+`capture-store` already keeps a gap-free `seq` per origin in `heads`, which is a
 version vector under another name. The conflict rules have been property-tested
 against synthetic concurrency since M1. What has never happened is two processes
 on two machines writing to the same archive.
@@ -47,13 +47,13 @@ set-difference estimator. This design's job is mostly to avoid squandering that.
 
 ## Decisions
 
-**A separate crate, `brain-sync`, rather than a module in `brain-store`.**
-The purity argument that keeps a clock out of `brain-core` applies here in the
+**A separate crate, `capture-sync`, rather than a module in `capture-store`.**
+The purity argument that keeps a clock out of `capture-core` applies here in the
 other direction: a socket is the least deterministic thing in the system, and
 the boundary between "events arrived" and "events folded" is exactly where a bug
-becomes unreproducible. `brain-sync` owns the wire; it hands `brain-store`
+becomes unreproducible. `capture-sync` owns the wire; it hands `capture-store`
 verified envelopes and nothing else. Alternative considered: put it in
-`brain-store` next to ingest. Rejected because it would make every store test
+`capture-store` next to ingest. Rejected because it would make every store test
 link a network stack.
 
 **Noise_KK, not TLS.** Both sides already know each other's static public key —
@@ -103,7 +103,7 @@ of rules about what may enter it.
 ## Risks / Trade-offs
 
 - **A socket is a new class of bug in a system that has been deterministic.** →
-  `brain-sync` hands over verified envelopes and owns nothing else; everything
+  `capture-sync` hands over verified envelopes and owns nothing else; everything
   after that point is the fold, which is testable without a network. Protocol
   logic is written against an in-memory transport so the tests do not need one
   either.
@@ -147,7 +147,7 @@ dependency the project has ever taken and would meet a blocking store at every
 call, which is two concurrency models sharing a boundary. One thread per
 session and an accept loop.
 
-**A separate process, `brain-sync --run`.** The overlay is already resident and
+**A separate process, `capture-sync --run`.** The overlay is already resident and
 is the elected writer, which argued for putting the loop there — and against it
 is that the overlay is the one process whose latency is a stated budget, and a
 network loop is a poor tenant for it. A slow peer must not be able to sit in

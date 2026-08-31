@@ -61,7 +61,7 @@ recorded on the expanded occurrence so a view can show that it happened.
 
 ### Requirement: The time crate cannot reach a clock
 
-`brain-time` SHALL take the current instant as a value at its boundary and SHALL
+`capture-time` SHALL take the current instant as a value at its boundary and SHALL
 NOT read a clock. A crate that can consult a clock can make the same log fold
 differently on two machines, and the convergence property tests cannot observe
 that.

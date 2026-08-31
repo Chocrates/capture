@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/brain-core",
-    "crates/brain-parse",
-    "crates/brain-time",
-    "crates/brain-store",
-    "crates/brain-sync",
-    "apps/brain-cli",
-    "apps/brain-capture",
-    "apps/brain-syncd",
-    "apps/brain-desktop",
+    "crates/capture-core",
+    "crates/capture-parse",
+    "crates/capture-time",
+    "crates/capture-store",
+    "crates/capture-sync",
+    "apps/capture-cli",
+    "apps/capture-overlay",
+    "apps/capture-syncd",
+    "apps/capture-desktop",
 ]
 
 
@@ -86,7 +86,7 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 # Taken without default features so neither can reach a clock: `chrono`'s
 # `Local` and `Utc::now` live behind `std`/`clock`, and `chrono-tz` embeds the
 # IANA database rather than reading /usr/share/zoneinfo at runtime. That is what
-# lets brain-time stay no_std while still answering the only question that
+# lets capture-time stay no_std while still answering the only question that
 # matters for expansion — what the offset was at a given local time in a given
 # zone, and whether that local time existed once, twice, or not at all.
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
@@ -107,7 +107,7 @@ proptest = "1"
 #
 # This was `lto = true` with `codegen-units = 1` — the slowest configuration
 # there is — and nothing recorded why. Measured on one changed line in
-# `brain-store`, rebuilding the three binaries:
+# `capture-store`, rebuilding the three binaries:
 #
 #     lto = true,   codegen-units = 1     220 s
 #     lto = "thin", codegen-units = 16    120 s
@@ -119,7 +119,7 @@ proptest = "1"
 # SQLite and a webview. Fat LTO was buying optimisation nothing was short of
 # and charging a hundred seconds an iteration for it.
 #
-# What it costs is size: `brain-capture` goes from 16 MB to 21.5 MB. Nothing is
+# What it costs is size: `capture-overlay` goes from 16 MB to 21.5 MB. Nothing is
 # distributed yet, so that is cheap — and if it ever matters, the answer is a
 # separate profile with `lto = true` for the build that ships, rather than
 # paying for it on every rebuild during development.

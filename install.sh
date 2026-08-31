@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install brain for the current user.
+# Install capture for the current user.
 #
 # Does four things, in an order chosen so that a failure part-way leaves
 # something usable rather than something half-configured:
@@ -29,7 +29,7 @@ done
 
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
-BRAIN_HOME="${BRAIN_HOME:-$HOME/brain}"
+CAPTURE_HOME="${CAPTURE_HOME:-$HOME/capture}"
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -53,22 +53,22 @@ if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
     say ""
 fi
 
-cargo build --release -p brain-cli -p brain-capture -p brain-syncd
+cargo build --release -p capture-cli -p capture-overlay -p capture-syncd
 if [ "$WANT_DESKTOP" = 1 ]; then
-    cargo build --release -p brain-desktop
+    cargo build --release -p capture-desktop
 fi
 
 # ------------------------------------------------------------- 2. binaries ---
 
 step "Installing to $BIN"
 mkdir -p "$BIN"
-for b in brain brain-capture brain-syncd; do
+for b in capture capture-overlay capture-syncd; do
     install -m 755 "target/release/$b" "$BIN/$b"
     say "  $b"
 done
 if [ "$WANT_DESKTOP" = 1 ]; then
-    install -m 755 target/release/brain-desktop "$BIN/brain-desktop"
-    say "  brain-desktop"
+    install -m 755 target/release/capture-desktop "$BIN/capture-desktop"
+    say "  capture-desktop"
 fi
 
 case ":$PATH:" in
@@ -82,13 +82,13 @@ esac
 # ----------------------------------------------------------------- 3. store ---
 
 step "Store"
-if [ -e "$BRAIN_HOME/config/identity.key" ]; then
+if [ -e "$CAPTURE_HOME/config/identity.key" ]; then
     # Never re-initialised. A second `init` over a real store would be a new
     # identity beside an existing log, which is the state the startup check
     # exists to detect and recover from — not one to create on purpose.
-    say "  already at $BRAIN_HOME — left alone"
+    say "  already at $CAPTURE_HOME — left alone"
 else
-    "$BIN/brain" init
+    "$BIN/capture" init
 fi
 
 # ---------------------------------------------------------- 4. the gestures ---
@@ -97,9 +97,9 @@ step "Capturing from a terminal"
 say "  Add this to your shell rc, then start a new shell:"
 say ""
 case "${SHELL##*/}" in
-    bash) say "      eval \"\$(brain shell-init bash)\"    # ~/.bashrc" ;;
-    zsh)  say "      eval \"\$(brain shell-init zsh)\"     # ~/.zshrc" ;;
-    *)    say "      eval \"\$(brain shell-init zsh)\"     # or bash" ;;
+    bash) say "      eval \"\$(capture shell-init bash)\"    # ~/.bashrc" ;;
+    zsh)  say "      eval \"\$(capture shell-init zsh)\"     # ~/.zshrc" ;;
+    *)    say "      eval \"\$(capture shell-init zsh)\"     # or bash" ;;
 esac
 say ""
 say "  Then type at your prompt and press Ctrl-B. The line is read before the"
@@ -107,25 +107,25 @@ say "  shell touches it, so #tags, \$vars, quotes and backticks survive intact."
 
 step "Capturing from anywhere"
 if [ "$WITH_CHORD" = 1 ]; then
-    "$BIN/brain-capture" --autostart
+    "$BIN/capture-overlay" --autostart
 
     # Started now as well as at login, so the registration below has something
     # to reach. Registering against nothing would report the chord as never
     # having worked, which is true and unhelpful on a fresh install.
-    if ! "$BIN/brain-capture" --show >/dev/null 2>&1; then
+    if ! "$BIN/capture-overlay" --show >/dev/null 2>&1; then
         say ""
         say "  Starting it now..."
-        "$BIN/brain-capture" --run >/dev/null 2>&1 &
+        "$BIN/capture-overlay" --run >/dev/null 2>&1 &
         sleep 2
     fi
 
     say ""
-    "$BIN/brain-capture" --register
+    "$BIN/capture-overlay" --register
 else
     say "  Two commands, once:"
     say ""
-    say "      brain-capture --autostart    be running from login"
-    say "      brain-capture --register     bind the chord, then press it to confirm"
+    say "      capture-overlay --autostart    be running from login"
+    say "      capture-overlay --register     bind the chord, then press it to confirm"
     say ""
     say "  Or re-run this with --with-chord to do both now."
     say ""
@@ -137,22 +137,22 @@ fi
 
 if [ "$WANT_DESKTOP" = 1 ]; then
     step "Browsing"
-    say "  brain-desktop                the timeline, search and health"
+    say "  capture-desktop                the timeline, search and health"
 fi
 
 step "Syncing"
 say "  Installed but not started. Sync is opt-in and does nothing on one device."
 say ""
 say "  To add a second device, on this one:"
-say "      brain pair                   shows a code; type it on the other device"
+say "      capture pair                   shows a code; type it on the other device"
 say ""
 say "  Then run the daemon on each:"
-say "      brain-syncd                  finds paired devices and reconciles"
+say "      capture-syncd                  finds paired devices and reconciles"
 say ""
 say "  Not started from login by default. It opens a listening socket, and that"
 say "  is a thing to switch on deliberately rather than to inherit from having"
 say "  run an installer."
 
 step "Ready"
-say "  brain + your first note"
-say "  brain timeline"
+say "  capture + your first note"
+say "  capture timeline"

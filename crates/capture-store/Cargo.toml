@@ -1,0 +1,38 @@
+[package]
+name = "capture-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# capture-store is the boundary crate: it owns SQLite, entropy, the clock and the
+# filesystem, and it hands capture-core values rather than handles.
+
+[dependencies]
+capture-parse = { path = "../capture-parse" }
+capture-time = { path = "../capture-time" }
+# The wire types and the protocol. Not the network: `mdns` is off, so this is
+# the shape of a sync rather than the ability to perform one.
+capture-sync = { path = "../capture-sync" }
+capture-core = { path = "../capture-core", features = ["std"] }
+ed25519-dalek = { workspace = true, features = ["std", "rand_core"] }
+minicbor = { workspace = true }
+rusqlite = { workspace = true }
+# To compute the public half of the device's Noise key. The secret is thirty-two
+# random bytes from `entropy`; this turns it into something a peer can name.
+x25519-dalek = { workspace = true }
+rustix = { workspace = true }
+getrandom = { workspace = true }
+jiff = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# Only to write a projection the way an older build would have, so a test can
+# prove such a thing still opens.
+rusqlite = { workspace = true }
+capture-parse = { path = "../capture-parse" }
+capture-time = { path = "../capture-time" }
+capture-core = { path = "../capture-core", features = ["std", "testing"] }
