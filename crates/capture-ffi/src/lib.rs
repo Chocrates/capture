@@ -624,12 +624,29 @@ impl Archive {
             &self.paths,
             &identity,
             std::time::Duration::from_secs(seconds.clamp(1, 120) as u64),
+            &|| jiff::Timestamp::now().as_millisecond().max(0) as u64,
         )?;
         Ok(SyncReport {
             multicast: r.multicast,
             answered: r.answered,
             trouble: r.trouble,
         })
+    }
+
+    /// Where another device can reach this one.
+    ///
+    /// Asked for because the other end has to be told. Pairing is a person
+    /// typing a code into a second machine, and that machine needs an address
+    /// — on a phone there is nowhere else to read one from, and "look it up in
+    /// your network settings" is the point at which somebody gives up.
+    ///
+    /// Loopback is excluded: a device told to dial that would be dialling
+    /// itself, which fails in a way that reads as the code being wrong.
+    pub fn addresses(&self) -> Vec<String> {
+        capture_store::round::local_addresses()
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect()
     }
 
     /// Every device this archive knows to talk to.
@@ -698,11 +715,16 @@ impl Archive {
     }
 
     /// Join a device that is offering, by the code it is showing.
-    pub fn join_with_code(&self, addr: String, code: String) -> Result<()> {
+    ///
+    /// Returns the device that vouched for this one — not the address it was
+    /// reached at. An address is where something was a moment ago; the key is
+    /// what was actually joined, and it is what every other surface names a
+    /// device by.
+    pub fn join_with_code(&self, addr: String, code: String) -> Result<String> {
         let _writing = self.write_lock()?;
         let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
-        capture_store::pairing::accept_code(&self.paths, code.as_bytes(), &addr, now)?;
-        Ok(())
+        let grant = capture_store::pairing::accept_code(&self.paths, code.as_bytes(), &addr, now)?;
+        Ok(named(&grant.pubkey))
     }
 
     /// Carry out whatever has come due — redactions past their window,

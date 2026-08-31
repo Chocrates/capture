@@ -208,7 +208,12 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
  * and that ambiguity is a cost the system would be manufacturing for free.
  */
 @Composable
-fun Health(conditions: List<Condition>, peers: List<Peer>, onSync: () -> Unit) {
+fun Health(
+    conditions: List<Condition>,
+    peers: List<Peer>,
+    onSync: () -> Unit,
+    onPair: () -> Unit,
+) {
     val attention = conditions.filter { it.tier == "attention" }
     val knowing = conditions.filter { it.tier != "attention" }
 
@@ -263,7 +268,10 @@ fun Health(conditions: List<Condition>, peers: List<Peer>, onSync: () -> Unit) {
             }
         }
         item {
-            TextButton(onSync, Modifier.padding(top = 8.dp)) { Text("Sync now") }
+            Row {
+                TextButton(onSync) { Text("Sync now") }
+                TextButton(onPair) { Text("Pair a device") }
+            }
         }
 
         item {

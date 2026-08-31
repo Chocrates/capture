@@ -112,8 +112,33 @@ impl Offering {
     }
 }
 
+/// Where the other device is, with the pairing port supplied if it was not.
+///
+/// Here rather than in each surface. A person typing an address types the
+/// address — the port is the software's business, and it is the same port
+/// every time. The window on the phone passed what was typed straight through
+/// and the connection failed with "invalid socket address", which says nothing
+/// about what to do and is indistinguishable from a wrong code.
+pub fn dialable(addr: &str) -> String {
+    // An address that parses on its own carries no port, brackets and all:
+    // `10.0.2.2`, `::1`, `fe80::1%eth0`. Anything else either has one already
+    // or is not an address, and the connection is the right place to find that
+    // out.
+    match addr.parse::<std::net::IpAddr>() {
+        // Bracketed, or the colons in the address and the colon before the
+        // port are the same character and nothing can parse the result.
+        Ok(std::net::IpAddr::V6(_)) => format!("[{addr}]:{PORT}"),
+        Ok(_) => format!("{addr}:{PORT}"),
+        // A hostname, or something with a port already, or nonsense. The
+        // connection is the right place to find out which.
+        Err(_) if !addr.contains(':') => format!("{addr}:{PORT}"),
+        Err(_) => addr.to_string(),
+    }
+}
+
 /// Type a code shown on another device, and join its roster.
 pub fn accept_code(paths: &StorePaths, digits: &[u8], addr: &str, now: u64) -> Result<Grant> {
+    let addr = &dialable(addr);
     let identity = Identity::load(paths)?;
 
     let offer = Offer {
@@ -167,4 +192,39 @@ fn grant_from(paths: &StorePaths, identity: &Identity) -> Result<Grant> {
         secret: roster.secret,
         incarnation: Some(identity.incarnation().0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_without_a_port_gets_the_pairing_one() {
+        // What a person types, on either surface. The phone passed this
+        // straight to `connect` and failed with "invalid socket address",
+        // which reads exactly like a wrong code and suggests retyping the one
+        // thing that was right.
+        assert_eq!(dialable("192.168.1.40"), format!("192.168.1.40:{PORT}"));
+        assert!(
+            dialable("192.168.1.40")
+                .parse::<std::net::SocketAddr>()
+                .is_ok()
+        );
+        assert_eq!(dialable("desktop.local"), format!("desktop.local:{PORT}"));
+        // Bracketed, because otherwise the colons in the address and the one
+        // before the port are indistinguishable and nothing parses it.
+        assert_eq!(dialable("::1"), format!("[::1]:{PORT}"));
+        assert!(
+            dialable("::1").parse::<std::net::SocketAddr>().is_ok(),
+            "the whole point is that the result can be dialled"
+        );
+    }
+
+    #[test]
+    fn an_address_that_names_a_port_keeps_it() {
+        // Because the port is configurable, and somebody who said which one
+        // meant it.
+        assert_eq!(dialable("192.168.1.40:9999"), "192.168.1.40:9999");
+        assert_eq!(dialable("[::1]:9999"), "[::1]:9999");
+    }
 }

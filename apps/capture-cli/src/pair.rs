@@ -51,8 +51,9 @@ pub fn accept(paths: StorePaths, code: &str, at: Option<&str>) -> Result<()> {
     }
 
     let addr = match at {
-        Some(a) if a.contains(':') => a.to_string(),
-        Some(a) => format!("{a}:{}", capture_store::pairing::PORT),
+        // The port is supplied by `accept_code` where one is missing, so both
+        // surfaces get the same answer to "what does 192.168.1.40 mean".
+        Some(a) => a.to_string(),
         None => {
             return Err(Error::Usage(
                 "say where the other device is:  capture pair CODE --at 192.168.1.40".into(),

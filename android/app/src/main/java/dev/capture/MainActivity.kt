@@ -72,7 +72,17 @@ private fun App(model: Model) {
                 is Screen.Search -> Search(model.hits, model::search) { model.go(Screen.Note(it)) }
                 is Screen.Agenda -> Agenda(screen.day, model.agenda)
                 is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
-                is Screen.Health -> Health(model.conditions, model.peers) { SyncWorker.now(context) }
+                is Screen.Health -> Health(
+                    model.conditions,
+                    model.peers,
+                    onSync = { SyncWorker.now(context) },
+                    onPair = { model.go(Screen.Pairing) },
+                )
+                is Screen.Pairing -> Pairing(
+                    model.pairing,
+                    onOffer = { model.offerPairing(model.addresses()) },
+                    onJoin = model::joinPairing,
+                )
                 is Screen.Note -> NotePage(model.note, model.pending, model)
             }
         }

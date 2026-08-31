@@ -445,3 +445,29 @@ fn pairing_two_devices_writes_no_setting() {
     std::fs::remove_dir_all(&one).ok();
     std::fs::remove_dir_all(&two).ok();
 }
+
+#[test]
+fn the_address_offered_for_pairing_can_actually_be_dialled() {
+    // A phone showed "capture pair 521039 --at fe80::80cc:80ec:8b48:71a8".
+    //
+    // That address cannot be dialled from anywhere. A link-local IPv6 address
+    // needs the zone index of the interface it belongs to, which is local to
+    // the machine that owns it and means nothing on another one — so the
+    // instruction on screen was one nobody could follow, and it failed at the
+    // far end in a way that reads as the *code* being wrong.
+    let root = scratch("addresses");
+    let a = Archive::open(root.clone()).unwrap();
+
+    for addr in a.addresses() {
+        assert!(
+            !addr.starts_with("fe80:"),
+            "offered a link-local address nobody can dial: {addr}"
+        );
+        assert!(
+            !addr.starts_with("127.") && addr != "::1",
+            "offered loopback, which sends the other device to itself: {addr}"
+        );
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}

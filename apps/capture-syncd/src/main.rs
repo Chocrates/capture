@@ -28,6 +28,15 @@ use capture_store::paths::StorePaths;
 // The round itself. This process decides *when* to run one — on a timer, on
 // resume, on a network change — and the round decides what one is.
 use capture_store::round::{answer, tick};
+
+/// This process's clock.
+///
+/// Supplied to the round rather than read inside it: nothing below the surface
+/// crates reaches for a clock, so the moment an operation happens is an input
+/// to it (DESIGN.md D12).
+fn now() -> u64 {
+    jiff::Timestamp::now().as_millisecond().max(0) as u64
+}
 use capture_sync::discovery;
 use capture_sync::mdns::Beacon;
 
@@ -147,7 +156,7 @@ fn run() -> Result<(), capture_store::Error> {
 
     let mut round = 0u64;
     loop {
-        if let Err(e) = tick(&paths, &identity, &mut beacon, round, port) {
+        if let Err(e) = tick(&paths, &identity, &mut beacon, round, port, &now) {
             // A round that fails is a round. The next one may find a different
             // network, a woken peer, or a released lock.
             tracing::warn!(%e, "sync round did not complete");
@@ -162,7 +171,7 @@ fn run() -> Result<(), capture_store::Error> {
         loop {
             match rx.recv_timeout(LOOK) {
                 Ok(Arrival::Dialled(stream)) => {
-                    if let Err(e) = answer(&paths, &identity, stream) {
+                    if let Err(e) = answer(&paths, &identity, stream, now()) {
                         tracing::info!(%e, "a peer connection ended");
                     }
                 }

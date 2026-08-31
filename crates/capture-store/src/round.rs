@@ -56,6 +56,7 @@ pub fn tick(
     beacon: &mut Option<Beacon>,
     round: u64,
     port: u16,
+    now: &dyn Fn() -> u64,
 ) -> Result<()> {
     let (roster, heads) = look(paths)?;
     let Some(secret) = roster.secret else {
@@ -155,7 +156,7 @@ pub fn tick(
             continue;
         }
 
-        match dial(paths, identity, &peer, &addr) {
+        match dial(paths, identity, &peer, &addr, now()) {
             Ok(done) => {
                 ops.peer_reached(&peer, &addr, now())?;
                 if let Some(d) = digest {
@@ -186,17 +187,23 @@ pub fn dial(
     identity: &Identity,
     peer: &[u8; 32],
     addr: &str,
+    now: u64,
 ) -> Result<Exchanged> {
     let noise = noise_key_for(paths, peer)?;
     let tcp = Tcp::connect(addr).map_err(Error::Io)?;
     let mut secure = Secure::initiate(tcp, &identity.noise_secret(), &noise)
         .map_err(|e| Error::Usage(format!("handshake refused: {e:?}")))?;
 
-    reconcile(paths, &mut secure)
+    reconcile(paths, &mut secure, now)
 }
 
 /// Answer a peer that dialled this device.
-pub fn answer(paths: &StorePaths, identity: &Identity, stream: std::net::TcpStream) -> Result<()> {
+pub fn answer(
+    paths: &StorePaths,
+    identity: &Identity,
+    stream: std::net::TcpStream,
+    now: u64,
+) -> Result<()> {
     let tcp = Tcp::new(stream).map_err(Error::Io)?;
 
     // Who dialled is established by the handshake rather than claimed before
@@ -229,11 +236,11 @@ pub fn answer(paths: &StorePaths, identity: &Identity, stream: std::net::TcpStre
         )));
     };
 
-    let done = reconcile(paths, &mut secure)?;
+    let done = reconcile(paths, &mut secure, now)?;
     // Alive, but not necessarily reachable at the address it dialled from —
     // that is an ephemeral source port. Where to call it back comes from the
     // advertisement, or from a remembered address, not from this.
-    Ops::open(&paths.ops)?.peer_answered(&member, now())?;
+    Ops::open(&paths.ops)?.peer_answered(&member, now)?;
     tracing::info!(peer = %short(&member), received = done.received, "answered a peer");
     Ok(())
 }
@@ -242,12 +249,13 @@ pub fn answer(paths: &StorePaths, identity: &Identity, stream: std::net::TcpStre
 pub fn reconcile<T: capture_sync::transport::Transport>(
     paths: &StorePaths,
     secure: &mut Secure<T>,
+    now: u64,
 ) -> Result<Exchanged> {
     let mut s = Session::open(paths.clone())?;
     let ops = Ops::open(&paths.ops)?;
     let own = s.identity.public().to_bytes();
     let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own)?;
-    let mut archive = StoreArchive::new(&mut gate, &ops, now());
+    let mut archive = StoreArchive::new(&mut gate, &ops, now);
 
     let done = exchange(secure, &mut archive)
         .map_err(|e| Error::Usage(format!("exchange failed: {e:?}")))?;
@@ -373,30 +381,39 @@ pub fn network_evidence() -> Vec<u8> {
 /// remembered-address fallback ever worked, which is why the two-device runs
 /// succeeded and proved less than they appeared to.
 pub fn local_addresses() -> Vec<std::net::IpAddr> {
-    if_addrs::get_if_addrs()
+    let mut out: Vec<std::net::IpAddr> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .filter(|i| !i.is_loopback())
         .map(|i| i.ip())
-        .collect()
+        // Link-local IPv6 excluded. `fe80::` addresses cannot be dialled
+        // without the zone index of the interface they belong to, which is
+        // local to the machine that owns them and means nothing on another —
+        // so one advertised, or printed for somebody to type, is an
+        // instruction that cannot be followed. The phone showed exactly that:
+        // "capture pair 521039 --at fe80::80cc:80ec:8b48:71a8".
+        .filter(|a| !matches!(a, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80))
+        .collect();
+
+    // IPv4 first, because it is the one somebody can retype from a screen
+    // without an error. Both are advertised; only the order differs, and the
+    // order is what a person sees.
+    out.sort_by_key(|a| !a.is_ipv4());
+    out
 }
 
 /// A per-peer jitter that does not need a source of randomness.
-#[cfg(feature = "mdns")]
 ///
 /// The point of jitter is that devices do not all retry in the same instant,
 /// and a value derived from the peer's own key achieves that while staying a
 /// function a test can hold still.
+#[cfg(feature = "mdns")]
 fn jitter(key: &[u8; 32]) -> u64 {
     u64::from_be_bytes(key[..8].try_into().expect("32 bytes has 8"))
 }
 
 pub fn short(k: &[u8; 32]) -> String {
     k[..6].iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub fn now() -> u64 {
-    jiff::Timestamp::now().as_millisecond().max(0) as u64
 }
 
 /// One bounded round, for a caller that is about to be killed.
@@ -415,8 +432,17 @@ pub fn now() -> u64 {
 /// the ordinary result of being the only device awake — and reporting it as
 /// one would train a person to ignore the report.
 #[cfg(feature = "mdns")]
-pub fn bounded(paths: &StorePaths, identity: &Identity, window: Duration) -> Result<Report> {
-    let deadline = std::time::Instant::now() + window;
+pub fn bounded(
+    paths: &StorePaths,
+    identity: &Identity,
+    window: Duration,
+    now: &dyn Fn() -> u64,
+) -> Result<Report> {
+    // The caller's clock, like everything else here. Nothing in this crate
+    // reads one: the fold takes the event set and nothing else, and a
+    // deadline computed from a clock the store reached for itself is the
+    // first crack in that (DESIGN.md D12).
+    let deadline = now() + window.as_millis() as u64;
     let port = discovery::sync_port();
 
     // Bound first. A peer that finds the advertisement immediately and dials
@@ -436,7 +462,7 @@ pub fn bounded(paths: &StorePaths, identity: &Identity, window: Duration) -> Res
     // Advertise and dial. Whether this found anybody is in the peer records
     // `tick` writes, which is where the surfaces read it from anyway.
     let round = now() / 1000;
-    if let Err(e) = tick(paths, identity, &mut beacon, round, port) {
+    if let Err(e) = tick(paths, identity, &mut beacon, round, port, now) {
         report.trouble = Some(e.to_string());
     }
 
@@ -444,9 +470,9 @@ pub fn bounded(paths: &StorePaths, identity: &Identity, window: Duration) -> Res
     // rather than blocking on accept: a blocking accept with no peer is a
     // thread that has to be interrupted to stop, and the interruption is the
     // part that goes wrong when the platform is killing the process anyway.
-    while std::time::Instant::now() < deadline {
+    while now() < deadline {
         match listener.accept() {
-            Ok((stream, _)) => match answer(paths, identity, stream) {
+            Ok((stream, _)) => match answer(paths, identity, stream, now()) {
                 Ok(()) => report.answered += 1,
                 Err(e) => report.trouble = Some(e.to_string()),
             },

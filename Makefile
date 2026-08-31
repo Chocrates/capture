@@ -17,6 +17,7 @@ SCRATCH ?= /tmp/capture-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
+        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge unwired \
         build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -419,3 +420,13 @@ clean:
 ## distclean: also remove the scratch store
 distclean: clean
 	rm -rf $(SCRATCH)
+
+## android-converge: prove the phone and a desktop reach the same archive
+#
+# Needs a running emulator and a built CLI. Slow, and left out of `make
+# android` for that reason: it pairs, syncs and asserts in both directions with
+# real processes on both ends, which is minutes rather than seconds.
+android-converge: android-app
+	@echo '--- android: converging with a desktop'
+	@cargo build -p capture-cli -p capture-syncd
+	@sh tools/converge.sh

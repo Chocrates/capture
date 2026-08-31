@@ -147,6 +147,12 @@ fn edit(nonce: [u8; 16], text: &str) -> Vec<u8> {
     b
 }
 
+/// The moment a reconcile is said to happen at.
+///
+/// Fixed, because the round takes its clock as an argument rather than reading
+/// one — so a suite about convergence does not also depend on what time it is.
+const AT: u64 = 1_700_000_100_000;
+
 /// Run one round of anti-entropy between two stores over a real socket.
 fn sync(a: &Device, b: &Device) {
     let a_id = a.identity();
@@ -169,13 +175,13 @@ fn sync(a: &Device, b: &Device) {
         let stream = listener.accept().unwrap().0;
         let tcp = Tcp::new(stream).unwrap();
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
-        capture_store::round::reconcile(&b_paths, &mut secure).expect("the responder finished")
+        capture_store::round::reconcile(&b_paths, &mut secure, AT).expect("the responder finished")
     });
 
     let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
     let mut secure =
         Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
-    capture_store::round::reconcile(&a.paths, &mut secure).expect("the initiator finished");
+    capture_store::round::reconcile(&a.paths, &mut secure, AT).expect("the initiator finished");
 
     responder.join().expect("no panic");
 }

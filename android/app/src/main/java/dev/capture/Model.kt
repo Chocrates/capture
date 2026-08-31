@@ -24,6 +24,7 @@ sealed interface Screen {
     data object Wiki : Screen
     data object Health : Screen
     data class Note(val name: String) : Screen
+    data object Pairing : Screen
 }
 
 /**
@@ -63,6 +64,10 @@ class Model(private val archive: Archive) : ViewModel() {
     var pending by mutableStateOf<Pending?>(null)
         private set
 
+    /** Where a pairing has got to, if one is happening. */
+    var pairing by mutableStateOf<PairingState>(PairingState.Idle)
+        private set
+
     /** The last thing that went wrong, for saying so rather than swallowing it. */
     var trouble by mutableStateOf<String?>(null)
         private set
@@ -85,6 +90,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 pending = archive.pendingRedaction(to.name)
             }
             is Screen.Search -> hits = emptyList()
+            is Screen.Pairing -> pairing = PairingState.Idle
         }
     }
 
@@ -148,6 +154,43 @@ class Model(private val archive: Archive) : ViewModel() {
         // the moment the back gesture happens.
         timeline = archive.timeline(100u)
     }
+
+    /**
+     * Show a code and wait for a device to answer it.
+     *
+     * Two steps rather than one: the code has to be on screen while the window
+     * is open, and a single call that returned it when pairing completed would
+     * hand it over at the one moment it is useless.
+     */
+    fun offerPairing(addresses: List<String>) {
+        viewModelScope.launch {
+            pairing = try {
+                val offer = withContext(Dispatchers.IO) { archive.offerPairing() }
+                pairing = PairingState.Showing(offer.code(), addresses.firstOrNull())
+                // The wait is a person walking to another machine, so it holds
+                // no lock and blocks nothing but its own thread.
+                PairingState.Joined(withContext(Dispatchers.IO) { offer.wait() })
+            } catch (e: Exception) {
+                PairingState.Failed(e.message ?: e.toString())
+            }
+        }
+    }
+
+    /** Type a code shown on another device. */
+    fun joinPairing(addr: String, code: String) {
+        viewModelScope.launch {
+            pairing = try {
+                // Named by key, as every other surface names a device. The
+                // address is where it was a moment ago.
+                PairingState.Joined(withContext(Dispatchers.IO) { archive.joinWithCode(addr, code) })
+            } catch (e: Exception) {
+                PairingState.Failed(e.message ?: e.toString())
+            }
+        }
+    }
+
+    /** Where this device can be reached, for the other one to dial. */
+    fun addresses(): List<String> = archive.addresses()
 
     /** Settle whatever has come due. Called when the app comes forward. */
     fun settle() = load { archive.settle() }
