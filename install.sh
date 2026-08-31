@@ -53,7 +53,7 @@ if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
     say ""
 fi
 
-cargo build --release -p brain-cli -p brain-capture
+cargo build --release -p brain-cli -p brain-capture -p brain-syncd
 if [ "$WANT_DESKTOP" = 1 ]; then
     cargo build --release -p brain-desktop
 fi
@@ -62,7 +62,7 @@ fi
 
 step "Installing to $BIN"
 mkdir -p "$BIN"
-for b in brain brain-capture; do
+for b in brain brain-capture brain-syncd; do
     install -m 755 "target/release/$b" "$BIN/$b"
     say "  $b"
 done
@@ -139,6 +139,19 @@ if [ "$WANT_DESKTOP" = 1 ]; then
     step "Browsing"
     say "  brain-desktop                the timeline, search and health"
 fi
+
+step "Syncing"
+say "  Installed but not started. Sync is opt-in and does nothing on one device."
+say ""
+say "  To add a second device, on this one:"
+say "      brain pair                   shows a code; type it on the other device"
+say ""
+say "  Then run the daemon on each:"
+say "      brain-syncd                  finds paired devices and reconciles"
+say ""
+say "  Not started from login by default. It opens a listening socket, and that"
+say "  is a thing to switch on deliberately rather than to inherit from having"
+say "  run an installer."
 
 step "Ready"
 say "  brain + your first note"

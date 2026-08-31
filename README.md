@@ -150,13 +150,40 @@ Export is manual, never scheduled. Scheduling it would invite the belief that
 backups are handled; copying `~/brain/export` somewhere else is your job and an
 ordinary backup tool's.
 
+## More than one device
+
+```sh
+brain pair                    # shows a six-digit code, and waits
+brain pair 418302 --at 192.168.1.40   # on the other device
+brain peers                   # who is in the roster, and when each was reached
+brain-syncd                   # the daemon: finds paired devices and reconciles
+```
+
+One gesture per device, not one per pair of devices: the roster lives in the
+log, so a third device paired with the laptop is admitted by the desktop as
+soon as the desktop syncs with the laptop.
+
+The code is six digits because SPAKE2 makes each wrong guess cost an online
+attempt. Used directly as a key, six digits would be a million guesses tried
+offline in seconds by anyone who recorded the exchange.
+
+Everything between devices is inside a Noise session, and a device not in the
+roster cannot open one — the key it would have to encrypt to lives in the log.
+Discovery advertises a rotating pseudonym rather than a device name, so an
+observer on a café network cannot tell that your laptop and your phone belong
+together, or count what you captured.
+
+`brain-syncd` is installed but not started from login. It opens a listening
+socket, and that is a thing to switch on deliberately rather than inherit from
+having run an installer.
+
 ## What is where
 
 ```
 ~/brain/
   events.db      the log — the only thing that cannot be recomputed
   state.N.db     the projection, rebuilt from the log at will
-  ops.db         local state: this device's bookkeeping
+  ops.db         local state: this device's bookkeeping, and who it has paired
   spool          captures taken while the store was unwritable
   config/        the device key, mode 0600
   export/        what you copy offsite
