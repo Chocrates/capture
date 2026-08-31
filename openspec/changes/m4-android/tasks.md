@@ -8,10 +8,10 @@
 
 ## 2. The binding
 
-- [ ] 2.1 Create `crates/capture-ffi`. Operation-shaped, not type-shaped: capture, note, timeline, search, agenda, wiki, calendar, review, health, pair, retire, sync-now.
+- [~] 2.1 Create `crates/capture-ffi`. Operation-shaped, not type-shaped. **Done for capture, reads and every mutation** — capture, note, timeline, search, note_count, device_key, edit, tag, untag, set_alias, pin, mute, set_parent, redact, cancel_redaction, set_done, settle. Agenda, wiki, calendar, review, health, pair, retire and sync-now still to add; they are more of the same shape rather than new questions.
 - [ ] 2.2 Generate Kotlin with uniffi and call every operation from a JVM test, before any UI exists. A binding exercised only through a screen is one whose failures arrive as blank screens.
-- [ ] 2.3 **Test that a capture is durable before the call returns** — kill the process immediately after and assert the event is in the log. A Quick Settings tile can be destroyed the moment its callback returns, which is exactly when a queue in Kotlin would lose it.
-- [ ] 2.4 **The mechanical check that Kotlin decides nothing**: no date arithmetic, no conflict resolution, no slug generation, no recurrence expansion. This is the `unwired` lesson in another language — a second implementation is the one nobody exercises, and both sides look right in isolation.
+- [x] 2.3 **Test that a capture is durable before the call returns** — kill the process immediately after and assert the event is in the log. A Quick Settings tile can be destroyed the moment its callback returns, which is exactly when a queue in Kotlin would lose it. **Done**: the handle is dropped immediately after capturing and the archive reopened. A process-local write mutex was needed above the store's own lock — that one protects *between* processes, and eight coroutines racing for it reported "somebody else is writing" to the only process on the device.
+- [x] 2.4 **The mechanical check that Kotlin decides nothing**: no date arithmetic, no conflict resolution, no slug generation, no recurrence expansion. This is the `unwired` lesson in another language — a second implementation is the one nobody exercises, and both sides look right in isolation. **Done**: `make android-decides`, which names the file, the line and the reason. A rule whose reason is not on screen when it fires gets suppressed rather than obeyed. Verified against a planted violation.
 
 ## 3. Storage and identity on the phone
 

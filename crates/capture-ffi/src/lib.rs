@@ -181,9 +181,7 @@ impl Archive {
     /// and §2.1's promise is that a capture the interface accepted is never
     /// lost.
     pub fn capture(&self, text: String) -> Result<Captured> {
-        let _writing = self.writing.lock().map_err(|_| CaptureError::Store {
-            reason: "a previous write left the archive locked".into(),
-        })?;
+        let _writing = self.write_lock()?;
 
         match capture_store::session::capture(&self.paths, &text)? {
             Committed::Stored(slug) => Ok(Captured::Stored { slug }),
@@ -239,6 +237,101 @@ impl Archive {
         Ok(self.read()?.note_count()?)
     }
 
+    // ---------------------------------------------------------- writing ----
+    //
+    // Every one of these takes the writer lock, does one thing, and releases
+    // it. None of them decides anything: what a mute covers, which edit wins,
+    // when a redaction executes — all of that is the fold's, and is identical
+    // to what the desktop does because it is the same code.
+
+    /// Replace a note's text. The old version stays in the log.
+    pub fn edit(&self, name: String, text: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::edit(&self.paths, &name, &text)?)
+    }
+
+    pub fn tag(&self, name: String, tag: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::tag(&self.paths, &name, &tag)?)
+    }
+
+    pub fn untag(&self, name: String, tag: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::untag(&self.paths, &name, &tag)?)
+    }
+
+    /// Give a note a chosen name, or clear it with `None`.
+    pub fn set_alias(&self, name: String, alias: Option<String>) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::set_alias(
+            &self.paths,
+            &name,
+            alias.as_deref(),
+        )?)
+    }
+
+    pub fn pin(&self, name: String, pinned: bool) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::pin(&self.paths, &name, pinned)?)
+    }
+
+    /// Suppress a note. It stays in the timeline and leaves search.
+    ///
+    /// §2.6 exists so that suppressing something is cheaper than destroying
+    /// it. A phone that could destroy but not mute would invert exactly the
+    /// gradient that argument creates.
+    pub fn mute(&self, name: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::mute_note(&self.paths, &name)?)
+    }
+
+    /// Put a page under another, or back at the top with `None`.
+    pub fn set_parent(&self, name: String, under: Option<String>) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::set_parent(
+            &self.paths,
+            &name,
+            under.as_deref(),
+        )?)
+    }
+
+    /// Order a note's destruction. Returns the id that cancels it.
+    ///
+    /// Queued rather than immediate: §1.1's window is what makes the gesture
+    /// recoverable, and it is the same window here as everywhere else.
+    pub fn redact(&self, name: String) -> Result<String> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::redact(&self.paths, &name)?)
+    }
+
+    /// Stop a queued destruction, by the id `redact` returned.
+    pub fn cancel_redaction(&self, id_prefix: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::cancel_redaction(
+            &self.paths,
+            &id_prefix,
+        )?)
+    }
+
+    /// Mark a task done, or not.
+    pub fn set_done(&self, name: String, done: bool) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::promote::set_done(&self.paths, &name, done)?)
+    }
+
+    /// Carry out whatever has come due — redactions past their window,
+    /// promotions, expiries.
+    ///
+    /// Called when the application comes to the foreground and on the sync
+    /// tick. On the desktop this happens on every command that writes; a phone
+    /// has no equivalent, so it is asked for explicitly.
+    pub fn settle(&self) -> Result<u64> {
+        let _w = self.write_lock()?;
+        let mut s = capture_store::session::Session::open(self.paths.clone())?;
+        let done = s.drain_due()?;
+        Ok((done.destroyed + done.expired + done.resumed) as u64)
+    }
+
     /// This device's own key, as the surfaces show it.
     ///
     /// Six bytes rather than thirty-two: a prefix nobody reads is worse than
@@ -254,6 +347,13 @@ impl Archive {
 }
 
 impl Archive {
+    /// Serialise writes from this process.
+    fn write_lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.writing.lock().map_err(|_| CaptureError::Store {
+            reason: "a previous write left the archive locked".into(),
+        })
+    }
+
     /// The projection, without taking the writer lock.
     ///
     /// Reads never block on a write and never block a write. `capture verify`

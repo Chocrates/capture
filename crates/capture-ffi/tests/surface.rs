@@ -154,3 +154,90 @@ fn concurrent_captures_do_not_report_a_false_conflict() {
     assert_eq!(a.note_count().unwrap(), 8);
     std::fs::remove_dir_all(&root).ok();
 }
+
+// ------------------------------------------------------------- mutations ----
+//
+// The phone offers every mutation the desktop does (§8.4). A device that can
+// destroy a note but not mute one inverts the gradient §2.6 exists to create:
+// suppressing something must be cheaper than destroying it, and it stops being
+// cheaper the moment it needs a different machine.
+
+#[test]
+fn every_mutation_is_reachable_from_the_phone() {
+    let root = scratch("mutations");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let slug = match a.capture("a note to work on".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+
+    a.edit(slug.clone(), "edited on the phone".into()).unwrap();
+    assert_eq!(
+        a.note(slug.clone()).unwrap().text.as_deref(),
+        Some("edited on the phone")
+    );
+
+    a.tag(slug.clone(), "errand".into()).unwrap();
+    a.untag(slug.clone(), "errand".into()).unwrap();
+
+    a.set_alias(slug.clone(), Some("the-thing".into())).unwrap();
+    assert_eq!(
+        a.note("the-thing".into()).unwrap().slug,
+        slug,
+        "an alias resolves to the same note"
+    );
+
+    a.pin(slug.clone(), true).unwrap();
+    assert!(a.note(slug.clone()).unwrap().pinned);
+
+    a.mute(slug.clone()).unwrap();
+    assert!(
+        a.note(slug.clone()).unwrap().muted_until_ms.is_some(),
+        "muting is available without reaching for a laptop"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_queued_destruction_is_distinguishable_from_a_finished_one() {
+    // The distinction a single flag would lose. Between ordering and executing,
+    // the content is withheld and still recoverable — and that is the only one
+    // of the two states a person can do anything about.
+    let root = scratch("redact");
+    let a = Archive::open(root.clone()).unwrap();
+    let slug = match a.capture("something regrettable".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+
+    let id = a.redact(slug.clone()).unwrap();
+
+    let n = a.note(slug.clone()).unwrap();
+    assert!(n.redaction_queued, "ordered");
+    assert!(!n.redacted, "and not yet carried out");
+    assert!(n.text.is_none(), "withheld in the meantime");
+
+    a.cancel_redaction(id).unwrap();
+    assert!(
+        !a.note(slug).unwrap().redaction_queued,
+        "the window is real: a queued destruction can be called off"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn settling_is_something_the_phone_asks_for() {
+    // The desktop settles on every command that writes. A phone has no
+    // equivalent — it is opened and closed rather than invoked — so the work
+    // has to be asked for, on foreground and on the sync tick.
+    let root = scratch("settle");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("ordinary".into()).unwrap();
+
+    assert_eq!(a.settle().unwrap(), 0, "nothing due, nothing done");
+
+    std::fs::remove_dir_all(&root).ok();
+}

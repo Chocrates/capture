@@ -58,7 +58,7 @@ ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired deny
 # `ci` proves the code is correct. This proves it is still correct somewhere
 # that is not Linux, which is a different question and the one that matters
 # once a phone holds the archive.
-android: android-build android-test android-kotlin
+android: android-build android-kotlin android-decides android-test
 
 ## android-build: cross-compile the core for the emulator and a real phone
 android-build:
@@ -84,6 +84,15 @@ android-kotlin:
 	   generate --library target/x86_64-linux-android/debug/libcapture_ffi.so \
 	   --language kotlin --no-format --out-dir android/app/src/main/java
 	@echo '    android/app/src/main/java/uniffi/capture_ffi/capture_ffi.kt'
+
+## android-decides: fail if the Kotlin side starts deciding things
+#
+# The unwired lesson in another language. A second implementation of the fold,
+# a slug or a date is not a duplicate — it is the one nobody exercises, and it
+# diverges silently because both sides look correct in isolation.
+android-decides:
+	@echo '--- android: kotlin decides nothing'
+	@python3 tools/kotlin-decides-nothing.py
 
 ## android-test: run the store's suite on a connected device or emulator
 #
