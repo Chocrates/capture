@@ -349,3 +349,64 @@ fn a_fresh_store_reports_no_unexpected_admissions() {
         "a device reported its own admission as unexpected: {out}"
     );
 }
+
+// ------------------------------------------------------------------ split ----
+
+#[test]
+fn a_series_can_be_changed_from_one_occurrence_onward() {
+    // §3.5, and until now a store function with nothing able to call it. The
+    // gate that looks for public items with no caller is what found it.
+    let s = Store::new("split-series");
+    s.ok(&["+", "standup every weekday at 9"]);
+    // Promotion is a sweep that runs on any writing session but not on a
+    // capture's, so the series does not exist until something else writes.
+    s.ok(&["+", "anything at all"]);
+
+    let timeline = s.ok(&["timeline", "--json"]);
+    let slug = timeline
+        .split('"')
+        .find(|w| w.starts_with("standup-every-weekday-"))
+        .expect("the series was captured")
+        .to_string();
+
+    let out = s.ok(&[
+        "split",
+        &slug,
+        "--from",
+        "2026-10-01",
+        "--to",
+        "every tuesday at 9",
+    ]);
+    assert!(out.contains("keep the old rule"), "{out}");
+
+    // Two notes with the same text: the original, bounded, and the new rule
+    // from the boundary on. That is what a split is, and the message says so
+    // because otherwise it reads as a duplicate.
+    let after = s.ok(&["timeline", "--json"]);
+    assert_eq!(
+        after.matches("standup-every-weekday-").count(),
+        2,
+        "expected the original and its continuation: {after}"
+    );
+}
+
+#[test]
+fn splitting_on_something_that_is_not_a_rule_says_so() {
+    // The rule is checked before the store is opened. When the checks ran the
+    // other way round, a bad rule on an already-split series was reported as
+    // "no occurrence after that point", which sends the reader to the wrong
+    // problem entirely.
+    let s = Store::new("split-bad-rule");
+    s.ok(&["+", "standup every weekday at 9"]);
+    s.ok(&["+", "anything at all"]);
+    let timeline = s.ok(&["timeline", "--json"]);
+    let slug = timeline
+        .split('"')
+        .find(|w| w.starts_with("standup-every-weekday-"))
+        .expect("captured")
+        .to_string();
+
+    let (code, out) = s.run(&["split", &slug, "--from", "2026-10-01", "--to", "buy milk"]);
+    assert!(code != 0, "a non-rule was accepted");
+    assert!(out.contains("not a repeating rule"), "{out}");
+}

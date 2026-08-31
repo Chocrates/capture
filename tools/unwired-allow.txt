@@ -6,4 +6,4 @@
 #
 #   name: reason
 
-split_series: M2 recurrence, built and tested with no surface to invoke it. Splitting a series at an occurrence needs a recurrence rule parsed from text, which is a command design rather than a wiring job. Recorded in openspec/changes/m3-sync/tasks.md under follow-ups; the gate found it, which is the gate working.
+# (empty — nothing is currently exempt)

@@ -120,6 +120,7 @@ fn run(command: Command) -> Result<()> {
         Command::ExportsPruned => ops::exports_pruned(paths()?),
         Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
         Command::Peers { json } => ops::peers(&paths()?, json),
+        Command::Split { name, from, rule } => write::split_series(paths()?, &name, &from, &rule),
         Command::Retire { key, force } => pair::retire(paths()?, &key, force),
         Command::Cosign { blob } => pair::cosign(paths()?, &blob),
         Command::Readmit { cosign, by } => {

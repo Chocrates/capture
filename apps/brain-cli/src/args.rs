@@ -125,6 +125,12 @@ pub enum Command {
         code: Option<String>,
         at: Option<String>,
     },
+    /// Change a recurring series from one occurrence onward.
+    Split {
+        name: String,
+        from: String,
+        rule: String,
+    },
     /// Stop accepting anything a device authors from now on.
     Retire { key: String, force: bool },
     /// Vouch for another device's re-admission.
@@ -639,6 +645,25 @@ where
                 problem: "give the key shown in brain peers".into(),
             }),
         },
+        "split" => {
+            let rest = &args[1..];
+            let after = |flag: &str| {
+                rest.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| rest.get(i + 1).cloned())
+            };
+            let name = rest.iter().find(|a| !a.starts_with('-')).cloned();
+            match (name, after("--from"), after("--to")) {
+                (Some(name), Some(from), Some(rule)) if name != from && name != rule => {
+                    Ok(Command::Split { name, from, rule })
+                }
+                _ => Err(Bad::Value {
+                    command: "split".into(),
+                    problem: "brain split NAME --from 2026-09-15 --to \"every tuesday at 9\""
+                        .into(),
+                }),
+            }
+        }
         "cosign" => match args[1..].iter().find(|a| !a.starts_with('-')) {
             Some(blob) => Ok(Command::Cosign { blob: blob.clone() }),
             None => Err(Bad::Value {
@@ -902,6 +927,9 @@ OPERATING
   brain pair              show a code, and admit whoever types it
   brain pair CODE --at ADDR
                           type a code shown on another device
+  brain split NAME --from DATE --to RULE
+                          change a repeating series from one occurrence on,
+                          leaving what it was before it alone
   brain peers             every device in the roster, and when it was
                           last reached
   brain retire KEY        stop accepting what a device writes from now on
