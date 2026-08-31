@@ -625,6 +625,289 @@ fn the_order_admissions_arrive_in_does_not_matter() {
     assert_eq!(backwards.keys.len(), 3);
 }
 
+// ------------------------------------------------------------ retirement ----
+
+/// A stolen phone, and the two devices left behind.
+fn mesh() -> (
+    testing::Origin,
+    testing::Origin,
+    testing::Origin,
+    Vec<Envelope>,
+) {
+    let mut laptop = testing::Origin::new(0);
+    let mut desktop = testing::Origin::new(1);
+    let phone = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let add_desktop = laptop.admits(&desktop);
+    let add_phone = laptop.admits(&phone);
+    desktop.observe(&add_desktop, 1_700_000_001_000);
+
+    (laptop, desktop, phone, vec![root, add_desktop, add_phone])
+}
+
+#[test]
+fn a_retired_key_is_no_longer_a_member() {
+    let (mut laptop, _desktop, phone, mut events) = mesh();
+    events.push(laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]));
+
+    let r = roster::build(&events);
+    assert!(
+        !r.keys.contains(&phone.pubkey()),
+        "the retired key is still a member"
+    );
+    assert_eq!(
+        r.head_of(&phone.dev()),
+        Some((15677, EventId([1; 32]))),
+        "the retirement did not record where the origin stops"
+    );
+}
+
+#[test]
+fn a_retired_devices_past_events_stay_valid() {
+    // They were legitimately authored. Discarding them would mean losing real
+    // notes, which is a worse outcome than the access the retirement closes.
+    let (mut laptop, _d, phone, mut events) = mesh();
+    events.push(laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]));
+
+    let r = roster::build(&events);
+    assert_eq!(
+        r.key_for(&phone.dev()),
+        Some(&phone.pubkey()),
+        "the origin lost the key its past events must still be checked against"
+    );
+}
+
+#[test]
+fn retirement_beats_a_concurrent_admission() {
+    // Deliberately the opposite of the add-wins rule for tags. For content,
+    // losing data is the worse outcome, so adds win; for access, granting
+    // unintended access is worse, so revocation wins. Without this a stolen
+    // device need only be re-added by any member — or by itself, once it had
+    // compromised one.
+    let (mut laptop, mut desktop, phone, mut events) = mesh();
+    let retire = laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]);
+    desktop.observe(&retire, 1_700_000_002_000);
+    let re_add = desktop.admits(&phone);
+    let re_add_id = re_add.header.id();
+    events.push(retire);
+    events.push(re_add);
+
+    let r = roster::build(&events);
+    assert!(
+        !r.keys.contains(&phone.pubkey()),
+        "an ordinary admission undid a retirement"
+    );
+    assert_eq!(
+        r.refused.get(&re_add_id),
+        Some(&roster::Refusal::RetiredKey)
+    );
+}
+
+#[test]
+fn the_lowest_head_wins_between_two_retirements() {
+    // Two devices retiring the same stolen phone name whatever seq each had
+    // seen. Lowest wins: it is the safe direction, excluding the events whose
+    // provenance is in doubt. Without a rule the replicas permanently disagree
+    // about which events exist, and nothing flags it — divergences tracks note
+    // bodies only.
+    let (mut laptop, mut desktop, phone, mut events) = mesh();
+    events.push(laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]));
+    events.push(desktop.retires(&phone, &[(phone.dev(), 15000, EventId([2; 32]))]));
+
+    let r = roster::build(&events);
+    assert_eq!(r.head_of(&phone.dev()), Some((15000, EventId([2; 32]))));
+}
+
+#[test]
+fn the_lowest_head_wins_whichever_order_they_arrive() {
+    let (mut laptop, mut desktop, phone, base) = mesh();
+    let high = laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]);
+    let low = desktop.retires(&phone, &[(phone.dev(), 15000, EventId([2; 32]))]);
+
+    let mut forwards = base.clone();
+    forwards.extend([high.clone(), low.clone()]);
+    let mut backwards = base;
+    backwards.extend([low, high]);
+
+    assert_eq!(
+        roster::build(&forwards).head_of(&phone.dev()),
+        roster::build(&backwards).head_of(&phone.dev()),
+        "two replicas disagree about where a retired origin stops"
+    );
+}
+
+#[test]
+fn a_reissue_widens_where_a_concurrent_retirement_would_narrow() {
+    // The two rules in §5.3 are in tension: lowest-head-wins is right between
+    // concurrent retirements, and wrong for a reissue, which exists precisely
+    // to name a *later* head once the retired device turns out to have
+    // propagated further. Naming the retirement being replaced separates them.
+    let (mut laptop, _d, phone, base) = mesh();
+    let narrow = laptop.retires(&phone, &[(phone.dev(), 15000, EventId([2; 32]))]);
+    let wider = laptop.retires_superseding(
+        &phone,
+        &[(phone.dev(), 15677, EventId([1; 32]))],
+        Some(narrow.header.id()),
+    );
+
+    let mut events = base;
+    events.extend([narrow, wider]);
+    assert_eq!(
+        roster::build(&events).head_of(&phone.dev()),
+        Some((15677, EventId([1; 32])))
+    );
+}
+
+#[test]
+fn a_reissue_wins_whichever_order_it_arrives_in() {
+    // Superseded retirements are collected before any is applied. Otherwise a
+    // replica that saw the reissue first would then apply the older, narrower
+    // claim on top of it and disagree with one that saw them the other way
+    // round — a permanent disagreement about which events exist.
+    let (mut laptop, _d, phone, base) = mesh();
+    let narrow = laptop.retires(&phone, &[(phone.dev(), 15000, EventId([2; 32]))]);
+    let wider = laptop.retires_superseding(
+        &phone,
+        &[(phone.dev(), 15677, EventId([1; 32]))],
+        Some(narrow.header.id()),
+    );
+
+    let mut forwards = base.clone();
+    forwards.extend([narrow.clone(), wider.clone()]);
+    let mut backwards = base;
+    backwards.extend([wider, narrow]);
+
+    assert_eq!(
+        roster::build(&forwards).head_of(&phone.dev()),
+        roster::build(&backwards).head_of(&phone.dev())
+    );
+}
+
+#[test]
+fn the_last_member_cannot_retire_itself() {
+    // A roster with nobody in it can never admit anyone again: device_add
+    // needs a signature from a current member.
+    let mut laptop = testing::Origin::new(0);
+    let root = laptop.roster_root();
+    let suicide = laptop.retires_self();
+    let id = suicide.header.id();
+
+    let r = roster::build(&[root, suicide]);
+    assert!(r.is_bootstrapped(), "the roster was emptied");
+    assert_eq!(
+        r.refused.get(&id),
+        Some(&roster::Refusal::WouldEmptyTheRoster)
+    );
+}
+
+#[test]
+fn a_device_does_not_accept_being_retired_by_someone_else() {
+    // The first lockout guard. Any member may retire any member, so one
+    // malfunctioning device could retire every other; a device therefore does
+    // not lock itself out on another's say-so alone. Replicas disagree
+    // afterwards, and that is the intent.
+    let (mut laptop, desktop, _p, mut events) = mesh();
+    events.push(laptop.retires(&desktop, &[(desktop.dev(), 40, EventId([3; 32]))]));
+
+    let mut r = roster::build(&events);
+    assert!(
+        !r.keys.contains(&desktop.pubkey()),
+        "as every other device sees it"
+    );
+
+    r.honour_self(&desktop.pubkey());
+    assert!(
+        r.keys.contains(&desktop.pubkey()),
+        "the device locked itself out on someone else's say-so"
+    );
+}
+
+#[test]
+fn a_device_does_accept_a_retirement_it_issued_itself() {
+    let (mut laptop, desktop, _p, mut events) = mesh();
+    let d_key = desktop.pubkey();
+    let mut desktop = desktop;
+    events.push(laptop.admits(&desktop));
+    events.push(desktop.retires_self());
+
+    let mut r = roster::build(&events);
+    r.honour_self(&d_key);
+    assert!(
+        !r.keys.contains(&d_key),
+        "a device ignored its own retirement"
+    );
+}
+
+#[test]
+fn a_stolen_device_is_unaffected_by_the_self_guard() {
+    // The guard protects the device from locking *itself* out. What retiring a
+    // stolen phone achieves is that its peers stop accepting its events, and
+    // they still do — the phone believing otherwise changes nothing.
+    let (mut laptop, desktop, phone, mut events) = mesh();
+    events.push(laptop.retires(&phone, &[(phone.dev(), 15677, EventId([1; 32]))]));
+
+    let mut as_the_desktop_sees_it = roster::build(&events);
+    as_the_desktop_sees_it.honour_self(&desktop.pubkey());
+    assert!(!as_the_desktop_sees_it.keys.contains(&phone.pubkey()));
+}
+
+// ------------------------------------------------------------ readmission ----
+
+#[test]
+fn two_signers_can_readmit_a_device_after_a_lockout() {
+    // Every honest device retired by one compromised member. device_add cannot
+    // help: it needs a current member's signature and there are none. Pairing
+    // cannot either — it bootstraps transport keys, while the roster entry
+    // that gates ingest still has to come from a member.
+    let (mut laptop, mut desktop, _p, mut events) = mesh();
+    events.push(laptop.retires(&desktop, &[(desktop.dev(), 40, EventId([3; 32]))]));
+    events.push(desktop.readmits_self(Some(&laptop)));
+
+    let r = roster::build(&events);
+    assert!(
+        r.keys.contains(&desktop.pubkey()),
+        "a co-signed re-admission did not restore membership"
+    );
+}
+
+#[test]
+fn a_readmission_signed_twice_by_one_device_is_refused() {
+    // Two signatures from one device are one device's say-so written twice,
+    // which is exactly the bar the second signer exists to raise.
+    let (mut laptop, mut desktop, _p, mut events) = mesh();
+    events.push(laptop.retires(&desktop, &[(desktop.dev(), 40, EventId([3; 32]))]));
+    let forged = desktop.readmits_self(None);
+    let id = forged.header.id();
+    events.push(forged);
+
+    let r = roster::build(&events);
+    assert!(!r.keys.contains(&desktop.pubkey()));
+    assert_eq!(r.refused.get(&id), Some(&roster::Refusal::NotTwoSigners));
+}
+
+#[test]
+fn a_readmission_with_a_bad_cosignature_is_refused() {
+    let (mut laptop, mut desktop, phone, mut events) = mesh();
+    events.push(laptop.retires(&desktop, &[(desktop.dev(), 40, EventId([3; 32]))]));
+
+    let mut forged = desktop.readmits_self(Some(&phone));
+    // Corrupt the co-signature, leaving everything else intact.
+    let mut body: brain_core::body::ReadmitBody =
+        minicbor::decode(forged.body.as_ref().unwrap()).unwrap();
+    body.cosign[0] ^= 0xFF;
+    let mut buf = Vec::new();
+    minicbor::encode(&body, &mut buf).unwrap();
+    forged.header.bhash = brain_core::id::BodyHash::of(&buf);
+    forged.body = Some(buf);
+    let id = forged.header.id();
+    events.push(forged);
+
+    let r = roster::build(&events);
+    assert!(!r.keys.contains(&desktop.pubkey()));
+    assert_eq!(r.refused.get(&id), Some(&roster::Refusal::BadCosignature));
+}
+
 #[test]
 fn the_roster_secret_is_the_latest_rotation() {
     let mut a = testing::Origin::new(0);

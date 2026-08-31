@@ -23,8 +23,9 @@ use brain_core::{
     body::{
         AliasBody, Ambient, CaptureBody, Cue, EditBody, EventFields, IntentBody, MuteBody,
         MuteScope, OccBody, OccEditBody, OccMoveBody, OriginClaimBody, Outcome, ParentBody,
-        PromoteBody, Promoted, RedactBody, RedactScope, ReviewBody, RosterKeyBody, RuleSpec,
-        SeriesFields, SettingBody, TagBody, TaskFields, When,
+        PromoteBody, Promoted, ReadmitBody, RedactBody, RedactScope, RetireBody, RetiredHead,
+        ReviewBody, RosterKeyBody, RuleSpec, SeriesFields, SettingBody, TagBody, TaskFields, When,
+        readmit_digest,
     },
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::Hlc,
@@ -731,5 +732,80 @@ fn a_roster_key_encodes_the_same_way_for_ever() {
         // array(2) · nonce(16) · secret(32). No optional tail: a rotation
         // that did not say what the new key is would be meaningless.
         "82501111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222"
+    );
+}
+
+/// A retirement outlives the device it retires, and has to be readable by
+/// every build that comes after — including ones written long after the
+/// device is gone.
+#[test]
+fn a_retirement_encodes_the_same_way_for_ever() {
+    let b = RetireBody {
+        nonce: [0x11; 16],
+        pubkey: [0x22; 32],
+        heads: vec![RetiredHead {
+            dev: Dev([0x33; 32]),
+            seq: 15677,
+            last: EventId([0x44; 32]),
+        }],
+        // Absent, and therefore elided: an ordinary retirement is one array
+        // element shorter than a reissue, which is what tells the two apart.
+        supersedes: None,
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        // array(3) · nonce(16) · retired key(32) · heads: array(1) of
+        // [dev(32), seq, last(32)]. The head is a pair, not a bare sequence
+        // number: a number alone could be claimed by a forged event sitting
+        // at that position.
+        "83501111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222818358203333333333333333333333333333333333333333333333333333333333333333193d3d58204444444444444444444444444444444444444444444444444444444444444444"
+    );
+}
+
+/// The one event whose validity does not descend from roster membership.
+#[test]
+fn a_readmission_encodes_the_same_way_for_ever() {
+    let b = ReadmitBody {
+        nonce: [0x11; 16],
+        pubkey: [0x22; 32],
+        incarnation: [0x33; 16],
+        cosigner: [0x44; 32],
+        cosign: [0x55; 64],
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        // array(5) · nonce(16) · subject(32) · incarnation(16) · cosigner(32)
+        // · cosignature(64)
+        "85501111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222503333333333333333333333333333333358204444444444444444444444444444444444444444444444444444444444444444584055555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"
+    );
+}
+
+/// What the second signer signs. Frozen because a co-signature produced by one
+/// build has to verify on every other — a device in a lockout is not in a
+/// position to upgrade first.
+#[test]
+fn the_readmission_digest_is_fixed_for_ever() {
+    assert_eq!(
+        hex(&readmit_digest(&[0x22; 32], &[0x33; 16], &[0x11; 16])),
+        "69f8f9d159afc26756ad5b777058e5ca412b4dabdfd08e595e7caf6ed0aba2e7"
+    );
+}
+
+/// A reissue, which is a retirement plus the one it replaces. Written down
+/// separately because the difference between the two shapes is what decides
+/// whether a head widens or narrows.
+#[test]
+fn a_reissued_retirement_encodes_the_same_way_for_ever() {
+    let b = RetireBody {
+        nonce: [0x11; 16],
+        pubkey: [0x22; 32],
+        heads: vec![],
+        supersedes: Some(EventId([0x55; 32])),
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        // array(4), where an ordinary retirement is array(3): nonce(16) ·
+        // key(32) · heads: array(0) · superseded id(32).
+        "845011111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222228058205555555555555555555555555555555555555555555555555555555555555555"
     );
 }

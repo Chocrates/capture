@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use minicbor::{Decode, Encode};
 
-use crate::{Nonce, id::EventId};
+use crate::{Dev, Nonce, id::EventId};
 
 /// Raw captured input. Never rejected, never validated.
 #[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
@@ -728,4 +728,90 @@ pub struct RosterKeyBody {
     /// means.
     #[cbor(n(1), with = "minicbor::bytes")]
     pub secret: [u8; 32],
+}
+
+/// One origin's last legitimate event, as the retiring device saw it.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct RetiredHead {
+    /// The origin.
+    #[n(0)]
+    pub dev: Dev,
+    /// Its last sequence number that is to be honoured.
+    #[n(1)]
+    pub seq: u64,
+    /// And that event's id, so the head is checkable rather than merely
+    /// asserted — a sequence number alone could be claimed by a forged event
+    /// occupying the position.
+    #[n(2)]
+    pub last: EventId,
+}
+
+/// The body of a `device_retire`.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct RetireBody {
+    /// Hiding salt.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub nonce: [u8; 16],
+    /// The key being retired. Not an origin: retiring an origin would let a
+    /// stolen device mint a fresh incarnation and return.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub pubkey: [u8; 32],
+    /// A head per origin the issuer knows that key to have authored under.
+    #[n(2)]
+    pub heads: Vec<RetiredHead>,
+    /// A prior retirement this one replaces.
+    ///
+    /// Two rules in §5.3 are in tension without this. Between *concurrent*
+    /// retirements the lowest head wins, because that is the safe direction —
+    /// it excludes the events whose provenance is in doubt. But a retirement
+    /// may also be *reissued* naming a later head, when the retired device
+    /// turns out to have propagated events past the first one, and under
+    /// lowest-wins a reissue could never widen anything.
+    ///
+    /// Naming the retirement being replaced separates the two cases explicitly
+    /// rather than hoping arrival order distinguishes them — which it cannot,
+    /// since there is no causal ordering to read off a timestamp. A reissue is
+    /// therefore a deliberate decision about what to keep, which is what the
+    /// design says it is.
+    #[n(3)]
+    pub supersedes: Option<EventId>,
+}
+
+/// The body of a `device_readmit`: an admission signed by two keys.
+///
+/// The second signature cannot cover the event id, because the id covers the
+/// body hash and the body is where the second signature lives. It covers the
+/// subject instead — see [`readmit_digest`] — which is the thing that actually
+/// needs two people to agree on.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct ReadmitBody {
+    /// Hiding salt.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub nonce: [u8; 16],
+    /// The key being re-admitted.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub pubkey: [u8; 32],
+    /// The incarnation whose origin is being re-admitted with it.
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub incarnation: [u8; 16],
+    /// The second signer's key. May itself be retired — that is the point.
+    #[cbor(n(3), with = "minicbor::bytes")]
+    pub cosigner: [u8; 32],
+    /// The second signature, over [`readmit_digest`].
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub cosign: [u8; 64],
+}
+
+/// What a re-admission's second signer signs.
+///
+/// Domain-separated, so a signature harvested from anywhere else in the system
+/// cannot be replayed as a co-signature — which would reduce "two devices
+/// agreeing" back to one.
+pub fn readmit_digest(pubkey: &[u8; 32], incarnation: &[u8; 16], nonce: &[u8; 16]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"bsp-readmit");
+    h.update(pubkey);
+    h.update(incarnation);
+    h.update(nonce);
+    *h.finalize().as_bytes()
 }

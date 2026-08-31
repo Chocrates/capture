@@ -124,12 +124,46 @@ impl Kind {
     /// (§5.3).
     pub const ROSTER_KEY: Kind = Kind(25);
 
+    /// Revoke a key's membership, naming the last event of each of its
+    /// origins that is to be honoured.
+    ///
+    /// A head rather than a timestamp. The obvious rule — reject what the
+    /// retired device authored "after" the retirement — cannot work, because
+    /// that device chooses its own `hlc` and can simply backdate; there is no
+    /// causal ordering between a retirement and the events of the device being
+    /// retired. The per-origin hash chain makes a head enforceable instead:
+    /// every event names its predecessor, so anything beyond the named one is
+    /// provably outside the retired history whatever timestamp it claims.
+    ///
+    /// It retires the **key**, not an origin. Retiring an origin would let a
+    /// stolen device mint a fresh incarnation and walk straight back in, which
+    /// would make the whole remedy evaporate on one restart.
+    pub const DEVICE_RETIRE: Kind = Kind(26);
+
+    /// Re-admit a key, signed by two.
+    ///
+    /// The only event whose validity does not descend from current roster
+    /// membership, and that exception is stated rather than left implicit.
+    ///
+    /// It exists because any member may retire any member, so one compromised
+    /// or malfunctioning device can retire every other — after which no honest
+    /// device can re-admit anything, since `device_add` requires a signature
+    /// from a current member and there are none left. Pairing does not rescue
+    /// it either: pairing bootstraps transport keys, while the roster entry
+    /// that gates ingest still has to come from a member. Both devices would
+    /// sit there able to talk and unable to accept each other.
+    ///
+    /// Forging one requires compromising two devices *and* being in the room
+    /// with them, which is a materially higher bar than the single compromised
+    /// device that caused the lockout.
+    pub const DEVICE_READMIT: Kind = Kind(27);
+
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=25).contains(&self.0)
+        (1..=27).contains(&self.0)
     }
 }
 
@@ -231,6 +265,8 @@ mod m2_kinds {
         assert_eq!(Kind::OCC_UNDONE.0, 23);
         assert_eq!(Kind::PARENT.0, 24);
         assert_eq!(Kind::ROSTER_KEY.0, 25);
+        assert_eq!(Kind::DEVICE_RETIRE.0, 26);
+        assert_eq!(Kind::DEVICE_READMIT.0, 27);
     }
 
     #[test]
@@ -238,7 +274,7 @@ mod m2_kinds {
         // The boundary has to keep working after it moves. An event written by
         // a build that knows one more kind than this one must be held rather
         // than discarded or misread as something it knows.
-        assert!(!Kind(26).is_known());
+        assert!(!Kind(28).is_known());
         assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }

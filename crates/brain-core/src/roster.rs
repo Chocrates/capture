@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 
 use crate::{
     Dev, Incarnation,
-    body::{OriginClaimBody, RosterKeyBody},
+    body::{OriginClaimBody, ReadmitBody, RetireBody, RosterKeyBody, readmit_digest},
     envelope::Envelope,
     event::Kind,
     id::EventId,
@@ -58,6 +58,20 @@ pub struct Roster {
     pub keys: BTreeSet<[u8; 32]>,
     /// Which key each origin authors under.
     pub origins: BTreeMap<Dev, [u8; 32]>,
+    /// Keys that have been retired, and the last event of each of their
+    /// origins that is to be honoured.
+    ///
+    /// Kept rather than removed. A retired device's past events remain valid —
+    /// they were legitimately authored, and discarding them would mean losing
+    /// real notes — so what a retirement changes is where an origin *stops*,
+    /// not whether it ever existed.
+    pub retired: BTreeMap<[u8; 32], BTreeMap<Dev, (u64, EventId)>>,
+    /// Who issued each retirement.
+    ///
+    /// Recorded because "a retirement of myself that I did not issue" is not
+    /// answerable from the retirement alone, and that distinction is the first
+    /// of the three lockout guards (§5.3).
+    pub retired_by: BTreeMap<[u8; 32], BTreeSet<[u8; 32]>>,
     /// The shared secret discovery advertises under (§5.2), latest wins.
     ///
     /// `None` on an archive written before sync existed. That is not a defect
@@ -84,6 +98,32 @@ pub enum Refusal {
     OriginDoesNotMatchKey,
     /// It claims an origin for a key that is not a member.
     KeyIsNotAMember,
+    /// A retirement that would leave no members at all.
+    ///
+    /// Refused locally rather than folded, because a roster with nobody in it
+    /// can never admit anyone again: `device_add` needs a signature from a
+    /// current member.
+    WouldEmptyTheRoster,
+    /// A retirement or re-admission naming a key the roster does not hold.
+    NotAMember,
+    /// A re-admission whose second signature does not check out.
+    ///
+    /// The co-signature is the entire difference between this and an ordinary
+    /// admission — it is what makes forging one require two compromised
+    /// devices rather than one.
+    BadCosignature,
+    /// A re-admission signed twice by the same key.
+    ///
+    /// Two signatures from one device are one device's say-so written twice.
+    NotTwoSigners,
+    /// An admission for a key that has been retired.
+    ///
+    /// Retirement wins over a concurrent admission, deliberately the opposite
+    /// of the add-wins rule used for tags: for content, losing data is the
+    /// worse outcome, so adds win; for access, granting unintended access is
+    /// the worse outcome, so revocation wins. Re-admission is the deliberate
+    /// route back, and it needs two signers.
+    RetiredKey,
     /// An admission signed by an origin the roster does not know.
     ///
     /// Usually premature rather than hostile: the admitter's own admission may
@@ -96,6 +136,38 @@ impl Roster {
     /// The key an origin authors under, if the roster knows.
     pub fn key_for(&self, dev: &Dev) -> Option<&[u8; 32]> {
         self.origins.get(dev)
+    }
+
+    /// Undo a retirement of this device that this device did not issue.
+    ///
+    /// The first lockout guard (§5.3). Any member may retire any member, so a
+    /// compromised or malfunctioning device can retire every other one, after
+    /// which nothing honest can be re-admitted without the two-signature
+    /// route. A device therefore does not accept being retired on someone
+    /// else's say-so alone.
+    ///
+    /// This deliberately makes replicas disagree: the retired device still
+    /// considers itself a member while its peers do not. That is the point —
+    /// the alternative is a device that has locked itself out on the strength
+    /// of one event it had no part in. A stolen device is unaffected, because
+    /// what retiring it achieves is that its *peers* stop accepting its
+    /// events, which they still do.
+    pub fn honour_self(&mut self, own: &[u8; 32]) {
+        let issued_by_me = self
+            .retired_by
+            .get(own)
+            .is_some_and(|issuers| issuers.contains(own));
+        if self.retired.contains_key(own) && !issued_by_me {
+            self.retired.remove(own);
+            self.retired_by.remove(own);
+            self.keys.insert(*own);
+        }
+    }
+
+    /// Where a retired origin stops, if it is retired at all.
+    pub fn head_of(&self, dev: &Dev) -> Option<(u64, EventId)> {
+        let key = self.origins.get(dev)?;
+        self.retired.get(key)?.get(dev).copied()
     }
 
     /// Whether the roster has a root at all.
@@ -120,11 +192,30 @@ pub fn build(events: &[Envelope]) -> Roster {
         .filter(|e| {
             matches!(
                 e.header.kind,
-                Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM | Kind::ROSTER_KEY
+                Kind::DEVICE_ADD
+                    | Kind::ORIGIN_CLAIM
+                    | Kind::ROSTER_KEY
+                    | Kind::DEVICE_RETIRE
+                    | Kind::DEVICE_READMIT
             )
         })
         .collect();
     ordered.sort_by_key(|e| e.header.hlc);
+
+    // Which retirements have been replaced by a reissue. Collected before
+    // anything is applied, so the outcome does not depend on the order the two
+    // arrived in — a replica that saw the reissue first must reach the same
+    // roster as one that saw it second.
+    let mut superseded = BTreeSet::new();
+    for e in &ordered {
+        if e.header.kind == Kind::DEVICE_RETIRE
+            && let Some(body) = e.body.as_deref()
+            && let Ok(b) = minicbor::decode::<RetireBody>(body)
+            && let Some(old) = b.supersedes
+        {
+            superseded.insert(old);
+        }
+    }
 
     let mut r = Roster::default();
     let mut root_seen = false;
@@ -136,6 +227,103 @@ pub fn build(events: &[Envelope]) -> Roster {
             // can be inferred from its absence.
             continue;
         };
+        if e.header.kind == Kind::DEVICE_RETIRE {
+            let Ok(body) = minicbor::decode::<RetireBody>(body) else {
+                continue;
+            };
+            if !r.origins.contains_key(&e.header.dev) {
+                r.refused.insert(id, Refusal::AdmitterIsNotAMember);
+                continue;
+            }
+            if superseded.contains(&id) {
+                // Replaced by a reissue naming a different head. Applying it
+                // would let the older, narrower claim win by arriving second.
+                continue;
+            }
+            let is_member = r.keys.contains(&body.pubkey);
+            let already_retired = r.retired.contains_key(&body.pubkey);
+            if !is_member && !already_retired {
+                r.refused.insert(id, Refusal::NotAMember);
+                continue;
+            }
+            if is_member && r.keys.len() == 1 {
+                // The last member cannot retire itself into a roster nobody
+                // can ever join.
+                r.refused.insert(id, Refusal::WouldEmptyTheRoster);
+                continue;
+            }
+            // A second retirement of a key already retired is not redundant:
+            // it is how the lowest head wins. Refusing it as "not a member"
+            // would defeat the only rule that keeps two replicas agreeing
+            // about where a retired origin stops.
+
+            r.keys.remove(&body.pubkey);
+            if let Some(issuer) = r.origins.get(&e.header.dev).copied() {
+                r.retired_by.entry(body.pubkey).or_default().insert(issuer);
+            }
+            let reissue = body.supersedes.is_some();
+            let heads = r.retired.entry(body.pubkey).or_default();
+            for h in body.heads {
+                if reissue {
+                    // A deliberate decision about what to keep, replacing
+                    // whatever the retirement it names had said.
+                    heads.insert(h.dev, (h.seq, h.last));
+                    continue;
+                }
+                heads
+                    .entry(h.dev)
+                    .and_modify(|held| {
+                        // Two devices retiring the same stolen phone will each
+                        // name whatever they had seen. Lowest wins, per
+                        // origin: it is the safe direction, excluding the
+                        // events whose provenance is in doubt. Without a rule
+                        // the two replicas permanently disagree about which
+                        // events exist, and nothing would flag it —
+                        // `divergences` tracks note bodies only.
+                        if h.seq < held.0 {
+                            *held = (h.seq, h.last);
+                        }
+                    })
+                    .or_insert((h.seq, h.last));
+            }
+            continue;
+        }
+
+        if e.header.kind == Kind::DEVICE_READMIT {
+            let Ok(body) = minicbor::decode::<ReadmitBody>(body) else {
+                continue;
+            };
+            if body.cosigner == body.pubkey {
+                // The subject vouching for itself is one device's say-so.
+                r.refused.insert(id, Refusal::NotTwoSigners);
+                continue;
+            }
+            let digest = readmit_digest(&body.pubkey, &body.incarnation, &body.nonce);
+            let ok = ed25519_dalek::VerifyingKey::from_bytes(&body.cosigner)
+                .ok()
+                .and_then(|k| {
+                    let sig = ed25519_dalek::Signature::from_bytes(&body.cosign);
+                    k.verify_strict(&digest, &sig).ok()
+                })
+                .is_some();
+            if !ok {
+                r.refused.insert(id, Refusal::BadCosignature);
+                continue;
+            }
+
+            // Valid even when both signers are retired: in a lockout every
+            // honest device has been, and requiring membership here would
+            // make the remedy unusable exactly when it is needed.
+            r.retired.remove(&body.pubkey);
+            r.retired_by.remove(&body.pubkey);
+            r.keys.insert(body.pubkey);
+            r.origins.insert(
+                Dev::derive(&body.pubkey, &Incarnation(body.incarnation)),
+                body.pubkey,
+            );
+            continue;
+        }
+
         if e.header.kind == Kind::ROSTER_KEY {
             // Ordered by timestamp, so the last rotation any replica has seen
             // is the one it advertises under. A device still holding an older
@@ -195,6 +383,14 @@ pub fn build(events: &[Envelope]) -> Roster {
                 // so an outsider cannot sign one at all.
                 if !r.origins.contains_key(&e.header.dev) {
                     r.refused.insert(id, Refusal::AdmitterIsNotAMember);
+                    continue;
+                }
+                if r.retired.contains_key(&claim.pubkey) {
+                    // Retire wins, whatever the order. A retirement that could
+                    // be undone by an ordinary admission would mean a stolen
+                    // device merely had to be re-added by any member — or by
+                    // itself, once it had compromised one.
+                    r.refused.insert(id, Refusal::RetiredKey);
                     continue;
                 }
                 r.keys.insert(claim.pubkey);

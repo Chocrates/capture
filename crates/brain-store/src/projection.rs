@@ -2060,14 +2060,31 @@ impl Store {
         tx.execute("DELETE FROM roster", [])?;
         for k in &r.keys {
             tx.execute(
-                "INSERT INTO roster (pubkey) VALUES (?1)",
+                "INSERT INTO roster (pubkey, retired) VALUES (?1, 0)",
+                params![k.to_vec()],
+            )?;
+        }
+        // Retired keys are rows too, not absences. Their origins' past events
+        // are still verified against them — those events were legitimately
+        // authored — so the key has to be here for `roster_origins` to point
+        // at, and "retired" is a property of the row rather than its absence.
+        for k in r.retired.keys() {
+            tx.execute(
+                "INSERT OR IGNORE INTO roster (pubkey, retired) VALUES (?1, 1)",
                 params![k.to_vec()],
             )?;
         }
         for (dev, k) in &r.origins {
+            let head = r.retired.get(k).and_then(|heads| heads.get(dev));
             tx.execute(
-                "INSERT INTO roster_origins (dev, pubkey) VALUES (?1, ?2)",
-                params![dev_hex(dev), k.to_vec()],
+                "INSERT INTO roster_origins (dev, pubkey, retire_head, retire_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    dev_hex(dev),
+                    k.to_vec(),
+                    head.map(|(seq, _)| *seq as i64),
+                    head.map(|(_, id)| id.0.to_vec()),
+                ],
             )?;
         }
         for (id, why) in &r.refused {
@@ -2086,7 +2103,12 @@ impl Store {
     /// because the projection may be stale, and a stale roster admits events
     /// under keys that were retired.
     pub fn roster_keys(&self) -> Result<std::collections::BTreeSet<[u8; 32]>> {
-        let mut q = self.conn.prepare("SELECT pubkey FROM roster")?;
+        // Current members only. A retired key is a row here so that its
+        // origins' past events still verify, and reporting it as a member
+        // would undo the retirement everywhere the projection is read.
+        let mut q = self
+            .conn
+            .prepare("SELECT pubkey FROM roster WHERE retired = 0")?;
         let rows = q.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = std::collections::BTreeSet::new();
         for r in rows {
@@ -2129,6 +2151,33 @@ impl Store {
             params![id.0.to_vec(), dev_hex(dev), seq as i64, reason, at as i64],
         )?;
         Ok(())
+    }
+
+    /// Everything set aside for one reason, with where it sits.
+    ///
+    /// The position is what makes a reason like `post_retire` re-evaluable: a
+    /// retirement reissued with a later head re-admits exactly the events
+    /// below it, and deciding that needs the sequence number rather than only
+    /// the id.
+    pub fn quarantined_at(&self, reason: &str) -> Result<Vec<(EventId, String, u64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT event_id, dev, seq FROM quarantine WHERE reason = ?1 ORDER BY dev, seq",
+        )?;
+        let rows = st.query_map(params![reason], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, dev, seq) = r?;
+            if let Ok(id) = <[u8; 32]>::try_from(id.as_slice()) {
+                out.push((EventId(id), dev, seq as u64));
+            }
+        }
+        Ok(out)
     }
 
     /// Release an event from quarantine, once it can be used.
@@ -2750,7 +2799,12 @@ fn link_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRow> {
     })
 }
 
-fn dev_hex(d: &Dev) -> String {
+/// How an origin is spelled in every table that stores one.
+///
+/// Public because the quarantine's `dev` column is compared against it from
+/// outside this module, and re-deriving the spelling at the call site is how
+/// two spellings appear.
+pub fn dev_hex(d: &Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 

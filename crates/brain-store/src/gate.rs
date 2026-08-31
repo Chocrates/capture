@@ -118,6 +118,24 @@ impl<'a> Gate<'a> {
             return Ok(Outcome::Refused(Rejection::UnknownOrigin));
         };
 
+        // Past the head a retirement named. The event is authentic — the
+        // signature checks out under the origin's own key — so it is set
+        // aside rather than rejected: rejection would leave a hole in the
+        // origin's numbering that anti-entropy re-requests for ever.
+        //
+        // The head is enforceable where a timestamp would not be. A retired
+        // device chooses its own `hlc` and can backdate, and there is no
+        // causal ordering between a retirement and the events of the device
+        // being retired — but the per-origin chain makes "beyond this event"
+        // provable whatever the clock says.
+        if let Some((head, _)) = self.roster.head_of(&e.header.dev)
+            && e.header.seq > head
+        {
+            self.state
+                .quarantine(&id, &e.header.dev, e.header.seq, "post_retire", at)?;
+            return Ok(Outcome::SetAside("post_retire"));
+        }
+
         let took = self.log.ingest(e, &key)?;
         match took {
             Ingested::Rejected(r) => {
@@ -149,6 +167,27 @@ impl<'a> Gate<'a> {
         self.state.write_roster(&self.roster)?;
 
         let mut admitted = 0;
+        // A retirement reissued naming a later head re-admits exactly the
+        // events below it — an explicit decision about what to keep, rather
+        // than a silent race. Nothing else would reconsider them: they are
+        // authentic, so no arrival of a key or a claim changes anything about
+        // them.
+        //
+        // Released against the *current* head rather than unconditionally.
+        // Releasing everything would re-admit the events the retirement exists
+        // to exclude, which is the whole remedy undone by a housekeeping loop.
+        for (id, dev, seq) in self.state.quarantined_at("post_retire")? {
+            let still_excluded = self
+                .roster
+                .origins
+                .keys()
+                .find(|d| crate::projection::dev_hex(d) == dev)
+                .and_then(|d| self.roster.head_of(d))
+                .is_some_and(|(head, _)| seq > head);
+            if !still_excluded {
+                self.state.release(&id)?;
+            }
+        }
         for (id, raw) in self.ops.retryable("UnknownOrigin")? {
             let Ok(e) = minicbor::decode::<Envelope>(&raw) else {
                 continue;
@@ -492,5 +531,153 @@ mod tests {
             Outcome::Took(Ingested::Duplicate)
         );
         assert_eq!(g.log.count().unwrap(), 2);
+    }
+    #[test]
+    fn a_retired_devices_later_events_are_set_aside() {
+        // The event is authentic — its signature checks out under the origin's
+        // own key — so it is set aside rather than rejected. Rejecting it would
+        // leave a hole in the origin's numbering, and anti-entropy would
+        // re-request that range from every peer for ever.
+        let mut b = bench("post-retire");
+        let mut laptop = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(2);
+
+        let root = laptop.roster_root();
+        let add_phone = laptop.admits(&phone);
+        phone.observe(&add_phone, 1_700_000_001_000);
+
+        let kept = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "before the phone was lost"),
+            1_700_000_002_000,
+        );
+        let after = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "written by whoever has it now"),
+            1_700_000_003_000,
+        );
+        let retire = laptop.retires(&phone, &[(phone.dev(), kept.header.seq, kept.header.id())]);
+
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        g.offer(&root, 100).unwrap();
+        g.offer(&add_phone, 101).unwrap();
+        g.offer(&kept, 102).unwrap();
+        g.offer(&retire, 103).unwrap();
+        g.reconsider().unwrap();
+
+        assert_eq!(
+            g.offer(&after, 104).unwrap(),
+            Outcome::SetAside("post_retire")
+        );
+    }
+
+    #[test]
+    fn a_backdated_event_from_a_retired_device_is_still_excluded() {
+        // The rule a timestamp cannot express. A retired device chooses its own
+        // hlc and can claim any moment it likes; the head is enforceable
+        // because the per-origin chain makes "beyond this event" provable
+        // whatever the clock says.
+        let mut b = bench("post-retire-backdated");
+        let mut laptop = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(2);
+
+        let root = laptop.roster_root();
+        let add_phone = laptop.admits(&phone);
+        phone.observe(&add_phone, 1_700_000_001_000);
+        let kept = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "legitimate"),
+            1_700_000_002_000,
+        );
+        // Authored *after* the retirement, stamped long before it.
+        let backdated = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "claims to predate the retirement"),
+            1_600_000_000_000,
+        );
+        let retire = laptop.retires(&phone, &[(phone.dev(), kept.header.seq, kept.header.id())]);
+
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        for e in [&root, &add_phone, &kept, &retire] {
+            g.offer(e, 100).unwrap();
+        }
+        g.reconsider().unwrap();
+
+        assert_eq!(
+            g.offer(&backdated, 105).unwrap(),
+            Outcome::SetAside("post_retire"),
+            "an event was admitted because it claimed an earlier timestamp"
+        );
+    }
+
+    #[test]
+    fn a_reissued_retirement_readmits_what_it_now_covers() {
+        // The retired device had already propagated events past the named
+        // head. Reissuing with a later head is the explicit decision about
+        // what to keep, and the events below it come back rather than staying
+        // set aside for ever.
+        let mut b = bench("post-retire-reissue");
+        let mut laptop = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(2);
+
+        let root = laptop.roster_root();
+        let add_phone = laptop.admits(&phone);
+        phone.observe(&add_phone, 1_700_000_001_000);
+        let first = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "one"),
+            1_700_000_002_000,
+        );
+        let second = phone.author(
+            brain_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "two"),
+            1_700_000_003_000,
+        );
+        let narrow = laptop.retires(
+            &phone,
+            &[(phone.dev(), first.header.seq, first.header.id())],
+        );
+
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops).unwrap();
+        for e in [&root, &add_phone, &first, &narrow] {
+            g.offer(e, 100).unwrap();
+        }
+        g.reconsider().unwrap();
+        assert_eq!(
+            g.offer(&second, 105).unwrap(),
+            Outcome::SetAside("post_retire")
+        );
+
+        // Reissued, naming both the later head and the retirement it
+        // replaces. Without naming it, lowest-head-wins would keep the
+        // narrower claim and a reissue could never widen anything.
+        let wider = laptop.retires_superseding(
+            &phone,
+            &[(phone.dev(), second.header.seq, second.header.id())],
+            Some(narrow.header.id()),
+        );
+        g.offer(&wider, 106).unwrap();
+        g.reconsider().unwrap();
+
+        assert!(
+            !b.state
+                .quarantined_at("post_retire")
+                .unwrap()
+                .iter()
+                .any(|(id, _, _)| *id == second.header.id()),
+            "the reissued retirement did not release the event it now covers"
+        );
     }
 }

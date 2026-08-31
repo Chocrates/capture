@@ -186,6 +186,73 @@ impl Origin {
         self.author(Kind::DEVICE_ADD, None, None, buf, 1_700_000_000_000)
     }
 
+    /// Retire another device, naming where each of its origins stops.
+    pub fn retires(&mut self, other: &Origin, heads: &[(Dev, u64, EventId)]) -> Envelope {
+        self.retires_superseding(other, heads, None)
+    }
+
+    /// Reissue a retirement, naming the one it replaces.
+    pub fn retires_superseding(
+        &mut self,
+        other: &Origin,
+        heads: &[(Dev, u64, EventId)],
+        supersedes: Option<EventId>,
+    ) -> Envelope {
+        let body = crate::body::RetireBody {
+            supersedes,
+            nonce: [0u8; 16],
+            pubkey: other.key.verifying_key().to_bytes(),
+            heads: heads
+                .iter()
+                .map(|(dev, seq, last)| crate::body::RetiredHead {
+                    dev: *dev,
+                    seq: *seq,
+                    last: *last,
+                })
+                .collect(),
+        };
+        let mut buf = Vec::new();
+        minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
+        self.author(Kind::DEVICE_RETIRE, None, None, buf, 1_700_000_000_000)
+    }
+
+    /// Retire this device, by its own hand.
+    pub fn retires_self(&mut self) -> Envelope {
+        let body = crate::body::RetireBody {
+            nonce: [0u8; 16],
+            pubkey: self.key.verifying_key().to_bytes(),
+            heads: Vec::new(),
+            supersedes: None,
+        };
+        let mut buf = Vec::new();
+        minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
+        self.author(Kind::DEVICE_RETIRE, None, None, buf, 1_700_000_000_000)
+    }
+
+    /// Re-admit this device, co-signed by another.
+    ///
+    /// `None` co-signs with this device's own key — the forgery the two-signer
+    /// rule exists to refuse, and therefore a thing a test has to be able to
+    /// build.
+    pub fn readmits_self(&mut self, cosigner: Option<&Origin>) -> Envelope {
+        let pubkey = self.key.verifying_key().to_bytes();
+        let nonce = [0u8; 16];
+        let digest = crate::body::readmit_digest(&pubkey, &self.inc.0, &nonce);
+        let signer = cosigner.map_or(&self.key, |o| &o.key);
+        let sig = ed25519_dalek::Signer::sign(signer, &digest);
+
+        let body = crate::body::ReadmitBody {
+            nonce,
+            pubkey,
+            incarnation: self.inc.0,
+            cosigner: signer.verifying_key().to_bytes(),
+            cosign: sig.to_bytes(),
+        };
+        let mut buf = Vec::new();
+        minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
+        self.author(Kind::DEVICE_READMIT, None, None, buf, 1_700_000_000_000)
+    }
+
     /// Author this origin's claim to author under its key.
     pub fn origin_claim(&mut self) -> Envelope {
         self.membership(Kind::ORIGIN_CLAIM)
