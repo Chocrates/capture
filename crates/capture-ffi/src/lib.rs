@@ -114,6 +114,46 @@ pub enum Captured {
     Spooled,
 }
 
+/// One thing happening on a day: an occurrence of a series, or a task due.
+///
+/// A list rather than a column-packed grid. The desktop packs overlapping
+/// entries into columns because it has the width for it; a phone agenda is
+/// read top to bottom, and packing would be work done to produce a layout
+/// nothing renders.
+#[derive(Debug, uniffi::Record)]
+pub struct AgendaEntry {
+    pub slug: String,
+    pub text: Option<String>,
+    /// When it starts. For an all-day entry this is the start of the day in
+    /// the archive's terms, not a real instant.
+    pub start_ms: i64,
+    /// A day rather than a moment. §3.6: "due Friday" is deliberately a
+    /// floating date, because 00:00 UTC on Friday is a different claim.
+    pub all_day: bool,
+    /// A task that is due, rather than an event that occupies time.
+    pub due: bool,
+    /// Already ticked off.
+    pub done: bool,
+}
+
+/// A named page, as the wiki sidebar lists it.
+#[derive(Debug, uniffi::Record)]
+pub struct Named {
+    pub slug: String,
+    pub alias: Option<String>,
+    /// The page this one sits under, where it sits under one.
+    pub parent: Option<String>,
+}
+
+/// Something true about the archive that is worth saying.
+#[derive(Debug, uniffi::Record)]
+pub struct Condition {
+    /// `attention` or `worth-knowing`. Two tiers, because a list where
+    /// everything is urgent is one where nothing is.
+    pub tier: String,
+    pub text: String,
+}
+
 /// An open archive.
 ///
 /// Holds no connection between calls. Every operation opens what it needs and
@@ -249,6 +289,128 @@ impl Archive {
                 out.push(summarise(n));
             }
         }
+        Ok(out)
+    }
+
+    /// What is happening on a day, and what is due.
+    ///
+    /// The date is a string like `2026-09-15` and is interpreted here rather
+    /// than by the caller. §3.6 and the time model decide what a day is,
+    /// including the daylight-saving cases, and a second answer to that
+    /// question is a calendar that disagrees with itself.
+    pub fn agenda(&self, day: String) -> Result<Vec<AgendaEntry>> {
+        let store = self.read()?;
+        let zone = capture_time::Zone::new("UTC").expect("UTC is always present");
+        let date =
+            capture_time::FloatingDate::parse(&day).ok_or_else(|| CaptureError::Refused {
+                reason: format!("{day:?} is not a date — write it as 2026-09-15"),
+            })?;
+        let from =
+            capture_time::at_local(date, 0, 0, zone).ok_or_else(|| CaptureError::Refused {
+                reason: format!("{day:?} is a day that does not exist"),
+            })?;
+        let to = from + 24 * 60 * 60 * 1000;
+
+        let mut out = Vec::new();
+
+        // All-day entries first, in their own band. They are floating dates
+        // with no position on an hour axis (§4.4).
+        for tgt in store.all_day_on(&day)? {
+            out.push(AgendaEntry {
+                slug: store.slug_of(&tgt)?.unwrap_or_default(),
+                text: store.text_of(&tgt)?,
+                start_ms: from,
+                all_day: true,
+                due: false,
+                done: false,
+            });
+        }
+
+        for (tgt, occ) in store.occurring_between(from, to)? {
+            out.push(AgendaEntry {
+                slug: store.slug_of(&tgt)?.unwrap_or_default(),
+                text: store.text_of(&tgt)?,
+                start_ms: occ.start_ms,
+                all_day: occ.all_day,
+                due: false,
+                done: occ.done,
+            });
+        }
+
+        for (tgt, done) in store.tasks_due_on(&day)? {
+            out.push(AgendaEntry {
+                slug: store.slug_of(&tgt)?.unwrap_or_default(),
+                text: store.text_of(&tgt)?,
+                start_ms: from,
+                all_day: true,
+                due: true,
+                done,
+            });
+        }
+
+        out.sort_by_key(|e| (e.all_day, e.start_ms));
+        Ok(out)
+    }
+
+    /// Every page that has a name, for the wiki.
+    pub fn named(&self) -> Result<Vec<Named>> {
+        let store = self.read()?;
+        Ok(store
+            .named()?
+            .into_iter()
+            .map(|n| Named {
+                slug: n.slug,
+                alias: Some(n.alias),
+                parent: n.parent,
+            })
+            .collect())
+    }
+
+    /// What the archive would like someone to know.
+    ///
+    /// Two tiers, and they are not severities: `attention` is something
+    /// wanting a decision, `worth-knowing` is something true that needs
+    /// nothing. A list where everything is urgent is one where nothing is.
+    pub fn health(&self) -> Result<Vec<Condition>> {
+        let store = self.read()?;
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        let mut out = Vec::new();
+
+        // Authentication failures are never folded into a general total. An
+        // event that failed to authenticate is a security signal, and burying
+        // it beside version skew is how it goes unnoticed.
+        for (reason, n) in ops.rejected_counts()? {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: format!("{n} event(s) failed authentication ({reason})"),
+            });
+        }
+
+        if capture_store::spool::in_use(&self.paths.spool)? {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: "captures are being spooled — the store could not be written".into(),
+            });
+        }
+
+        for (_id, owed) in ops.redactions_outstanding()? {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: format!(
+                    "a redaction has not been acknowledged by {} device(s); until it is, \
+                     the content may still exist on them",
+                    owed.len()
+                ),
+            });
+        }
+
+        for (_id, reason) in store.quarantined()? {
+            out.push(Condition {
+                tier: "worth-knowing".into(),
+                text: format!("an event was set aside: {reason}"),
+            });
+        }
+
         Ok(out)
     }
 

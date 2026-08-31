@@ -15,6 +15,7 @@ name = "capture_ffi"
 [dependencies]
 capture-store = { path = "../capture-store" }
 capture-core = { path = "../capture-core", features = ["std"] }
+capture-time = { path = "../capture-time" }
 uniffi = { workspace = true, features = ["cli"] }
 thiserror = { workspace = true }
 jiff = { workspace = true }

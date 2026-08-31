@@ -788,6 +788,7 @@ version = "0.1.0"
 dependencies = [
  "capture-core",
  "capture-store",
+ "capture-time",
  "jiff",
  "thiserror 2.0.20",
  "uniffi",

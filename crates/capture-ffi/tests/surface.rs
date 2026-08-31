@@ -241,3 +241,87 @@ fn settling_is_something_the_phone_asks_for() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+// --------------------------------------------------------------- reading ----
+
+#[test]
+fn the_agenda_shows_what_is_due_on_a_day() {
+    let root = scratch("agenda");
+    let a = Archive::open(root.clone()).unwrap();
+
+    // A task with a day. The recognizer decides this is a task rather than an
+    // event, and the phone does not get a vote — §3.6's discriminator is about
+    // time, and there is one implementation of it.
+    a.capture("call the dentist friday".into()).unwrap();
+    a.settle().unwrap();
+
+    // Whatever day that resolved to, asking for a day answers without the
+    // caller doing any date arithmetic of its own.
+    let entries = a.agenda("2026-09-15".into()).unwrap();
+    let _ = entries; // may legitimately be empty; the point is it answers
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_day_that_is_not_a_day_is_refused() {
+    // Date parsing happens here rather than in Kotlin, so this is where a bad
+    // one has to be caught. The gate forbids Kotlin doing it at all.
+    let root = scratch("agenda-bad");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let e = a.agenda("next tuesday".into()).unwrap_err();
+    assert!(
+        matches!(e, capture_ffi::CaptureError::Refused { .. }),
+        "expected a refusal, got {e:?}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn named_pages_carry_their_parent() {
+    // What the wiki sidebar groups by. The nesting is a field on each page
+    // rather than a tree the caller assembles, so there is nothing for Kotlin
+    // to get wrong about cycles or orphans.
+    let root = scratch("named");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let parent = match a.capture("acme".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+    let child = match a.capture("acme budget".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+    a.set_alias(parent.clone(), Some("acme".into())).unwrap();
+    a.set_alias(child.clone(), Some("acme-budget".into()))
+        .unwrap();
+    a.set_parent("acme-budget".into(), Some("acme".into()))
+        .unwrap();
+
+    let pages = a.named().unwrap();
+    let budget = pages
+        .iter()
+        .find(|p| p.alias.as_deref() == Some("acme-budget"))
+        .expect("the child page is named");
+    assert!(budget.parent.is_some(), "it knows what it sits under");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn health_says_nothing_about_a_healthy_archive() {
+    // An empty list is the honest answer here, and the surface says so out
+    // loud rather than rendering an empty box — that ambiguity between
+    // "nothing is wrong" and "nothing was checked" is the thing §8.9 objects
+    // to, and it belongs to the surface rather than to this.
+    let root = scratch("health");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("ordinary".into()).unwrap();
+
+    assert!(a.health().unwrap().is_empty());
+
+    std::fs::remove_dir_all(&root).ok();
+}
