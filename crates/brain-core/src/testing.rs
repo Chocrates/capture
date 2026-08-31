@@ -173,6 +173,19 @@ impl Origin {
         self.membership(Kind::DEVICE_ADD)
     }
 
+    /// Admit another device: the event a pairing produces.
+    pub fn admits(&mut self, other: &Origin) -> Envelope {
+        let body = OriginClaimBody {
+            nonce: [0u8; 16],
+            pubkey: other.key.verifying_key().to_bytes(),
+            incarnation: other.inc.0,
+            noise: None,
+        };
+        let mut buf = Vec::new();
+        minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
+        self.author(Kind::DEVICE_ADD, None, None, buf, 1_700_000_000_000)
+    }
+
     /// Author this origin's claim to author under its key.
     pub fn origin_claim(&mut self) -> Envelope {
         self.membership(Kind::ORIGIN_CLAIM)

@@ -84,6 +84,12 @@ pub enum Refusal {
     OriginDoesNotMatchKey,
     /// It claims an origin for a key that is not a member.
     KeyIsNotAMember,
+    /// An admission signed by an origin the roster does not know.
+    ///
+    /// Usually premature rather than hostile: the admitter's own admission may
+    /// still be in flight. Re-evaluated on every membership arrival, like the
+    /// others.
+    AdmitterIsNotAMember,
 }
 
 impl Roster {
@@ -151,17 +157,23 @@ pub fn build(events: &[Envelope]) -> Roster {
             continue;
         };
 
-        // Both kinds assert "this origin belongs to this key". An origin is a
-        // function of the key and the incarnation, so the assertion is
-        // checkable against itself — and must be, or a member could name any
-        // origin it liked, including one already in use by another device.
-        if Dev::derive(&claim.pubkey, &Incarnation(claim.incarnation)) != e.header.dev {
-            r.refused.insert(id, Refusal::OriginDoesNotMatchKey);
-            continue;
-        }
+        // The origin the body names. An origin is a function of a key and an
+        // incarnation, so "this origin belongs to this key" is checkable
+        // against itself — and must be, or a member could name any origin it
+        // liked, including one already in use by another device.
+        let subject = Dev::derive(&claim.pubkey, &Incarnation(claim.incarnation));
+        let self_signed = subject == e.header.dev;
 
         match e.header.kind {
-            Kind::DEVICE_ADD => {
+            // Two shapes, distinguished by who signed it.
+            //
+            // Self-signed is the root: a device admitting itself, which is only
+            // meaningful once, at the start of an archive. Signed by somebody
+            // else, it is an admission — the event a pairing produces, and the
+            // one that makes the roster O(n) rather than O(n²): every other
+            // device learns the newcomer by folding this rather than by
+            // pairing with it (§5.3).
+            Kind::DEVICE_ADD if self_signed => {
                 if e.header.seq != 1 || e.header.chain.is_some() {
                     r.refused.insert(id, Refusal::NotRootShaped);
                     continue;
@@ -174,7 +186,28 @@ pub fn build(events: &[Envelope]) -> Roster {
                 r.keys.insert(claim.pubkey);
                 r.origins.insert(e.header.dev, claim.pubkey);
             }
+            Kind::DEVICE_ADD => {
+                // Any member may admit; there is no admin device, because a
+                // designated admin is the single point of failure serverless
+                // exists to avoid (§5.3). What is checked here is only that
+                // the *admitter* is a member — the caller verifies the
+                // signature against the key this hands back for that origin,
+                // so an outsider cannot sign one at all.
+                if !r.origins.contains_key(&e.header.dev) {
+                    r.refused.insert(id, Refusal::AdmitterIsNotAMember);
+                    continue;
+                }
+                r.keys.insert(claim.pubkey);
+                r.origins.insert(subject, claim.pubkey);
+            }
             Kind::ORIGIN_CLAIM => {
+                if !self_signed {
+                    // A claim is a device speaking about itself. Signed by
+                    // anyone else it would be a member assigning origins to
+                    // other people's keys.
+                    r.refused.insert(id, Refusal::OriginDoesNotMatchKey);
+                    continue;
+                }
                 if !r.keys.contains(&claim.pubkey) {
                     // Possibly premature rather than wrong — the admission may
                     // still be in flight. The caller re-evaluates on every
@@ -300,6 +333,12 @@ mod tests {
     fn an_origin_that_does_not_follow_from_the_key_is_refused() {
         // Without this check a member could author under an origin name it
         // does not own — including one another device is already using.
+        //
+        // A root whose body names a different incarnation is not self-signed,
+        // so it is not a root: it reads as an admission, and no one may admit
+        // anything into an empty roster. That refusal is the re-evaluable one
+        // on purpose — an admission genuinely can arrive before its admitter's
+        // own, and calling it permanently malformed would strand it.
         let mut d = testing::Origin::new(0);
         let mut root = d.roster_root();
         // Rewrite the body to name a different incarnation than the one the
@@ -314,7 +353,7 @@ mod tests {
 
         let r = build(&[root]);
         assert!(!r.is_bootstrapped());
-        assert_eq!(r.refused.get(&id), Some(&Refusal::OriginDoesNotMatchKey));
+        assert_eq!(r.refused.get(&id), Some(&Refusal::AdmitterIsNotAMember));
     }
 
     #[test]

@@ -499,6 +499,133 @@ fn a_restored_device_stays_a_member() {
 }
 
 #[test]
+fn a_device_paired_with_one_member_is_admitted_by_all() {
+    // The O(n) property the roster-in-the-log exists for, and the thing that
+    // makes pairing one physical gesture instead of one per pair of devices.
+    // The desktop never met the phone; it learns of it by folding what the
+    // laptop wrote.
+    let mut laptop = testing::Origin::new(0);
+    let desktop = testing::Origin::new(1);
+    let phone = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let desktop_added = laptop.admits(&desktop);
+    let phone_added = laptop.admits(&phone);
+
+    let r = roster::build(&[root, desktop_added, phone_added]);
+
+    assert_eq!(r.keys.len(), 3, "not every paired device was admitted");
+    assert_eq!(r.key_for(&phone.dev()), Some(&phone.pubkey()));
+    assert_eq!(r.key_for(&desktop.dev()), Some(&desktop.pubkey()));
+    assert!(r.refused.is_empty(), "{:?}", r.refused);
+}
+
+#[test]
+fn a_device_cannot_admit_itself_after_the_root() {
+    // The hole this closes: if a non-root self-signed admission conferred
+    // membership, anyone on the network could write one and join.
+    let mut laptop = testing::Origin::new(0);
+    let mut intruder = testing::Origin::new(1);
+
+    let root = laptop.roster_root();
+    // Later than the root, so which of the two is "first" is not a tiebreak.
+    intruder.observe(&root, 1_700_000_001_000);
+    let self_admission = intruder.roster_root();
+    let id = self_admission.header.id();
+
+    let r = roster::build(&[root, self_admission]);
+    assert_eq!(r.keys.len(), 1);
+    assert_eq!(r.refused.get(&id), Some(&roster::Refusal::NotTheFirstRoot));
+}
+
+#[test]
+fn an_outsider_cannot_admit_anyone() {
+    // Admission is what gates ingest, so a non-member able to write one would
+    // be a non-member able to admit an attacker — and this is checkable
+    // locally, without signatures, because the admitter's own origin must
+    // already be in the roster.
+    let mut laptop = testing::Origin::new(0);
+    let mut outsider = testing::Origin::new(1);
+    let friend = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let smuggled = outsider.admits(&friend);
+    let id = smuggled.header.id();
+
+    let r = roster::build(&[root, smuggled]);
+    assert_eq!(r.keys.len(), 1, "an outsider admitted a device");
+    assert_eq!(
+        r.refused.get(&id),
+        Some(&roster::Refusal::AdmitterIsNotAMember)
+    );
+}
+
+#[test]
+fn a_newly_admitted_device_may_admit_the_next_one() {
+    // Any member may admit. There is no admin device, because a designated
+    // admin is exactly the single point of failure serverless exists to avoid.
+    let mut laptop = testing::Origin::new(0);
+    let mut phone = testing::Origin::new(1);
+    let tablet = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let phone_added = laptop.admits(&phone);
+    // The phone can only admit the tablet after it has itself been admitted,
+    // which means it has seen that event — so its own admission timestamps
+    // after it. That is what makes one ordered pass enough.
+    phone.observe(&phone_added, 1_700_000_001_000);
+    let tablet_added = phone.admits(&tablet);
+
+    let r = roster::build(&[root, phone_added, tablet_added]);
+    assert_eq!(r.keys.len(), 3);
+    assert_eq!(r.key_for(&tablet.dev()), Some(&tablet.pubkey()));
+}
+
+#[test]
+fn admitting_the_same_device_twice_is_a_union() {
+    // Two devices pair the same newcomer at once, or one admission arrives
+    // twice by different routes. §5.3: concurrent adds for different devices
+    // union, and this is the degenerate case of that.
+    let mut laptop = testing::Origin::new(0);
+    let mut desktop = testing::Origin::new(1);
+    let phone = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let desktop_added = laptop.admits(&desktop);
+    desktop.observe(&desktop_added, 1_700_000_001_000);
+
+    let by_laptop = laptop.admits(&phone);
+    let by_desktop = desktop.admits(&phone);
+
+    let r = roster::build(&[root, desktop_added, by_laptop, by_desktop]);
+    assert_eq!(r.keys.len(), 3);
+    assert!(r.refused.is_empty(), "{:?}", r.refused);
+}
+
+#[test]
+fn the_order_admissions_arrive_in_does_not_matter() {
+    // They arrive over a wire, out of order and more than once. A roster that
+    // depended on arrival order would have two devices disagree about who is
+    // a member, which is a disagreement about which events are foldable at
+    // all.
+    let mut laptop = testing::Origin::new(0);
+    let mut phone = testing::Origin::new(1);
+    let tablet = testing::Origin::new(2);
+
+    let root = laptop.roster_root();
+    let phone_added = laptop.admits(&phone);
+    phone.observe(&phone_added, 1_700_000_001_000);
+    let tablet_added = phone.admits(&tablet);
+
+    let forwards = roster::build(&[root.clone(), phone_added.clone(), tablet_added.clone()]);
+    let backwards = roster::build(&[tablet_added, phone_added, root]);
+
+    assert_eq!(forwards.keys, backwards.keys);
+    assert_eq!(forwards.origins, backwards.origins);
+    assert_eq!(backwards.keys.len(), 3);
+}
+
+#[test]
 fn the_roster_secret_is_the_latest_rotation() {
     let mut a = testing::Origin::new(0);
     let root = a.roster_root();
