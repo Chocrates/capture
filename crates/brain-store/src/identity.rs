@@ -58,6 +58,14 @@ pub struct IdentityFile {
     /// Current incarnation. Re-minted on restore, never incremented.
     #[cbor(n(2), with = "minicbor::bytes")]
     incarnation: [u8; 16],
+    /// X25519 secret, for answering a Noise handshake (§5.2). Secret.
+    ///
+    /// Optional because identities written before sync existed do not have one.
+    /// Such a device generates one the next time it is loaded and keeps it; what
+    /// it cannot do by itself is *publish* the public half, which is a
+    /// membership event and therefore a deliberate act.
+    #[cbor(n(3), with = "minicbor::bytes")]
+    noise: Option<[u8; 32]>,
 }
 
 /// The frequently-rewritten half: how far this device has written.
@@ -94,6 +102,7 @@ impl Watermark {
 /// A loaded device identity.
 pub struct Identity {
     signing: SigningKey,
+    noise: [u8; 32],
     incarnation: Incarnation,
     dev: Dev,
     watermark: Watermark,
@@ -111,11 +120,14 @@ impl Identity {
         crate::entropy::fill(&mut secret)?;
         let mut inc = [0u8; 16];
         crate::entropy::fill(&mut inc)?;
+        let mut noise = [0u8; 32];
+        crate::entropy::fill(&mut noise)?;
 
         let file = IdentityFile {
             version: IDENTITY_VERSION,
             secret,
             incarnation: inc,
+            noise: Some(noise),
         };
         write_secret(&paths.identity, &to_cbor(&file))?;
 
@@ -129,8 +141,19 @@ impl Identity {
     pub fn load(paths: &StorePaths) -> Result<Self> {
         let raw =
             fs::read(&paths.identity).map_err(|_| Error::StoreMissing(paths.identity.clone()))?;
-        let file: IdentityFile = minicbor::decode(&raw)
+        let mut file: IdentityFile = minicbor::decode(&raw)
             .map_err(|e| Error::Integrity(format!("identity record unreadable: {e}")))?;
+
+        // An identity from before sync existed has no Noise key. It gets one
+        // here and keeps it. Publishing the public half is a separate and
+        // deliberate act — it is a membership event — so this only makes the
+        // device *able* to be paired, it does not pair it.
+        if file.noise.is_none() {
+            let mut n = [0u8; 32];
+            crate::entropy::fill(&mut n)?;
+            file.noise = Some(n);
+            write_secret(&paths.identity, &to_cbor(&file))?;
+        }
         if file.version != IDENTITY_VERSION {
             return Err(Error::Integrity(format!(
                 "identity record version {}, expected {IDENTITY_VERSION}",
@@ -155,6 +178,11 @@ impl Identity {
         let dev = Dev::derive(&signing.verifying_key().to_bytes(), &incarnation);
         Identity {
             signing,
+            // Filled by `load` before it gets here. An identity written before
+            // sync existed has none on disk, and gains one the first time it is
+            // opened rather than the first time somebody tries to pair — a key
+            // that appears mid-gesture is a key that can fail mid-gesture.
+            noise: file.noise.unwrap_or([0u8; 32]),
             incarnation,
             dev,
             watermark,
@@ -176,6 +204,10 @@ impl Identity {
             version: IDENTITY_VERSION,
             secret: self.signing.to_bytes(),
             incarnation: inc,
+            // Kept across a reincarnation. A restore makes a new *origin*, not
+            // a new device — roster membership is keyed by the device key, and
+            // the Noise key is the same kind of fact about the same device.
+            noise: Some(self.noise),
         };
         write_secret(&paths.identity, &to_cbor(&file))?;
 
@@ -195,6 +227,17 @@ impl Identity {
     /// which is why a restore does not remove the device from the roster.
     pub fn public(&self) -> VerifyingKey {
         self.signing.verifying_key()
+    }
+
+    /// The public half of this device's Noise key, which is what a peer needs
+    /// to open a session with it.
+    pub fn noise_public(&self) -> [u8; 32] {
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(self.noise)).to_bytes()
+    }
+
+    /// The secret half. Handed to the handshake and nowhere else.
+    pub fn noise_secret(&self) -> [u8; 32] {
+        self.noise
     }
 
     /// Signing key, for authoring events.

@@ -46,6 +46,7 @@ pub fn roster_root(
     clock: &mut HlcState,
     physical_now: u64,
     nonce: Nonce,
+    noise: [u8; 32],
 ) -> Result<Envelope> {
     let pubkey = signing.verifying_key().to_bytes();
     let dev = Dev::derive(&pubkey, incarnation);
@@ -54,6 +55,9 @@ pub fn roster_root(
         nonce: nonce.0,
         pubkey,
         incarnation: incarnation.0,
+        // The key a peer opens a Noise session with. Published here because a
+        // membership event is where a device states what it is.
+        noise: Some(noise),
     };
     let body_bytes = encode(&body);
 
@@ -100,6 +104,7 @@ pub fn origin_claim(
     clock: &mut HlcState,
     physical_now: u64,
     nonce: Nonce,
+    noise: [u8; 32],
 ) -> Result<Envelope> {
     let pubkey = signing.verifying_key().to_bytes();
     let dev = Dev::derive(&pubkey, incarnation);
@@ -108,6 +113,9 @@ pub fn origin_claim(
         nonce: nonce.0,
         pubkey,
         incarnation: incarnation.0,
+        // The key a peer opens a Noise session with. Published here because a
+        // membership event is where a device states what it is.
+        noise: Some(noise),
     };
     let body_bytes = encode(&body);
 
@@ -158,7 +166,7 @@ mod tests {
         let k = key(1);
         let inc = Incarnation([2u8; 16]);
         let mut c = HlcState::new();
-        let e = roster_root(&k, &inc, &mut c, 1000, Nonce([3u8; 16])).unwrap();
+        let e = roster_root(&k, &inc, &mut c, 1000, Nonce([3u8; 16]), [0x44; 32]).unwrap();
         assert_eq!(e.verify(&k.verifying_key().to_bytes()), Verdict::Authentic);
     }
 
@@ -173,6 +181,7 @@ mod tests {
             &mut HlcState::new(),
             1000,
             Nonce([3u8; 16]),
+            [0x44; 32],
         )
         .unwrap();
         assert_eq!(e.header.seq, 1);
@@ -188,6 +197,7 @@ mod tests {
             &mut HlcState::new(),
             1000,
             Nonce([0u8; 16]),
+            [0x44; 32],
         )
         .unwrap();
         let body: OriginClaimBody = minicbor::decode(e.body.as_ref().unwrap()).unwrap();
@@ -201,9 +211,24 @@ mod tests {
         let first = Incarnation([1u8; 16]);
         let second = Incarnation([2u8; 16]);
 
-        let root = roster_root(&k, &first, &mut HlcState::new(), 1000, Nonce([0u8; 16])).unwrap();
-        let claim =
-            origin_claim(&k, &second, &mut HlcState::new(), 2000, Nonce([1u8; 16])).unwrap();
+        let root = roster_root(
+            &k,
+            &first,
+            &mut HlcState::new(),
+            1000,
+            Nonce([0u8; 16]),
+            [0x44; 32],
+        )
+        .unwrap();
+        let claim = origin_claim(
+            &k,
+            &second,
+            &mut HlcState::new(),
+            2000,
+            Nonce([1u8; 16]),
+            [0x44; 32],
+        )
+        .unwrap();
 
         assert_ne!(
             root.header.dev, claim.header.dev,
@@ -226,6 +251,7 @@ mod tests {
             &mut HlcState::new(),
             1000,
             Nonce([0u8; 16]),
+            [0x44; 32],
         )
         .unwrap();
         assert_eq!(
@@ -242,6 +268,7 @@ mod tests {
             &mut HlcState::new(),
             1000,
             Nonce([0u8; 16]),
+            [0x44; 32],
         )
         .unwrap();
         assert_eq!(claim.header.seq, 1);
@@ -255,6 +282,7 @@ mod tests {
             &mut HlcState::new(),
             1000,
             Nonce([3u8; 16]),
+            [0x44; 32],
         )
         .unwrap();
         assert!(matches!(

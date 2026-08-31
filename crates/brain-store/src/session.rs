@@ -320,6 +320,7 @@ impl Session {
             &mut self.clock,
             now_ms(),
             nonce,
+            self.identity.noise_public(),
         )?;
         self.log.append(&claim)?;
 

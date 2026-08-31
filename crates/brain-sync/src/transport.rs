@@ -16,9 +16,9 @@
 //! no way to express it.
 
 use alloc::collections::VecDeque;
-use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Why a message could not be sent or received.
 ///
@@ -40,7 +40,10 @@ pub enum TransportError {
 /// Noise session gives. Sessions themselves are unreliable: one can end at any
 /// point, and the protocol above must never depend on having finished
 /// anything.
-pub trait Transport {
+/// `Send`, because the daemon is one thread per peer session (§ the M3 design's
+/// I/O decision). A transport that could not cross a thread boundary would be
+/// discovered at the point the daemon is written rather than here.
+pub trait Transport: Send {
     /// Hand one message to the peer.
     fn send(&mut self, frame: &[u8]) -> Result<(), TransportError>;
 
@@ -49,6 +52,23 @@ pub trait Transport {
     /// Non-blocking, so a caller can serve both directions without threads and
     /// a test can drive both ends by hand.
     fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
+
+    /// Wait for the next message.
+    ///
+    /// The handshake needs this and the protocol loop does not: there is
+    /// nothing useful to do on a connection whose handshake is half finished,
+    /// where the loop above a live session has both directions to serve.
+    ///
+    /// The default spins with a yield, which is what an in-memory transport
+    /// can do honestly. A socket overrides it with a blocking read.
+    fn recv_blocking(&mut self) -> Result<Vec<u8>, TransportError> {
+        loop {
+            match self.recv()? {
+                Some(m) => return Ok(m),
+                None => std::thread::yield_now(),
+            }
+        }
+    }
 }
 
 /// Two ends of an in-memory channel, for tests.
@@ -65,10 +85,13 @@ pub trait Transport {
 pub struct Pair {
     a: Queue,
     b: Queue,
-    closed: Rc<Cell<bool>>,
+    closed: Arc<AtomicBool>,
 }
 
-type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+/// Shared rather than borrowed, and shareable *across threads*, because each
+/// end's inbox is the other's outbox and both are held at once — by two
+/// threads, in the shape the daemon actually has.
+type Queue = Arc<Mutex<VecDeque<Vec<u8>>>>;
 
 impl Pair {
     pub fn new() -> Pair {
@@ -81,21 +104,21 @@ impl Pair {
     /// laptop closing, a network changing — so the tests have to be able to
     /// cause one, including part-way through a conversation.
     pub fn close(&self) {
-        self.closed.set(true);
+        self.closed.store(true, Ordering::SeqCst);
     }
 
     /// The two ends. Each writes to the other's queue and reads its own.
     pub fn ends(&self) -> (End, End) {
         (
             End {
-                inbox: Rc::clone(&self.a),
-                outbox: Rc::clone(&self.b),
-                closed: Rc::clone(&self.closed),
+                inbox: Arc::clone(&self.a),
+                outbox: Arc::clone(&self.b),
+                closed: Arc::clone(&self.closed),
             },
             End {
-                inbox: Rc::clone(&self.b),
-                outbox: Rc::clone(&self.a),
-                closed: Rc::clone(&self.closed),
+                inbox: Arc::clone(&self.b),
+                outbox: Arc::clone(&self.a),
+                closed: Arc::clone(&self.closed),
             },
         )
     }
@@ -105,23 +128,45 @@ impl Pair {
 pub struct End {
     inbox: Queue,
     outbox: Queue,
-    closed: Rc<Cell<bool>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl Transport for End {
     fn send(&mut self, frame: &[u8]) -> Result<(), TransportError> {
-        if self.closed.get() {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(TransportError::Closed);
         }
-        self.outbox.borrow_mut().push_back(frame.to_vec());
+        self.outbox
+            .lock()
+            .map_err(|_| TransportError::Closed)?
+            .push_back(frame.to_vec());
         Ok(())
     }
 
     fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
-        if self.closed.get() {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(TransportError::Closed);
         }
-        Ok(self.inbox.borrow_mut().pop_front())
+        Ok(self
+            .inbox
+            .lock()
+            .map_err(|_| TransportError::Closed)?
+            .pop_front())
+    }
+}
+
+impl Drop for End {
+    /// One end going away ends the channel.
+    ///
+    /// This is what a peer disconnecting is, and modelling it matters more than
+    /// it looks: a handshake that fails on one side leaves the other waiting
+    /// for a reply that is never coming, and without this it waits for ever.
+    /// The first version of the refusal tests hung exactly there.
+    ///
+    /// A successful session keeps its end alive inside the `Session`, so this
+    /// fires when a side has genuinely finished with the connection.
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 }
 

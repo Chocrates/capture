@@ -19,7 +19,12 @@ publish.workspace = true
 # "no non-test code may depend on it".
 brain-core = { path = "../brain-core" }
 minicbor = { workspace = true }
+# Noise_KK. The handshake state machine, nonce handling and rekeying are not
+# ours to get subtly wrong (DESIGN.md §5.2).
+snow = { workspace = true }
 
 [dev-dependencies]
+# To build the static keypairs a handshake needs, the way the roster holds them.
+x25519-dalek = { workspace = true }
 brain-core = { path = "../brain-core", features = ["std", "testing"] }
 proptest = { workspace = true }

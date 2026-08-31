@@ -29,12 +29,18 @@
 //! window is exactly the window in which the content can still be read.
 
 #![forbid(unsafe_code)]
-#![no_std]
 
+// Not `no_std`, and it never could have been: this crate owns TCP and a Noise
+// implementation, both of which need an operating system. The purity that
+// matters here is a different one — that nothing in this crate folds an event
+// or touches the projection — and that is enforced by what it depends on
+// rather than by a lint.
 extern crate alloc;
 
 pub mod message;
+pub mod session;
 pub mod transport;
 
 pub use message::{Message, PROTOCOL_VERSION, VersionVector};
+pub use session::{HandshakeError, Session};
 pub use transport::{Transport, TransportError};

@@ -183,6 +183,10 @@ impl Origin {
             nonce: [0u8; 16],
             pubkey: self.key.verifying_key().to_bytes(),
             incarnation: self.inc.0,
+            // Deliberately absent. A synthetic origin is not a device that can
+            // be dialled, and giving it a Noise key would let a test pass while
+            // asserting nothing about how a real one is published.
+            noise: None,
         };
         let mut buf = Vec::new();
         minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");

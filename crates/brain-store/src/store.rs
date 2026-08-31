@@ -70,6 +70,7 @@ pub fn create(paths: &StorePaths, physical_now: u64) -> Result<FreshStore> {
         &mut clock,
         physical_now,
         nonce,
+        identity.noise_public(),
     )?;
 
     tracing::info!(origin = ?identity.dev().short(), "store created");

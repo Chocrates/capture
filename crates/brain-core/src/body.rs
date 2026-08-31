@@ -277,6 +277,19 @@ pub struct OriginClaimBody {
     /// The incarnation that produced this origin.
     #[cbor(n(2), with = "minicbor::bytes")]
     pub incarnation: [u8; 16],
+    /// The X25519 public key this device answers a Noise handshake with (§5.2).
+    ///
+    /// A field added at the end, which is the one change a frozen body permits.
+    /// Absent on every claim written before sync existed, and that absence is
+    /// meaningful rather than a defect: such a device is in the roster and
+    /// cannot complete a handshake, which is the true statement about it until
+    /// it publishes one.
+    ///
+    /// Separate from the signing key on purpose. One key doing both signatures
+    /// and Diffie-Hellman is the thing cryptographic hygiene warns about, and
+    /// deriving one from the other would have saved a field and spent that.
+    #[cbor(n(3), with = "minicbor::bytes")]
+    pub noise: Option<[u8; 32]>,
 }
 
 /// Helper: build a body prefix from a supplied nonce.

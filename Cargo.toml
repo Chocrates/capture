@@ -24,6 +24,12 @@ publish = false
 minicbor = { version = "2.3.0", default-features = false, features = ["alloc", "derive"] }
 blake3 = { version = "1", default-features = false }
 ed25519-dalek = { version = "2", default-features = false }
+# The Diffie-Hellman half of a device's identity, kept separate from the
+# signing half: one key doing both is what cryptographic hygiene warns about.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# Noise_KK for the sync transport (DESIGN.md §5.2). The handshake state
+# machine, nonce handling and rekeying are not ours to get subtly wrong.
+snow = "0.10"
 
 # Slug derivation (task 2.11). Pinned exactly: their Unicode tables are part of
 # the frozen algorithm — a table change would silently alter existing slugs on

@@ -21,9 +21,10 @@
 use brain_core::{
     Dev, EventId, Incarnation, SLUG_VERSION,
     body::{
-        Ambient, CaptureBody, Cue, EventFields, IntentBody, OccBody, OccEditBody, OccMoveBody,
-        Outcome, ParentBody, PromoteBody, Promoted, ReviewBody, RuleSpec, SeriesFields, TaskFields,
-        When,
+        AliasBody, Ambient, CaptureBody, Cue, EditBody, EventFields, IntentBody, MuteBody,
+        MuteScope, OccBody, OccEditBody, OccMoveBody, OriginClaimBody, Outcome, ParentBody,
+        PromoteBody, Promoted, RedactBody, RedactScope, ReviewBody, RuleSpec, SeriesFields,
+        SettingBody, TagBody, TaskFields, When,
     },
     event::{ENVELOPE_VERSION, Header, Kind},
     hlc::Hlc,
@@ -543,4 +544,174 @@ fn a_parent_encodes_the_same_way_for_ever() {
     let back: ParentBody = minicbor::decode(&bytes).unwrap();
     assert_eq!(back.parent, None, "moving back to the top did not survive");
     assert_eq!(hex(&bytes), "815099999999999999999999999999999999");
+}
+
+#[test]
+fn a_membership_claim_encodes_the_same_way_for_ever() {
+    // The body that admits a device, and arguably the most frozen thing here:
+    // get it wrong and a device is locked out of its own archive permanently,
+    // because membership is what ingest checks before it will accept anything.
+    //
+    // It had no vector until sync needed a field added to it, which is the gap
+    // worth naming rather than quietly closing — the discipline was applied to
+    // every body M2 introduced and never retrofitted to the ones M1 wrote.
+    let old = OriginClaimBody {
+        nonce: [0x11; 16],
+        pubkey: [0x22; 32],
+        incarnation: [0x33; 16],
+        noise: None,
+    };
+
+    // Three fields, not four. A trailing `None` is elided entirely, which is
+    // what makes adding a field at the end safe: every claim written before
+    // sync existed encodes exactly as it did, byte for byte.
+    // 83 array(3) · 50 nonce(16) · 5820 pubkey(32) · 50 incarnation(16), and
+    // nothing after it.
+    assert_eq!(
+        hex(&canonical_of(&old)),
+        "835011111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222225033333333333333333333333333333333"
+    );
+
+    let with_noise = OriginClaimBody {
+        noise: Some([0x44; 32]),
+        ..old.clone()
+    };
+    // 84 array(4) now, with the key appended: the only change a frozen body
+    // permits, and visibly a suffix rather than a rearrangement.
+    assert_eq!(
+        hex(&canonical_of(&with_noise)),
+        "84501111111111111111111111111111111158202222222222222222222222222222222222222222222222222222222222222222503333333333333333333333333333333358204444444444444444444444444444444444444444444444444444444444444444"
+    );
+
+    // And an older claim still reads, which is the property the whole
+    // append-at-the-end rule exists to give.
+    let back: OriginClaimBody = minicbor::decode(&canonical_of(&old)).unwrap();
+    assert_eq!(back.noise, None);
+    assert_eq!(back.pubkey, [0x22; 32]);
+}
+
+// ---------------------------------------------------------------------------
+// The bodies M1 wrote, which had no vectors until now.
+//
+// The discipline was applied to every body M2 introduced and never retrofitted
+// to these, which is how a field was added to `OriginClaimBody` with nothing
+// objecting. Every store in existence already holds these encodings, and the
+// recovery story for all of them is "re-fold the log" — an encoding that drifts
+// silently makes that story false while leaving every test green.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_edit_encodes_the_same_way_for_ever() {
+    let b = EditBody {
+        nonce: [0x11; 16],
+        text: String::from("replaced"),
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        "825011111111111111111111111111111111687265706c61636564"
+    );
+}
+
+#[test]
+fn a_tag_encodes_the_same_way_for_ever() {
+    let b = TagBody {
+        nonce: [0x11; 16],
+        tag: String::from("reading"),
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        "8250111111111111111111111111111111116772656164696e67"
+    );
+}
+
+#[test]
+fn an_alias_encodes_the_same_way_for_ever() {
+    let named = AliasBody {
+        nonce: [0x11; 16],
+        alias: Some(String::from("acme")),
+    };
+    assert_eq!(
+        hex(&canonical_of(&named)),
+        "8250111111111111111111111111111111116461636d65"
+    );
+
+    // Clearing a name is a decision and has to be distinguishable from never
+    // having set one. A trailing `None` is elided, so this is one field —
+    // which is safe here because the kind says what the event is.
+    let cleared = AliasBody {
+        nonce: [0x11; 16],
+        alias: None,
+    };
+    assert_eq!(
+        hex(&canonical_of(&cleared)),
+        // array(1): the value is gone entirely, not present-and-null.
+        "815011111111111111111111111111111111"
+    );
+}
+
+#[test]
+fn a_mute_encodes_the_same_way_for_ever() {
+    // Three scopes, and the discriminants are permanent: a mute that decoded as
+    // the wrong scope would silence the wrong notes.
+    let by_note = MuteBody {
+        nonce: [0x11; 16],
+        scope: MuteScope::Note(EventId([0x22; 32])),
+        until: None,
+    };
+    assert_eq!(
+        hex(&canonical_of(&by_note)),
+        "82501111111111111111111111111111111182008158202222222222222222222222222222222222222222222222222222222222222222"
+    );
+
+    let by_tag = MuteBody {
+        nonce: [0x11; 16],
+        scope: MuteScope::Tag(String::from("noisy")),
+        until: Some(1_800_000_000_000),
+    };
+    assert_eq!(
+        hex(&canonical_of(&by_tag)),
+        "835011111111111111111111111111111111820181656e6f6973791b000001a3185c5000"
+    );
+}
+
+#[test]
+fn a_redaction_encodes_the_same_way_for_ever() {
+    // The one irreversible event. Its scope decides whether a note's whole
+    // history is destroyed or a single event is, and reading that wrongly
+    // destroys the wrong thing.
+    let b = RedactBody {
+        nonce: [0x11; 16],
+        scope: RedactScope::WholeNote,
+        targets: vec![EventId([0x22; 32])],
+    };
+    assert_eq!(
+        hex(&canonical_of(&b)),
+        // array(3) · nonce(16) · scope [0,[]] = WholeNote · array(1) · target(32)
+        "8350111111111111111111111111111111118200808158202222222222222222222222222222222222222222222222222222222222222222"
+    );
+}
+
+#[test]
+fn a_setting_encodes_the_same_way_for_ever() {
+    let chosen = SettingBody {
+        nonce: [0x11; 16],
+        key: String::from("timeline.limit"),
+        value: Some(String::from("20")),
+    };
+    assert_eq!(
+        hex(&canonical_of(&chosen)),
+        "8350111111111111111111111111111111116e74696d656c696e652e6c696d6974623230"
+    );
+
+    // Reverting is a third state, distinct from never having chosen (§8.9), so
+    // its encoding has to be distinguishable from an absent field.
+    let reverted = SettingBody {
+        nonce: [0x11; 16],
+        key: String::from("timeline.limit"),
+        value: None,
+    };
+    assert_eq!(
+        hex(&canonical_of(&reverted)),
+        "8250111111111111111111111111111111116e74696d656c696e652e6c696d6974"
+    );
 }
