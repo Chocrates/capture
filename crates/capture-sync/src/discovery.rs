@@ -52,9 +52,9 @@ pub const SERVICE: &str = "_bsp._tcp.local.";
 /// impossible to run and is exactly what testing needs.
 pub const SYNC_PORT: u16 = 41822;
 
-/// The port to listen on, honouring `BRAIN_SYNC_PORT`.
+/// The port to listen on, honouring `CAPTURE_SYNC_PORT`.
 pub fn sync_port() -> u16 {
-    std::env::var("BRAIN_SYNC_PORT")
+    std::env::var("CAPTURE_SYNC_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(SYNC_PORT)

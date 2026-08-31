@@ -62,7 +62,7 @@ capture-syncd — find paired devices and reconcile with them
     capture-syncd --help     this
 
 It takes no other options. Where the store lives comes from $CAPTURE_HOME or the
-usual place, and the port from $BRAIN_SYNC_PORT — which exists for the one case
+usual place, and the port from $CAPTURE_SYNC_PORT — which exists for the one case
 of two stores on one machine, and is otherwise best left alone.
 
 It reads the store without the writer lock and takes it only for as long as it

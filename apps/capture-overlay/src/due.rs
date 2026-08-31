@@ -60,7 +60,7 @@ const EVERY: Duration = Duration::from_secs(60);
 /// Only ever read at startup, and only ever shortened — a test that had to wait
 /// a minute to find out whether a tick fires would not be run.
 fn interval() -> Duration {
-    std::env::var("BRAIN_DUE_TICK_MS")
+    std::env::var("CAPTURE_DUE_TICK_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)

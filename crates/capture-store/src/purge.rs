@@ -182,7 +182,7 @@ pub fn resume(log: &mut Log, state: &mut Store, ops: &Ops, now: u64) -> Result<u
 /// production call site has to carry a "how long to pause" argument that is
 /// always zero — an argument like that eventually gets passed something else.
 fn pause_for_testing() {
-    let Ok(v) = std::env::var("BRAIN_PURGE_PAUSE_MS") else {
+    let Ok(v) = std::env::var("CAPTURE_PURGE_PAUSE_MS") else {
         return;
     };
     let Ok(ms) = v.parse::<u64>() else { return };

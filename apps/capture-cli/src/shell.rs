@@ -97,13 +97,13 @@ _capture_overlay() {
 }
 
 # The key sequence is expanded into a variable first. Writing it inline as
-#   bind -x '"${BRAIN_CAPTURE_KEY:-\C-b}": _capture_overlay'
+#   bind -x '"${CAPTURE_KEY:-\C-b}": _capture_overlay'
 # looks equivalent and is not: single quotes suppress expansion, so bash binds
-# the literal characters ${BRAIN_CAPTURE_KEY:-\C-b} and Ctrl-B does nothing.
+# the literal characters ${CAPTURE_KEY:-\C-b} and Ctrl-B does nothing.
 # The pty harness caught this; nothing else would have.
-_brain_key="${BRAIN_CAPTURE_KEY:-\C-b}"
-bind -x "\"$_brain_key\": _capture_overlay"
-unset _brain_key
+_capture_key="${CAPTURE_KEY:-\C-b}"
+bind -x "\"$_capture_key\": _capture_overlay"
+unset _capture_key
 "####;
 
 /// zsh, via a ZLE widget.
@@ -131,7 +131,7 @@ _capture_overlay() {
 }
 
 zle -N _capture_overlay
-bindkey "${BRAIN_CAPTURE_KEY:-^B}" _capture_overlay
+bindkey "${CAPTURE_KEY:-^B}" _capture_overlay
 "####;
 
 #[cfg(test)]
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn the_chord_can_be_changed() {
         for s in [Shell::Bash, Shell::Zsh] {
-            assert!(s.init().contains("BRAIN_CAPTURE_KEY"));
+            assert!(s.init().contains("CAPTURE_KEY"));
         }
     }
 

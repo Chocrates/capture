@@ -69,7 +69,7 @@ Moved ahead of everything that appends. Nothing in groups 5–8 can run without 
 
 - [x] 6.1 **Build the crash-injection harness before anything claims crash safety.** A subprocess supervisor that SIGKILLs at randomised points and checks invariants on restart. Note this tests process death, not power loss — the page cache survives, so it does not exercise `synchronous=FULL`.
 - [x] 6.2 Run the harness against append: no gaps, no partial rows, `heads` consistent with the log.
-- [x] 6.3 Run it against spool drain, rebuild, and the redaction purge. The purge case kills a process between clearing the projection and destroying the payload — a window microseconds wide in normal use, widened by `BRAIN_PURGE_PAUSE_MS` so a kill can land in it. Verified by mutation: removing the intent marker makes the test fail with a note reporting its content destroyed while the payload is still there.
+- [x] 6.3 Run it against spool drain, rebuild, and the redaction purge. The purge case kills a process between clearing the projection and destroying the payload — a window microseconds wide in normal use, widened by `CAPTURE_PURGE_PAUSE_MS` so a kill can land in it. Verified by mutation: removing the intent marker makes the test fail with a note reporting its content destroyed while the payload is still there.
 
 ## 7. CLI
 

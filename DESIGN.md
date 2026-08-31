@@ -3299,13 +3299,13 @@ brain/
     capture-time/       # instants vs floating dates, RRULE expansion, DST policy
     capture-parse/      # sigils + grammar recognizer, confidence scoring
     capture-sync/       # BSP: Noise_IK, discovery, anti-entropy, gossip, blobs
-    brain-engine/     # composition: enrichment queue, intent cues, scheduler
-    brain-ffi/        # uniffi bindings surface for Android
+    capture-engine/   # composition: enrichment queue, intent cues, scheduler
+    capture-ffi/      # uniffi bindings surface for Android
   apps/
     capture-cli/        # `capture` — one binary: capture, read, write, ops, test harness (§8.6)
     capture-overlay/    # resident overlay, egui. The low-latency binary.
     capture-desktop/    # main app: timeline, note page, calendar, browse, review
-  android/            # Kotlin + Compose, links libbrain.so
+  android/            # Kotlin + Compose, links libcapture.so
 ```
 
 `capture-core` is deliberately I/O-free and async-free — pure data in, events out. That is what

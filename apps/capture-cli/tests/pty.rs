@@ -259,7 +259,7 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
     };
     std::fs::write(
         &rc,
-        format!("PATH={}:$PATH\n{snippet}\n", brain_dir().display()),
+        format!("PATH={}:$PATH\n{snippet}\n", capture_dir().display()),
     )
     .unwrap();
 
@@ -290,7 +290,7 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
     store.wait_for(1)
 }
 
-fn brain_dir() -> PathBuf {
+fn capture_dir() -> PathBuf {
     PathBuf::from(capture()).parent().unwrap().to_path_buf()
 }
 
@@ -366,7 +366,7 @@ fn a_command_based_capture_would_have_failed() {
             "capture + fix auth #client-acme",
         ])
         .env("CAPTURE_HOME", store.path())
-        .env("PATH", format!("{}:/usr/bin:/bin", brain_dir().display()))
+        .env("PATH", format!("{}:/usr/bin:/bin", capture_dir().display()))
         .output()
         .expect("bash runs");
     assert!(out.status.success(), "the command itself succeeds: {out:?}");

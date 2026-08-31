@@ -158,7 +158,7 @@ fn run_and_kill(mode: &str, root: &Path, rng: &mut Rng) -> Duration {
     // only way a kill lands there often enough to test, and it widens a real
     // window rather than simulating a fake one.
     if mode == "redact" {
-        cmd.env("BRAIN_PURGE_PAUSE_MS", "40");
+        cmd.env("CAPTURE_PURGE_PAUSE_MS", "40");
     }
 
     let mut child: Child = cmd.spawn().expect("victim starts");
