@@ -276,6 +276,49 @@ pub struct Health {
     /// What this surface did *not* check, named so it cannot be mistaken for a
     /// verification.
     pub unchecked: String,
+    /// Every device in the roster, and when this one last heard from it.
+    pub peers: Vec<Peer>,
+}
+
+/// One device in the roster.
+#[derive(Serialize)]
+pub struct Peer {
+    /// Enough of the key for a person to compare against another device's
+    /// screen. Not the whole thing: a prefix nobody checks is worse than one
+    /// short enough that they do.
+    pub key: String,
+    /// True for the device this surface is running on.
+    pub is_self: bool,
+    /// Where it can be dialled, if that is known. A peer that only ever dials
+    /// *in* is demonstrably alive at no address this device can call, so the
+    /// address and the last contact are separate facts.
+    pub addr: Option<String>,
+    /// Milliseconds since it was last reached, if ever.
+    pub last_seen_ms: Option<u64>,
+}
+
+/// How long a peer may go unreached before it is worth saying so.
+///
+/// A week. Shorter fires every time a laptop spends a weekend shut, and a
+/// report that cries wolf is one nobody believes the time it means something.
+const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Enough of a key for a person to compare against another device's screen.
+fn short_key(k: &[u8; 32]) -> String {
+    k[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A duration in the roughest terms that are still true.
+fn approx(ms: u64) -> String {
+    let days = ms / (24 * 60 * 60 * 1000);
+    let hours = ms / (60 * 60 * 1000);
+    if days > 0 {
+        format!("{days} day(s)")
+    } else if hours > 0 {
+        format!("{hours} hour(s)")
+    } else {
+        format!("{} minute(s)", ms / 60_000)
+    }
 }
 
 /// A redaction waiting for its window to elapse.
@@ -1012,10 +1055,74 @@ pub fn health() -> std::result::Result<Health, String> {
             });
         }
 
+        // Membership from the log rather than the projection: the projection's
+        // copy is only written when a gate opens, and a local capture never
+        // opens one — so reading it reports an empty roster on any device that
+        // has not yet ingested from a peer.
+        let roster = brain_core::roster::build(&log.all()?);
+        let me = brain_store::Identity::load(&p)?.public().to_bytes();
+        let known = ops.peer_addresses()?;
+
+        let mut peers = Vec::new();
+        for key in &roster.keys {
+            let seen = known.iter().find(|k| &k.key == key);
+            peers.push(Peer {
+                key: short_key(key),
+                is_self: key == &me,
+                addr: seen.and_then(|s| s.addr.clone()),
+                last_seen_ms: seen
+                    .and_then(|s| s.last_seen)
+                    .map(|t| now.saturating_sub(t)),
+            });
+        }
+
+        // A device gone quiet holds captures that exist on exactly one machine,
+        // and the longer it goes unnoticed the more of them there are (§4.5).
+        for k in &known {
+            if k.key == me {
+                continue;
+            }
+            let quiet = k
+                .last_seen
+                .is_none_or(|t| now.saturating_sub(t) > PEER_STALE_MS);
+            if quiet {
+                conditions.push(Condition {
+                    tier: "attention",
+                    text: match k.last_seen {
+                        Some(t) => format!(
+                            "device {} has not been reached in {}. Anything captured on it \
+                             since then exists only there.",
+                            short_key(&k.key),
+                            approx(now.saturating_sub(t))
+                        ),
+                        None => format!("device {} has never been reached.", short_key(&k.key)),
+                    },
+                    acknowledgeable: false,
+                });
+            }
+        }
+
+        // A redaction that has not reached every device it was issued against.
+        // The pending set is fixed at issue time and never read from the
+        // roster, so retiring a stolen phone cannot make its redactions report
+        // success.
+        for (_id, outstanding) in ops.redactions_outstanding()? {
+            conditions.push(Condition {
+                tier: "attention",
+                text: format!(
+                    "a redaction has not been acknowledged by {} device(s). Until it is, \
+                     the content may still exist on them.",
+                    outstanding.len()
+                ),
+                acknowledgeable: false,
+            });
+        }
+
         let attention = conditions.iter().filter(|c| c.tier == "attention").count();
         Ok(Health {
             notes: s.note_count()?,
             events: log.count()?,
+            peers,
             healthy: attention == 0,
             conditions,
             unchecked: "Signatures, body hashes and origin chains are not checked here. \

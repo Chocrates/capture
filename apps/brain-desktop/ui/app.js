@@ -1499,8 +1499,43 @@ async function showHealth() {
     for (const c of knowing) view.append(condition(c));
   }
 
+  // Devices. Shown even when there is only one, because "this is the only
+  // device" is a fact worth being able to confirm — not seeing a second one
+  // is otherwise indistinguishable from not having looked.
+  view.append(el("h2", null, "Devices"));
+  if (!h.peers || h.peers.length === 0) {
+    view.append(el("p", "healthy", "No roster yet."));
+  }
+  for (const p of h.peers || []) view.append(peer(p));
+
   // Never reported as verified. This surface reads counters and opens no event.
   view.append(el("p", "unchecked", h.unchecked));
+}
+
+function peer(p) {
+  const box = el("div", "cond worth-knowing");
+  box.append(el("div", "peer-key", p.key));
+
+  // The address and the last contact are separate facts, and a device can have
+  // either without the other: one that only ever dials in is demonstrably
+  // alive at no address this machine can call.
+  let said;
+  if (p.is_self) said = "this device";
+  else if (p.last_seen_ms === null || p.last_seen_ms === undefined)
+    said = p.addr ? `${p.addr} — never reached` : "never seen on any network";
+  else said = `${p.addr || "no address"} — last reached ${ago(p.last_seen_ms)} ago`;
+
+  box.append(el("div", null, said));
+  return box;
+}
+
+function ago(ms) {
+  const days = Math.floor(ms / 86400000);
+  if (days > 0) return `${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.floor(ms / 3600000);
+  if (hours > 0) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  const mins = Math.floor(ms / 60000);
+  return `${mins} minute${mins === 1 ? "" : "s"}`;
 }
 
 function condition(c) {
