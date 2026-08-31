@@ -272,6 +272,25 @@ impl Log {
         Ok(out)
     }
 
+    /// One origin's events over a range of sequence numbers, in order.
+    ///
+    /// What a peer asked for by name. In sequence order rather than timestamp
+    /// order, because the receiver appends them in that order and a gap is
+    /// what it is trying to avoid.
+    pub fn range(&self, dev: &str, from: u64, to: u64) -> Result<Vec<Envelope>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events WHERE dev = ?1 AND seq >= ?2 AND seq <= ?3 ORDER BY seq",
+        )?;
+        let rows = st.query_map(params![dev, from as i64, to as i64], row_to_envelope)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Everything an incremental fold needs for a set of notes.
     ///
     /// Two queries against indexes, in place of reading the whole log and

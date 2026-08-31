@@ -38,6 +38,7 @@ pub mod settings;
 pub mod spool;
 pub mod startup;
 pub mod store;
+pub mod sync;
 pub mod watch;
 
 pub use error::{Error, ExitCode, Result};

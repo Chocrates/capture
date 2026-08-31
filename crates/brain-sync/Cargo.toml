@@ -24,7 +24,10 @@ minicbor = { workspace = true }
 snow = { workspace = true }
 # Keyed hashing for the advertised pseudonym and digest (§5.2).
 blake3 = { workspace = true }
-mdns-sd = { version = "0.21.0", default-features = false }
+# Optional: only the daemon browses a network. Keeping it behind a feature
+# means the CLI, which links this crate for the protocol types, does not pull
+# in a network stack to print a timeline.
+mdns-sd = { version = "0.21.0", default-features = false, optional = true }
 spake2 = "0.4.0"
 
 [dev-dependencies]
@@ -32,3 +35,8 @@ spake2 = "0.4.0"
 x25519-dalek = { workspace = true }
 brain-core = { path = "../brain-core", features = ["std", "testing"] }
 proptest = { workspace = true }
+
+[features]
+default = []
+# Discovery over the local network.
+mdns = ["dep:mdns-sd"]

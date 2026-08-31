@@ -217,6 +217,14 @@ impl<'a> Gate<'a> {
     }
 
     /// The roster as it currently stands.
+    /// The log this gate guards, for reads.
+    ///
+    /// Read-only on purpose: every write goes through `offer`, which is the
+    /// point of the gate existing.
+    pub fn log(&self) -> &Log {
+        self.log
+    }
+
     pub fn roster(&self) -> &Roster {
         &self.roster
     }

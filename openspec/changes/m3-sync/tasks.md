@@ -47,9 +47,9 @@
 
 ## 8. Ingest
 
-- [ ] 8.1 Ingest peer events through the existing append path: signatures, `bhash`, chain, sequence, quarantine. One door into the log.
-- [ ] 8.2 Hold an event that arrives ahead of its predecessor rather than folding a stream with a hole or rejecting it. **Test out-of-order and duplicate arrival**, which is what a wire produces and a local append never does.
-- [ ] 8.3 **Test that relaying confers no authority**: an event signed by a key that is not its claimed origin is rejected however it arrived, and reported.
+- [x] 8.1 Ingest peer events through the existing append path: signatures, `bhash`, chain, sequence, quarantine. One door into the log. **Done**: `brain_store::sync::StoreArchive` is the only join between the wire and the store, and it calls `Gate::offer` — the same door a local capture uses. A second ingest path would be a second set of rules about signatures and sequencing, and the second set is the one that is subtly wrong, because nobody exercises it until a peer sends something strange.
+- [x] 8.2 Hold an event that arrives ahead of its predecessor rather than folding a stream with a hole or rejecting it. **Done and tested** through the real store: the head does not move past an event that has not arrived, and the held event is absorbed once its predecessor does. Duplicates change nothing.
+- [x] 8.3 **Test that relaying confers no authority**: an event signed by a key that is not its claimed origin is rejected however it arrived, and reported. **Done**, plus the corollary that matters more: a rejected event never occupies a sequence position and never advances `heads`. That is the mesh-poisoning path in §5.3 — a forged event claiming a position would make the genuine event at that position collide for ever, permanently unreachable, while every replica reported the position held.
 
 ## 9. Surfaces
 
