@@ -45,6 +45,7 @@ pub mod message;
 pub mod pairing;
 pub mod push;
 pub mod session;
+pub mod tcp;
 pub mod transport;
 
 pub use message::{Message, PROTOCOL_VERSION, VersionVector};

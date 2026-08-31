@@ -118,6 +118,8 @@ pub enum Command {
     ExportsPruned,
     /// Acknowledge a device admitted by some other device.
     AdmissionSeen { key: String },
+    /// Every device in the roster, and when this one last reached it.
+    Peers { json: bool },
     /// Write everything appended since the last export.
     Export { json: bool },
     /// Rebuild a store from exported events.
@@ -599,6 +601,9 @@ where
                 }),
             }
         }
+        "peers" => Ok(Command::Peers {
+            json: has_json(&args[1..]),
+        }),
         "exports-pruned" => flagless("exports-pruned", &args[1..], Command::ExportsPruned),
         "admission-seen" => match &args[1..] {
             [key] => Ok(Command::AdmissionSeen { key: key.clone() }),
@@ -837,6 +842,8 @@ OPERATING
   brain export            write everything appended since the last export
   brain restore <dir>     rebuild from exported events
   brain unflag <name>     clear a credential flag so the note is exported again
+  brain peers             every device in the roster, and when it was
+                          last reached
   brain admission-seen KEY
                           say you know about a device another device admitted
   brain exports-pruned    say you have dealt with export files holding

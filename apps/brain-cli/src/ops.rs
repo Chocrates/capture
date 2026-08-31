@@ -293,6 +293,33 @@ pub fn status(paths: &StorePaths) -> Result<()> {
         ));
     }
 
+    // A device that has not been reached in over a week.
+    //
+    // Promoted deliberately (§4.5): a phone that has silently stopped syncing
+    // holds captures that exist on exactly one device, and the longer that
+    // goes unnoticed the more of them there are. It says *when* rather than
+    // only that it is stale, because "three weeks" and "eight days" call for
+    // different reactions.
+    for p in ops.peer_addresses()? {
+        let stale = p
+            .last_seen
+            .is_none_or(|t| now.saturating_sub(t) > PEER_STALE_MS);
+        if stale {
+            match p.last_seen {
+                Some(t) => attention.push(format!(
+                    "device {} has not been reached in {}.\n\
+                     Anything captured on it since then exists only there.",
+                    short_key(&p.key),
+                    ms(now.saturating_sub(t))
+                )),
+                None => attention.push(format!(
+                    "device {} has never been reached.",
+                    short_key(&p.key)
+                )),
+            }
+        }
+    }
+
     let identity = brain_store::identity::Identity::load(paths)?;
 
     // A device in the roster that this one neither paired nor admitted itself.
@@ -304,7 +331,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     // tell the two apart, so it asks rather than deciding, and stays until
     // answered.
     let own = std::collections::BTreeSet::from([identity.public().to_bytes()]);
-    let unexpected = ops.unexpected_admissions(&state.roster_keys()?, &own)?;
+    let unexpected = ops.unexpected_admissions(&roster_now(paths)?.keys, &own)?;
     for key in &unexpected {
         attention.push(format!(
             "a device was admitted that this one did not pair or admit: {}\n\
@@ -419,6 +446,82 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 // ----------------------------------------------------- quarantine, rejected ----
 
 /// Events that are authentic but this device cannot use.
+/// Membership as the log says it is.
+///
+/// Built from the log rather than read from the projection, for the same
+/// reason `Gate` does it: the projection may be absent, stale, or mid-rebuild,
+/// and it is only written when a gate opens — which a local capture never
+/// does. A surface reading it would have reported an empty roster on a device
+/// that had never ingested from a peer, which is every device until the first
+/// sync.
+fn roster_now(paths: &StorePaths) -> Result<brain_core::roster::Roster> {
+    let log = brain_store::log::Log::open_read(&paths.events)?;
+    Ok(brain_core::roster::build(&log.all()?))
+}
+
+/// How long a peer may go unreached before it is worth saying so.
+///
+/// A week, per §4.5. Shorter would fire every time a laptop spends a weekend
+/// shut, which trains the person to ignore it — and this is a report that has
+/// to be believed the one time it means something.
+const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Every device in the roster, and when this one last reached it.
+pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
+    let ops = Ops::open(&paths.ops)?;
+    let identity = brain_store::identity::Identity::load(paths)?;
+    let me = identity.public().to_bytes();
+
+    let members = roster_now(paths)?.keys;
+    let addresses = ops.peer_addresses()?;
+    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+
+    let seen = |k: &[u8; 32]| addresses.iter().find(|p| &p.key == k);
+
+    if json {
+        let out: Vec<String> = members
+            .iter()
+            .map(|k| {
+                let p = seen(k);
+                format!(
+                    "{{\"key\":\"{}\",\"self\":{},\"addr\":{},\"last_seen\":{}}}",
+                    short_key(k),
+                    k == &me,
+                    p.map_or("null".into(), |p| format!("\"{}\"", p.addr)),
+                    p.and_then(|p| p.last_seen)
+                        .map_or("null".into(), |t| t.to_string()),
+                )
+            })
+            .collect();
+        say!("[{}]", out.join(","));
+        return Ok(());
+    }
+
+    for k in &members {
+        if k == &me {
+            say!("  {}  this device", short_key(k));
+            continue;
+        }
+        match seen(k) {
+            Some(p) => match p.last_seen {
+                Some(t) => say!(
+                    "  {}  {} — last reached {} ago",
+                    short_key(k),
+                    p.addr,
+                    ms(now.saturating_sub(t))
+                ),
+                None => say!("  {}  {} — never reached", short_key(k), p.addr),
+            },
+            None => say!("  {}  never seen on any network", short_key(k)),
+        }
+    }
+    if members.len() == 1 {
+        say!();
+        say!("No other devices. To add one:  brain pair");
+    }
+    Ok(())
+}
+
 pub fn quarantine(paths: &StorePaths, json: bool) -> Result<()> {
     let state = read::open(paths)?;
     let rows = state.quarantined()?;
@@ -521,13 +624,12 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
 /// that was actually expected still shouting.
 pub fn admission_seen(paths: StorePaths, key: &str) -> Result<()> {
     let ops = Ops::open(&paths.ops)?;
-    let state = read::open(&paths)?;
     let identity = brain_store::identity::Identity::load(&paths)?;
     let own = std::collections::BTreeSet::from([identity.public().to_bytes()]);
 
     let wanted = key.to_ascii_lowercase();
     let candidates: Vec<[u8; 32]> = ops
-        .unexpected_admissions(&state.roster_keys()?, &own)?
+        .unexpected_admissions(&roster_now(&paths)?.keys, &own)?
         .into_iter()
         .filter(|k| short_key(k).starts_with(&wanted))
         .collect();

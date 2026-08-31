@@ -53,8 +53,8 @@
 
 ## 9. Surfaces
 
-- [ ] 9.1 `brain pair`, `brain peers` — with `--json`, like every other read.
-- [ ] 9.2 Report a peer not reached in over a week as tier 1, saying *when* it was last reached rather than only that it is stale. §4.5 promotes this deliberately: a phone that has silently stopped syncing holds captures that exist on exactly one device.
+- [~] 9.1 `brain pair`, `brain peers` — with `--json`, like every other read. `brain peers` **done**. `brain pair` needs the listening half, which is the daemon's socket — section 10.
+- [x] 9.2 Report a peer not reached in over a week as tier 1, saying *when* it was last reached rather than only that it is stale. **Done**: a week, because shorter fires every time a laptop spends a weekend shut, and a report that cries wolf is one nobody believes the time it matters. §4.5 promotes this deliberately: a phone that has silently stopped syncing holds captures that exist on exactly one device.
 - [ ] 9.3 Show peers and their state in the desktop health surface.
 
 ## 10. Where the daemon lives

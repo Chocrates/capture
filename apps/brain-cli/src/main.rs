@@ -118,6 +118,7 @@ fn run(command: Command) -> Result<()> {
         Command::Verify { json } => verify::run(&paths()?, json),
         Command::ExportsPruned => ops::exports_pruned(paths()?),
         Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
+        Command::Peers { json } => ops::peers(&paths()?, json),
         Command::Export { json } => backup::export(paths()?, json),
         Command::Restore {
             from,

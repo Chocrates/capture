@@ -310,3 +310,42 @@ fn a_chosen_preference_is_distinguishable_from_a_default() {
     s.ok(&["set", "timeline.limit"]);
     assert!(s.ok(&["status"]).contains("restored by you"));
 }
+
+// ------------------------------------------------------------------ peers ----
+
+#[test]
+fn a_fresh_store_lists_itself_as_the_only_device() {
+    // The roster is built from the log, not read from the projection. The
+    // projection's copy is only written when a gate opens, and a local capture
+    // never opens one — so a surface reading it reported an empty roster on
+    // every device that had not yet ingested from a peer, which is every
+    // device until its first sync.
+    let s = Store::new("peers-fresh");
+    s.ok(&["+", "a note"]);
+
+    let out = s.ok(&["peers", "--json"]);
+    assert!(
+        out.contains("\"self\":true"),
+        "the device did not appear in its own roster: {out}"
+    );
+    assert_eq!(
+        out.matches("\"key\"").count(),
+        1,
+        "expected exactly one device: {out}"
+    );
+}
+
+#[test]
+fn a_fresh_store_reports_no_unexpected_admissions() {
+    // The device's own key must not be reported as somebody else's doing —
+    // a report that fired on every device would train the person to dismiss
+    // the one that means something.
+    let s = Store::new("peers-no-alarm");
+    s.ok(&["+", "a note"]);
+
+    let out = s.ok(&["status"]);
+    assert!(
+        !out.contains("did not pair or admit"),
+        "a device reported its own admission as unexpected: {out}"
+    );
+}
