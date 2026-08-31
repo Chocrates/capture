@@ -84,6 +84,11 @@ android-kotlin:
 	   generate --library target/x86_64-linux-android/debug/libcapture_ffi.so \
 	   --language kotlin --no-format --out-dir android/app/src/main/java
 	@echo '    android/app/src/main/java/uniffi/capture_ffi/capture_ffi.kt'
+	@echo '--- android: staging the native library for packaging'
+	@set -e; . ./tools/android-env.sh; \
+	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
+	   -o android/app/src/main/jniLibs build -p capture-ffi
+	@find android/app/src/main/jniLibs -name '*.so' | sed 's/^/    /'
 
 ## android-decides: fail if the Kotlin side starts deciding things
 #
@@ -93,6 +98,20 @@ android-kotlin:
 android-decides:
 	@echo '--- android: kotlin decides nothing'
 	@python3 tools/kotlin-decides-nothing.py
+
+## android-app: build the application
+android-app: android-kotlin
+	@echo '--- android: building the app'
+	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleDebug
+
+## android-instrumented: run the binding's tests on a device, through Kotlin
+#
+# The Rust suite proves the store is right. This proves the *binding* is: the
+# generator, JNA, the ABI and the packaging are all untested by the Rust suite
+# and are exactly where a binding goes wrong.
+android-instrumented: android-kotlin
+	@echo '--- android: instrumented tests'
+	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet connectedDebugAndroidTest
 
 ## android-test: run the store's suite on a connected device or emulator
 #

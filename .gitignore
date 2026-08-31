@@ -9,3 +9,10 @@ Cargo.lock.orig
 # than edited: the Kotlin cannot be allowed to describe a surface the Rust does
 # not have, and a hand-edit is exactly how it would come to.
 /android/app/src/main/java/uniffi/
+
+# Android build output and machine-local paths.
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/app/src/main/jniLibs/
