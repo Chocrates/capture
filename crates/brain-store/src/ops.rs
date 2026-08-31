@@ -45,11 +45,27 @@ CREATE TABLE IF NOT EXISTS rejected (
   raw        BLOB
 ) STRICT;
 
-CREATE TABLE IF NOT EXISTS peers (
-  origin        TEXT PRIMARY KEY,
-  last_addr     TEXT,
-  last_seen     INTEGER,
-  last_vv_match INTEGER
+-- Where a peer was last reached, and what it was last advertising.
+--
+-- Keyed by public key rather than by origin, because membership is keyed by
+-- key (§5.3) and a restored device keeps its key while minting a new origin.
+-- Keying this by origin would lose the address of a device precisely when it
+-- had just been restored and most needed finding.
+--
+-- Two jobs. `addr` is the static fallback: mDNS is blocked on many corporate
+-- and guest networks, and a system that only syncs at home is not a system.
+-- `digest` is what makes a connection skippable — it is compared against what
+-- the peer is advertising now, and equal means there is nothing to fetch.
+--
+-- An earlier `peers` table, keyed by origin and never read or written, is left
+-- in whatever stores already created it: dropping tables is not something this
+-- schema does, and nothing consults it.
+CREATE TABLE IF NOT EXISTS peer_state (
+  peer_key  BLOB PRIMARY KEY,
+  addr      TEXT,
+  digest    BLOB,
+  last_seen INTEGER,
+  attempts  INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 -- How far through the ordered purge a redaction got.
@@ -469,6 +485,90 @@ impl Ops {
     /// bad signature however the roster changes, and retrying those forever
     /// would turn every membership event into a re-verification of the entire
     /// forensic pile.
+    /// Record that a peer was reached, and what it was advertising.
+    ///
+    /// Reaching it resets the retry count: backoff exists to stop dialling a
+    /// device that is off, and a device that just answered is not off.
+    pub fn peer_reached(&self, peer_key: &[u8; 32], addr: &str, at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO peer_state (peer_key, addr, last_seen, attempts)
+             VALUES (?1, ?2, ?3, 0)
+             ON CONFLICT(peer_key) DO UPDATE SET addr = ?2, last_seen = ?3, attempts = 0",
+            rusqlite::params![&peer_key[..], addr, at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Record the digest a peer was advertising when this device last agreed
+    /// with it, so a later advertisement can be compared against it.
+    pub fn peer_agreed(&self, peer_key: &[u8; 32], digest: &[u8; 8]) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO peer_state (peer_key, digest) VALUES (?1, ?2)
+             ON CONFLICT(peer_key) DO UPDATE SET digest = ?2",
+            rusqlite::params![&peer_key[..], &digest[..]],
+        )?;
+        Ok(())
+    }
+
+    /// Whether an advertised digest says there is anything to fetch.
+    ///
+    /// Unknown peer, or no recorded agreement, means yes — the safe direction.
+    /// Skipping a peer this device has never synced with would be a device
+    /// that never syncs.
+    pub fn peer_has_news(&self, peer_key: &[u8; 32], advertised: &[u8; 8]) -> Result<bool> {
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT digest FROM peer_state WHERE peer_key = ?1",
+                rusqlite::params![&peer_key[..]],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(stored.as_deref() != Some(&advertised[..]))
+    }
+
+    /// Count a failed dial, and say how many have failed in a row.
+    pub fn peer_missed(&self, peer_key: &[u8; 32]) -> Result<u32> {
+        self.conn.execute(
+            "INSERT INTO peer_state (peer_key, attempts) VALUES (?1, 1)
+             ON CONFLICT(peer_key) DO UPDATE SET attempts = attempts + 1",
+            rusqlite::params![&peer_key[..]],
+        )?;
+        let n: i64 = self.conn.query_row(
+            "SELECT attempts FROM peer_state WHERE peer_key = ?1",
+            rusqlite::params![&peer_key[..]],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// Every peer this device has an address for, for the static fallback.
+    pub fn peer_addresses(&self) -> Result<Vec<([u8; 32], String, u32, Option<u64>)>> {
+        let mut q = self.conn.prepare(
+            "SELECT peer_key, addr, attempts, last_seen FROM peer_state
+             WHERE addr IS NOT NULL ORDER BY peer_key",
+        )?;
+        let rows = q
+            .query_map([], |r| {
+                let key: Vec<u8> = r.get(0)?;
+                let addr: String = r.get(1)?;
+                let attempts: i64 = r.get(2)?;
+                let seen: Option<i64> = r.get(3)?;
+                Ok((key, addr, attempts as u32, seen.map(|s| s as u64)))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(k, a, n, s)| {
+                <[u8; 32]>::try_from(k.as_slice())
+                    .ok()
+                    .map(|k| (k, a, n, s))
+            })
+            .collect())
+    }
+
     pub fn retryable(&self, reason: &str) -> Result<Vec<([u8; 32], Vec<u8>)>> {
         let mut st = self
             .conn
@@ -599,6 +699,66 @@ mod tests {
         o.reject(&[1u8; 32], None, None, "bad_sig", 200, None)
             .unwrap();
         assert_eq!(o.rejected_total().unwrap(), 1);
+        clean(&p);
+    }
+    #[test]
+    fn a_peer_never_synced_with_always_has_news() {
+        // The failure this prevents is a device that skips every connection
+        // forever and reports itself in agreement with a peer it has never
+        // spoken to.
+        let p = tmp("peer-unknown");
+        let ops = Ops::open(&p).unwrap();
+        assert!(ops.peer_has_news(&[1; 32], &[0; 8]).unwrap());
+        clean(&p);
+    }
+
+    #[test]
+    fn an_unchanged_advertisement_is_skippable() {
+        let p = tmp("peer-agreed");
+        let ops = Ops::open(&p).unwrap();
+        ops.peer_agreed(&[1; 32], &[7; 8]).unwrap();
+
+        assert!(!ops.peer_has_news(&[1; 32], &[7; 8]).unwrap());
+        assert!(
+            ops.peer_has_news(&[1; 32], &[8; 8]).unwrap(),
+            "a changed digest did not register as news, so the peer would \
+             never be dialled again"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn agreement_does_not_erase_the_address() {
+        // Both writes land on one row. An upsert that replaced the row rather
+        // than the column would lose the static fallback address every time a
+        // sync completed — leaving the device reachable only by mDNS, which is
+        // exactly the network where mDNS is blocked.
+        let p = tmp("peer-upsert");
+        let ops = Ops::open(&p).unwrap();
+        ops.peer_reached(&[1; 32], "192.168.1.40:9999", 1_000)
+            .unwrap();
+        ops.peer_agreed(&[1; 32], &[7; 8]).unwrap();
+
+        let addrs = ops.peer_addresses().unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].1, "192.168.1.40:9999");
+        assert!(!ops.peer_has_news(&[1; 32], &[7; 8]).unwrap());
+        clean(&p);
+    }
+
+    #[test]
+    fn reaching_a_peer_resets_its_backoff() {
+        let p = tmp("peer-backoff");
+        let ops = Ops::open(&p).unwrap();
+        assert_eq!(ops.peer_missed(&[1; 32]).unwrap(), 1);
+        assert_eq!(ops.peer_missed(&[1; 32]).unwrap(), 2);
+
+        ops.peer_reached(&[1; 32], "10.0.0.2:9999", 1_000).unwrap();
+        assert_eq!(
+            ops.peer_addresses().unwrap()[0].2,
+            0,
+            "a peer that answered was still being backed off from"
+        );
         clean(&p);
     }
 }
