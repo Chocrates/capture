@@ -45,6 +45,37 @@ setup:
 ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired deny
 	@echo
 	@echo 'ci: all gates passed'
+	@echo '     (not included: `make android` — it needs an SDK, an NDK and a'
+	@echo '      JVM, and a gate that cannot run everywhere stops being run)'
+
+## android: build the core for Android and run its suite on a device
+#
+# Deliberately not part of `ci`. A Gradle and NDK build needs an SDK, an NDK
+# and a JVM, none of which the Rust gates need — and a `ci` that cannot run
+# without an Android SDK is one that stops being run at all. The omission is
+# stated here so it reads as a decision.
+#
+# `ci` proves the code is correct. This proves it is still correct somewhere
+# that is not Linux, which is a different question and the one that matters
+# once a phone holds the archive.
+android: android-build android-test
+
+## android-build: cross-compile the core for the emulator and a real phone
+android-build:
+	@echo '--- android: toolchain'
+	@sh tools/android-env.sh >/dev/null
+	@echo '--- android: building for x86_64 (emulator) and aarch64 (device)'
+	@set -e; . ./tools/android-env.sh; \
+	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API build -p capture-store; \
+	 cargo ndk -t x86_64 -P $$ANDROID_NDK_API test -p capture-store --no-run
+
+## android-test: run the store's suite on a connected device or emulator
+#
+# Needs a device. Start one with:
+#   $$ANDROID_HOME/emulator/emulator -avd <name> -no-window -no-audio &
+android-test:
+	@echo '--- android: running the store suite on the device'
+	@set -e; . ./tools/android-env.sh; sh tools/android-test.sh
 
 ## check: the fast loop — format, lint, test
 check: fmt lint test

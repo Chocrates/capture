@@ -1,9 +1,10 @@
 ## 1. The toolchain, before any of it is interesting
 
-- [ ] 1.1 Add `cargo-ndk` and pin the NDK version. The two installed NDKs differ and a build that silently picks one is a build that differs between machines.
-- [ ] 1.2 Cross-compile `capture-store` to `aarch64-linux-android` and run its existing test suite on an emulator. **Before writing any binding.** SQLite, the filesystem and the clock all behave differently there, and finding that out through a Kotlin stack trace is the expensive way.
-- [ ] 1.3 `make android` — build and test, kept out of `make ci` deliberately. `make ci` states the omission so it reads as a decision rather than an oversight.
-- [ ] 1.4 Record which SDK, NDK and JDK the build needs, and fail with that list rather than a linker error when one is missing.
+- [x] 1.1 Add `cargo-ndk` and pin the NDK version. **Done**, and the reason turned out to be sharper than expected: of the two NDKs present one is `28.0.12433566-beta1`. Resolving "newest" would have silently selected a beta toolchain.
+- [x] 1.2 Cross-compile `capture-store` and run its existing test suite on an emulator. **Before writing any binding.** **Done, and it passes unmodified**: 223 unit tests and 108 integration tests, including the whole `two_devices` suite — pairing, sync, convergence, retirement, redaction — over real sockets on Android. SQLite's WAL, the writer lock, the spool and the watch all behave as they do on Linux. The emulator is x86_64, so that target had to be added; the installed `aarch64`/`armv7` targets only build for a physical phone.
+  - Two suites do not run on a device and are listed rather than skipped: `reachable` scans the source tree, which is not there, and `crash` spawns a sibling binary through a cargo path that only exists where cargo built it. Neither is an Android problem and both would otherwise look like one.
+- [x] 1.3 `make android` — build and test, kept out of `make ci` deliberately, and `ci` now prints why.
+- [x] 1.4 Record which SDK, NDK and JDK the build needs, and fail with that list rather than a linker error. **Done** in `tools/android-env.sh`, which had the exact bug it exists to prevent: written `#!/bin/sh` but sourced into whatever shell the caller runs, and zsh does not word-split unquoted expansions — so it read one target named `"x86_64-linux-android aarch64-linux-android"` and declared it missing. Now verified identical under sh, zsh and bash.
 
 ## 2. The binding
 
