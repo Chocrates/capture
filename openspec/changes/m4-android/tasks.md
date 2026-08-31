@@ -32,11 +32,11 @@
 
 ## 5. Reading
 
-- [ ] 5.1 Timeline, note page, search.
-- [ ] 5.2 Agenda and calendar.
-- [ ] 5.3 Wiki with nesting.
+- [x] 5.1 Timeline, note page, search. **Done and driven on the emulator**: notes grouped by the day the archive supplied, with times in each note's own zone.
+- [~] 5.2 Agenda and calendar. **Agenda done** — three bands, and the first is not a subdivision of the second (§4.4, §3.6). The calendar grid is still to do, and needs the desktop's column packer moved into the store rather than written twice.
+- [x] 5.3 Wiki with nesting. The parent arrives as a field on each page rather than as a tree, so there is nothing on this side that can get a cycle or an orphan wrong.
 - [ ] 5.4 Review session.
-- [ ] 5.5 Health, including peers and what is outstanding against each.
+- [~] 5.5 Health. **Conditions done**, in two tiers that are not severities: `attention` wants a decision, `worth-knowing` needs nothing. Peers are still to add, with sync in section 6.
 - [ ] 5.6 Every mutation the desktop offers, per §8.4. A phone that suppresses a note only by reaching for a laptop inverts the gradient §2.6 exists to create.
 
 ## 6. Sync

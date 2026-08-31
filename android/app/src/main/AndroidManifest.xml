@@ -14,6 +14,17 @@
           bypass it.
         -->
 
+        <!-- The reading surface. Where you go, rather than a gesture. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="capture">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!--
           The capture window. A dialog rather than a full screen: it is meant
           to feel like something that appeared over what you were doing, not

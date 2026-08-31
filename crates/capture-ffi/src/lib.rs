@@ -86,6 +86,18 @@ pub struct NoteSummary {
     pub text: Option<String>,
     /// Milliseconds since the epoch.
     pub captured_ms: i64,
+    /// The day this note belongs to, as `2026-09-15`.
+    ///
+    /// Computed in the note's *own* zone, not the reader's. A note captured at
+    /// 23:40 in one place must not move to a different day when read in
+    /// another — the timeline groups by where you were, and travel is not a
+    /// reason for yesterday to become today (§2.3).
+    ///
+    /// Supplied rather than derived by the caller because that is a decision
+    /// about what a day is, and there is one implementation of it.
+    pub day: String,
+    /// The capture time, rendered in the note's own zone.
+    pub at: String,
     pub pinned: bool,
     /// Muted until this moment, where it is muted at all.
     pub muted_until_ms: Option<i64>,
@@ -290,6 +302,18 @@ impl Archive {
             }
         }
         Ok(out)
+    }
+
+    /// Today, in this device's own zone.
+    ///
+    /// Asked for rather than computed by the caller, for the same reason the
+    /// agenda's date is parsed here: what day it is depends on a zone, and
+    /// there is one implementation of that.
+    pub fn today(&self) -> String {
+        let now = jiff::Timestamp::now();
+        now.to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%d")
+            .to_string()
     }
 
     /// What is happening on a day, and what is due.
@@ -550,12 +574,40 @@ impl Archive {
     }
 }
 
+/// A moment, in the zone it happened in.
+///
+/// Both halves are here rather than on the calling side because both depend on
+/// which zone the note belongs to, and that is a rule rather than a
+/// presentation choice. What the caller does with the strings is its business;
+/// what day a note is on is not.
+fn rendered(ms: i64, tz: Option<&str>) -> (String, String) {
+    let zone = tz
+        .and_then(|z| jiff::tz::TimeZone::get(z).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC);
+
+    match jiff::Timestamp::from_millisecond(ms) {
+        Ok(t) => {
+            let z = t.to_zoned(zone);
+            (
+                z.strftime("%Y-%m-%d").to_string(),
+                z.strftime("%H:%M").to_string(),
+            )
+        }
+        // A timestamp outside what the calendar can express. Not worth
+        // refusing a read over — the note exists and its text is what matters.
+        Err(_) => ("unknown".into(), String::new()),
+    }
+}
+
 fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
+    let (day, at) = rendered(n.created.0 as i64, n.tz.as_deref());
     NoteSummary {
         slug: n.slug,
         alias: n.alias,
         text: n.text,
         captured_ms: n.created.0 as i64,
+        day,
+        at,
         pinned: n.pinned,
         muted_until_ms: n.muted_until.map(|t| t as i64),
         redacted: n.redacted_at.is_some(),

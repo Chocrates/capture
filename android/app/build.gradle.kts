@@ -68,6 +68,7 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     // uniffi's generated Kotlin calls the native library through JNA.
     implementation(libs.jna) { artifact { type = "aar" } }
