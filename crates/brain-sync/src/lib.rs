@@ -38,6 +38,7 @@
 extern crate alloc;
 
 pub mod discovery;
+pub mod mdns;
 pub mod message;
 pub mod session;
 pub mod transport;

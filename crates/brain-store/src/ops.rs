@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS pairings (
 ) STRICT;
 ";
 
+/// Where a peer was last reached, and how many dials have failed since.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PeerAddress {
+    /// The peer's public key. Membership is keyed by key, not by origin (§5.3).
+    pub key: [u8; 32],
+    pub addr: String,
+    /// Consecutive failed dials, which is what the backoff is computed from.
+    pub attempts: u32,
+    /// When it was last reached, so a peer gone quiet for a week can be
+    /// reported with *when* rather than only that it is stale (§4.5).
+    pub last_seen: Option<u64>,
+}
+
 fn id_from(b: Vec<u8>) -> Option<EventId> {
     <[u8; 32]>::try_from(b.as_slice()).ok().map(EventId)
 }
@@ -544,7 +557,7 @@ impl Ops {
     }
 
     /// Every peer this device has an address for, for the static fallback.
-    pub fn peer_addresses(&self) -> Result<Vec<([u8; 32], String, u32, Option<u64>)>> {
+    pub fn peer_addresses(&self) -> Result<Vec<PeerAddress>> {
         let mut q = self.conn.prepare(
             "SELECT peer_key, addr, attempts, last_seen FROM peer_state
              WHERE addr IS NOT NULL ORDER BY peer_key",
@@ -561,10 +574,14 @@ impl Ops {
 
         Ok(rows
             .into_iter()
-            .filter_map(|(k, a, n, s)| {
-                <[u8; 32]>::try_from(k.as_slice())
-                    .ok()
-                    .map(|k| (k, a, n, s))
+            .filter_map(|(k, addr, attempts, last_seen)| {
+                let key = <[u8; 32]>::try_from(k.as_slice()).ok()?;
+                Some(PeerAddress {
+                    key,
+                    addr,
+                    attempts,
+                    last_seen,
+                })
             })
             .collect())
     }
@@ -741,7 +758,7 @@ mod tests {
 
         let addrs = ops.peer_addresses().unwrap();
         assert_eq!(addrs.len(), 1);
-        assert_eq!(addrs[0].1, "192.168.1.40:9999");
+        assert_eq!(addrs[0].addr, "192.168.1.40:9999");
         assert!(!ops.peer_has_news(&[1; 32], &[7; 8]).unwrap());
         clean(&p);
     }
@@ -755,7 +772,7 @@ mod tests {
 
         ops.peer_reached(&[1; 32], "10.0.0.2:9999", 1_000).unwrap();
         assert_eq!(
-            ops.peer_addresses().unwrap()[0].2,
+            ops.peer_addresses().unwrap()[0].attempts,
             0,
             "a peer that answered was still being backed off from"
         );

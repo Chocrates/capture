@@ -148,3 +148,80 @@ pub fn backoff(attempt: u32, jitter: u64) -> u64 {
     // is to spread retries out, not to make the first one arrive sooner.
     base + (jitter % (base / 4 + 1))
 }
+
+/// One advertisement seen on the network.
+///
+/// Deliberately not an mDNS type. Everything that decides what to do with a
+/// sighting is a pure function of this, so the deciding is testable without a
+/// network — and mDNS is a source of these rather than something the logic
+/// knows about, which is what makes the static fallback able to produce them
+/// too.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Sighting {
+    /// What the device is calling itself this epoch.
+    pub pseudonym: [u8; 8],
+    /// What it says its version vector amounts to.
+    pub digest: [u8; 8],
+    /// Where to reach it.
+    pub addr: String,
+}
+
+/// The TXT key carrying the pseudonym.
+pub const TXT_NAME: &str = "n";
+/// The TXT key carrying the digest.
+pub const TXT_DIGEST: &str = "d";
+
+/// A member seen on the network, and what it was advertising.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Seen {
+    pub peer: [u8; 32],
+    pub digest: [u8; 8],
+    pub addr: String,
+}
+
+/// Decide whether a sighting is a peer worth talking to.
+///
+/// `None` for anything this device cannot recognise, which is the common case:
+/// a printer, a media player, another household's laptop. Nothing is dialled
+/// on the strength of being on the same network — proximity on the LAN is not
+/// membership (§5.3), and the handshake would refuse it anyway. This just
+/// avoids opening the connection to find out.
+pub fn consider(
+    secret: &[u8; 32],
+    network: &Network,
+    epoch: u64,
+    members: &[[u8; 32]],
+    sighting: &Sighting,
+) -> Option<Seen> {
+    let peer = recognise(secret, network, epoch, members, &sighting.pseudonym)?;
+    Some(Seen {
+        peer,
+        digest: sighting.digest,
+        addr: sighting.addr.clone(),
+    })
+}
+
+/// Render an advertised value for a TXT record.
+pub fn encode_value(v: &[u8; 8]) -> String {
+    let mut s = String::with_capacity(16);
+    for b in v {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Read an advertised value back.
+///
+/// Returns `None` for anything that is not exactly the expected shape. Every
+/// other service on the network puts whatever it likes in its TXT records, so
+/// this is the ordinary case rather than an error worth reporting.
+pub fn decode_value(s: &str) -> Option<[u8; 8]> {
+    if s.len() != ADVERTISED * 2 {
+        return None;
+    }
+    let mut out = [0u8; ADVERTISED];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}

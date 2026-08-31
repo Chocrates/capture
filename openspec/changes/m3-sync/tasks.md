@@ -13,10 +13,10 @@
 
 ## 3. Discovery
 
-- [ ] 3.1 Advertise and browse `_bsp._tcp.local`, with the TXT record carrying the rotating pseudonym and the keyed digest. **Derivations done** in `brain-sync::discovery`; the mDNS wiring itself is still to do.
+- [x] 3.1 Advertise and browse `_bsp._tcp.local`, with the TXT record carrying the rotating pseudonym and the keyed digest. **Done**: `brain-sync::mdns::Beacon` advertises and browses; re-registering under a new name is how rotation happens, and the old instance is withdrawn first so a member does not see one device as two peers. mDNS being unavailable is not an error — it is blocked on many corporate and guest networks, and a device that treated it as fatal would refuse to sync exactly where the fallback exists.
 - [x] 3.2 Derive both from the roster key. **Done**: the roster key is minted, not derived from the member set — a retired device holds the whole log, so anything computable from what it already has stays computable by it, and the device retired *because it was stolen* would go on recognising your devices on every network it meets them. Minting and rotating are one event kind (`roster_key`, 25), so the first key is the first rotation. Rotation is also what closes the counting leak: a keyed digest still changes whenever the vector changes, so keying alone hides the count and leaves the timing. **Test that an observer who is not a member cannot correlate a device across two networks, and cannot infer capture counts from the digest** — those are the two leaks §5.3 names, and both are cheap now and expensive once devices are advertising.
-- [ ] 3.3 Implement the static fallback: last-known addresses, jittered exponential backoff. mDNS is blocked on many corporate and guest networks and a system that only works at home is not a system.
-- [ ] 3.4 Skip the connection where the advertised digest says there is nothing to do.
+- [~] 3.3 Implement the static fallback: last-known addresses, jittered exponential backoff. **Parts done**: `discovery::backoff` (jittered, ceilinged, overflow-safe) and `ops.peer_addresses`/`peer_missed`/`peer_reached` persist the addresses and the retry count across restarts. The loop that dials them is the daemon's, so it lands with section 10.
+- [x] 3.4 Skip the connection where the advertised digest says there is nothing to do. **Done**: `ops.peer_has_news` compares the advertisement against the digest recorded at the last agreement. An unknown peer always reports news — skipping a peer this device has never spoken to would be a device that never syncs.
 
 ## 4. Membership and pairing
 

@@ -180,3 +180,54 @@ fn backoff_spreads_retries_out() {
         "jitter pulled a retry earlier rather than spreading it"
     );
 }
+
+// ------------------------------------------------ what to do with a sighting ----
+
+use brain_sync::discovery::{Sighting, consider, decode_value, encode_value};
+
+fn sighting(pseudonym: [u8; 8], digest: [u8; 8]) -> Sighting {
+    Sighting {
+        pseudonym,
+        digest,
+        addr: "192.168.1.40:9999".into(),
+    }
+}
+
+#[test]
+fn a_member_is_picked_out_of_the_noise() {
+    let net = Network::of(b"home");
+    let phone = [1u8; 32];
+    let s = sighting(pseudonym(&SECRET, &net, 100, &phone), [3; 8]);
+
+    let seen = consider(&SECRET, &net, 100, &[phone], &s).expect("a peer");
+    assert_eq!(seen.peer, phone);
+    assert_eq!(seen.addr, "192.168.1.40:9999");
+}
+
+#[test]
+fn a_stranger_on_the_network_is_not_dialled() {
+    // The ordinary case on any real network: a printer, a media player, a
+    // housemate's laptop. Proximity on the LAN is not membership, and the
+    // handshake would refuse it — this only avoids opening the connection to
+    // find that out.
+    let net = Network::of(b"home");
+    let s = sighting([0xAA; 8], [3; 8]);
+
+    assert_eq!(consider(&SECRET, &net, 100, &[[1u8; 32]], &s), None);
+}
+
+#[test]
+fn advertised_values_survive_the_txt_record() {
+    let v = [0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff, 0x10, 0xab];
+    assert_eq!(decode_value(&encode_value(&v)), Some(v));
+}
+
+#[test]
+fn a_txt_record_from_something_else_is_not_a_peer() {
+    // Every other service on the network writes whatever it likes here.
+    assert_eq!(decode_value(""), None);
+    assert_eq!(decode_value("nope"), None);
+    assert_eq!(decode_value("zzzzzzzzzzzzzzzz"), None, "not hex");
+    assert_eq!(decode_value("00112233445566"), None, "too short");
+    assert_eq!(decode_value("001122334455667788"), None, "too long");
+}

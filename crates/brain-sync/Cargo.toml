@@ -24,6 +24,7 @@ minicbor = { workspace = true }
 snow = { workspace = true }
 # Keyed hashing for the advertised pseudonym and digest (§5.2).
 blake3 = { workspace = true }
+mdns-sd = { version = "0.21.0", default-features = false }
 
 [dev-dependencies]
 # To build the static keypairs a handshake needs, the way the roster holds them.
