@@ -47,3 +47,43 @@ object.
 - **WHEN** a meeting is opened from the agenda
 - **THEN** the notes taken during it are on the same page
 
+
+### Requirement: Every mutation is reachable from the window
+
+The browse surface SHALL offer every mutation the command line offers against a
+note, and SHALL offer device management where the device is already shown.
+
+§8.4 makes the window the first-party surface, and §8.10 scoped it to "every
+mutation" for exactly this reason: muting exists so that suppressing something
+is *cheaper* than destroying it, and that gradient inverts the moment
+suppression needs a shell while destruction is a button. The same argument
+applies to a lost device — the moment somebody needs to retire one is not a
+moment to be looking up a command.
+
+Splitting a series SHALL be offered only on a series, since it is the only
+thing a rule can be split at.
+
+#### Scenario: Changing a series from the window
+- **WHEN** a note is a series
+- **THEN** the page SHALL offer to change it from a date onward
+- **AND** SHALL NOT offer it on a note that is not a series
+
+#### Scenario: Retiring a device from the window
+- **WHEN** a device other than this one is listed
+- **THEN** it SHALL be possible to retire it
+- **AND** this SHALL require the device's key to be typed, as destruction
+  requires the note's name
+
+### Requirement: A shared confirmation says what it is confirming
+
+Where one dialog serves more than one irreversible action, it SHALL state the
+action it is confirming rather than the one it was written for.
+
+This is not presentation. The dialog was written for destruction and says so in
+the markup; reused unchanged it asked "Destroy this content?" over a device
+retirement, which deletes nothing. Confirmation is the one screen whose entire
+job is being precise about what is about to happen.
+
+#### Scenario: Confirming something that is not a destruction
+- **WHEN** the confirmation is raised for an action that destroys nothing
+- **THEN** its title, explanation and accept button SHALL describe that action

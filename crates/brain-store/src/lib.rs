@@ -27,6 +27,7 @@ pub mod log;
 pub mod mutate;
 pub mod notifier;
 pub mod ops;
+pub mod pairing;
 pub mod paths;
 pub mod projection;
 pub mod promote;

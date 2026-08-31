@@ -20,6 +20,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(ipc::Watcher::default())
+        .manage(ipc::Pairing::default())
         .invoke_handler(tauri::generate_handler![
             ipc::changed,
             ipc::timeline,
@@ -50,6 +51,10 @@ fn main() {
             ipc::review,
             ipc::reviewed,
             ipc::carries_forward,
+            ipc::split_series,
+            ipc::retire_device,
+            ipc::start_pairing,
+            ipc::pairing_state,
             ipc::tick,
         ])
         .run(tauri::generate_context!())

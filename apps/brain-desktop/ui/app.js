@@ -805,7 +805,7 @@ async function showNote(name, into = view) {
     return li;
   }));
 
-  into.append(actions(n, into));
+  into.append(actions(n, into, page.promotion));
 }
 
 function linkList(heading, items, render) {
@@ -963,7 +963,7 @@ function editNote(n) {
 /// muting exists so that suppressing something is *cheaper* than destroying it,
 /// and that gradient inverts if suppression needs a shell while destruction is
 /// a documented command.
-function actions(n, into = view) {
+function actions(n, into = view, promotion = null) {
   const row = el("div", "row");
 
   const add = (label, fn, cls) => {
@@ -1005,6 +1005,38 @@ function actions(n, into = view) {
     showNote(n.slug, into);
   });
 
+  // Only on a series, because it is the only thing a rule can be split at.
+  // §3.5: changing the rule in place would rewrite what the schedule *was*,
+  // and a log that revises its own history is an unreliable narrator — which
+  // is the failing the whole system exists to compensate for.
+  if (promotion && promotion.kind === "series") {
+    add("Change from…", async () => {
+      const from = prompt(
+        "Change it from which date onward?\n\n" +
+          "The first occurrence on or after this day, written as 2026-09-15.\n" +
+          "Everything before it keeps the rule it already had.",
+      );
+      if (!from) return;
+      const rule = prompt(
+        `From ${from.trim()} onward, how often?\n\n` +
+          'Written the way you would capture it — "every tuesday at 9".',
+        promotion.descriptor || "",
+      );
+      if (!rule) return;
+
+      await call("split_series", {
+        name: n.slug,
+        from: from.trim(),
+        rule: rule.trim(),
+      });
+      toast(
+        "Split. What came before is unchanged, and what follows is a new " +
+          "note with the same text.",
+      );
+      showTimeline();
+    });
+  }
+
   add("Rename", async () => {
     const alias = prompt("A chosen name (blank clears it):", n.alias || "");
     if (alias === null) return;
@@ -1042,6 +1074,13 @@ function confirmRedaction(note) {
   const items = document.getElementById("confirm-items");
   const field = document.getElementById("confirm-name");
   const go = document.getElementById("confirm-go");
+  say({
+    title: "Destroy this content?",
+    why: "This cannot be undone once the window elapses.",
+    hint: "Type the note's name to confirm:",
+    go: "Destroy",
+    cancel: "Keep it",
+  });
 
   items.replaceChildren();
   const li = el("li");
@@ -1069,6 +1108,20 @@ function confirmRedaction(note) {
     toast(`Queued. Cancel within the window — id ${id}.`);
     showTimeline();
   };
+}
+
+/// The one dialog's words, set per use.
+///
+/// It was written for destruction and says so in the markup. Reusing it
+/// without changing them would have asked "Destroy this content?" over a
+/// device retirement, which deletes nothing — and this is the one screen in
+/// the system where being precise is the entire job.
+function say({ title, why, hint, go, cancel }) {
+  document.getElementById("confirm-title").textContent = title;
+  document.getElementById("confirm-why").textContent = why;
+  document.getElementById("confirm-hint").textContent = hint;
+  document.getElementById("confirm-go").textContent = go;
+  document.getElementById("confirm-cancel").textContent = cancel;
 }
 
 /// The pending countdown, refreshed on a tick.
@@ -1503,6 +1556,7 @@ async function showHealth() {
   // device" is a fact worth being able to confirm — not seeing a second one
   // is otherwise indistinguishable from not having looked.
   view.append(el("h2", null, "Devices"));
+  view.append(pairingRow());
   if (!h.peers || h.peers.length === 0) {
     view.append(el("p", "healthy", "No roster yet."));
   }
@@ -1526,7 +1580,128 @@ function peer(p) {
   else said = `${p.addr || "no address"} — last reached ${ago(p.last_seen_ms)} ago`;
 
   box.append(el("div", null, said));
+
+  // Not on this device, and not the last one standing. Retiring is how a lost
+  // or stolen device stops being accepted, and the moment somebody needs it is
+  // not a moment to be looking up a command.
+  if (!p.is_self) {
+    const b = el("button", "act danger", "Retire");
+    b.addEventListener("click", () => confirmRetire(p));
+    box.append(b);
+  }
   return box;
+}
+
+/// Adding a device: a code here, typed there.
+///
+/// The window shows the code and then waits, because the answer arrives
+/// whenever somebody walks to the other device — which is the gesture, not a
+/// delay to be engineered away. It is polled rather than pushed for the reason
+/// the whole reader is: something that depends on being told shows the wrong
+/// thing for ever if the message is lost, where something that looks for
+/// itself is at worst late.
+function pairingRow() {
+  const box = el("div", "cond worth-knowing");
+  const line = el("div");
+  box.append(line);
+
+  const start = el("button", "act", "Add a device");
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    const s = await call("start_pairing");
+    render(s);
+    poll();
+  });
+  box.append(start);
+
+  const render = (s) => {
+    if (s.admitted) {
+      line.textContent = `Paired with ${s.admitted}. It receives the archive on the next sync.`;
+      start.disabled = false;
+      start.textContent = "Add another";
+      return true;
+    }
+    if (s.failed) {
+      line.textContent = s.failed;
+      start.disabled = false;
+      start.textContent = "Try again";
+      return true;
+    }
+    if (s.code) {
+      line.textContent =
+        `On the other device, run:  brain pair ${s.code} --at this machine` +
+        "  —  the code stops working after one wrong attempt.";
+      return false;
+    }
+    line.textContent = "No other devices yet.";
+    return true;
+  };
+
+  const poll = () => {
+    const timer = setInterval(async () => {
+      const s = await call("pairing_state");
+      if (render(s)) {
+        clearInterval(timer);
+        if (s.admitted) showHealth();
+      }
+    }, 1000);
+  };
+
+  render({ code: null, admitted: null, failed: null });
+  return box;
+}
+
+/// Retiring asks for the key to be typed, like destruction asks for the name.
+///
+/// It is not destruction — nothing is deleted, and the device's past events
+/// stay valid — but it is the other thing in the system that cannot be undone
+/// by clicking again: coming back needs two devices and a co-signature. A
+/// count is dismissible in a way a typed key is not.
+function confirmRetire(p) {
+  const box = document.getElementById("confirm");
+  const items = document.getElementById("confirm-items");
+  const field = document.getElementById("confirm-name");
+  const go = document.getElementById("confirm-go");
+  say({
+    title: "Stop accepting this device?",
+    why: "Nothing is deleted. It stops being accepted from where it is now.",
+    hint: "Type the device's key to confirm:",
+    go: "Retire",
+    cancel: "Leave it",
+  });
+
+  items.replaceChildren();
+  const li = el("li");
+  li.append(el("strong", null, p.key));
+  li.append(
+    document.createElement("br"),
+    "Stops being accepted from where it is now. Its past events stay — they " +
+      "were legitimately authored. Coming back needs another device to vouch.",
+  );
+  items.append(li);
+
+  field.value = "";
+  go.disabled = true;
+  box.hidden = false;
+  field.focus();
+
+  const check = () => {
+    go.disabled = field.value.trim() !== p.key;
+  };
+  const close = () => {
+    box.hidden = true;
+    field.removeEventListener("input", check);
+    go.onclick = null;
+  };
+
+  field.addEventListener("input", check);
+  document.getElementById("confirm-cancel").onclick = () => close();
+  go.onclick = async () => {
+    close();
+    await call("retire_device", { key: p.key });
+    toast("Retired. Other devices learn of it as they sync.");
+    showHealth();
+  };
 }
 
 function ago(ms) {

@@ -631,6 +631,229 @@ pub fn set_parent(name: String, under: Option<String>) -> std::result::Result<()
     })())
 }
 
+/// A pairing in progress.
+///
+/// Held here because the exchange outlives the call that starts it: the window
+/// shows a code, and the answer arrives whenever somebody walks to the other
+/// device and types it. A command that blocked until then would freeze the
+/// interface for up to three minutes.
+#[derive(Default)]
+pub struct Pairing(std::sync::Mutex<Option<Progress>>);
+
+struct Progress {
+    code: String,
+    /// `None` until it finishes; then who was admitted, or why it did not.
+    outcome: std::sync::Arc<std::sync::Mutex<Option<std::result::Result<String, String>>>>,
+}
+
+/// What the window shows while a pairing is open.
+#[derive(Serialize)]
+pub struct PairingState {
+    /// The digits to read out, while one is running.
+    pub code: Option<String>,
+    /// Who was admitted, once it has finished.
+    pub admitted: Option<String>,
+    /// Why it did not, if it did not.
+    pub failed: Option<String>,
+}
+
+/// Show a code, and admit whoever types it correctly.
+///
+/// Returns as soon as the code exists. The exchange runs on its own thread and
+/// the window asks [`pairing_state`] how it went.
+#[tauri::command]
+pub fn start_pairing(
+    pairing: tauri::State<'_, Pairing>,
+) -> std::result::Result<PairingState, String> {
+    wire((|| {
+        let paths = paths()?;
+        let offering = brain_store::pairing::Offering::open(&paths)?;
+        let code = offering.shown();
+
+        let outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let done = std::sync::Arc::clone(&outcome);
+        let started = now_ms();
+
+        std::thread::spawn(move || {
+            let result = offering
+                .admit_one(&paths, started, now_ms)
+                .map(|key| short_key(&key))
+                .map_err(|e| e.to_string());
+            if let Ok(mut slot) = done.lock() {
+                *slot = Some(result);
+            }
+        });
+
+        if let Ok(mut held) = pairing.0.lock() {
+            *held = Some(Progress {
+                code: code.clone(),
+                outcome,
+            });
+        }
+
+        Ok(PairingState {
+            code: Some(code),
+            admitted: None,
+            failed: None,
+        })
+    })())
+}
+
+/// How the pairing is going.
+#[tauri::command]
+pub fn pairing_state(pairing: tauri::State<'_, Pairing>) -> PairingState {
+    let Ok(held) = pairing.0.lock() else {
+        return PairingState {
+            code: None,
+            admitted: None,
+            failed: None,
+        };
+    };
+    let Some(progress) = held.as_ref() else {
+        return PairingState {
+            code: None,
+            admitted: None,
+            failed: None,
+        };
+    };
+
+    match progress.outcome.lock().ok().and_then(|o| o.clone()) {
+        None => PairingState {
+            code: Some(progress.code.clone()),
+            admitted: None,
+            failed: None,
+        },
+        Some(Ok(key)) => PairingState {
+            code: None,
+            admitted: Some(key),
+            failed: None,
+        },
+        Some(Err(why)) => PairingState {
+            code: None,
+            admitted: None,
+            failed: Some(why),
+        },
+    }
+}
+
+/// Stop accepting what a device writes, from where it is now.
+///
+/// The remedy for a device that was lost or stolen, and the reason it belongs
+/// here rather than only in the terminal: the moment somebody needs it is not
+/// a moment to be looking up a command.
+///
+/// It retires the **key**, not an origin — retiring an origin would let the
+/// device mint a fresh incarnation on its next restart and return. Nothing is
+/// deleted: a retired device's past events were legitimately authored and stay
+/// valid, and discarding them would mean losing real notes.
+#[tauri::command]
+pub fn retire_device(key: String) -> std::result::Result<(), String> {
+    wire((|| {
+        let paths = paths()?;
+        let identity = brain_store::Identity::load(&paths)?;
+
+        let log = brain_store::log::Log::open_read(&paths.events)?;
+        let mut roster = brain_core::roster::build(&log.all()?);
+        roster.honour_self(&identity.public().to_bytes());
+        drop(log);
+
+        let wanted = key.to_ascii_lowercase();
+        let matches: Vec<[u8; 32]> = roster
+            .keys
+            .iter()
+            .copied()
+            .filter(|k| short_key(k).starts_with(&wanted))
+            .collect();
+
+        let subject = match matches.as_slice() {
+            [] => return Err(Error::NotFound(format!("no device matches {key}"))),
+            [one] => *one,
+            _ => {
+                return Err(Error::Usage(
+                    "more than one device starts with that — give more of the key".into(),
+                ));
+            }
+        };
+
+        // A roster with nobody in it can never admit anyone again, because
+        // `device_add` needs a signature from a current member.
+        if roster.keys.len() == 1 {
+            return Err(Error::Usage(
+                "this is the only device in the roster, and a roster with nobody in it can \
+                 never admit anyone again"
+                    .into(),
+            ));
+        }
+
+        let mut s = brain_store::session::Session::open(paths.clone())?;
+        s.retire(&subject, None).map(|_| ())
+    })())
+}
+
+/// Change a recurring series from one occurrence onward.
+///
+/// The boundary is a date rather than an index, and the rule is read by the
+/// same recognizer a capture uses — see the command's own documentation for
+/// why a split is not an edit. This is the surface half of it: §8.4 makes the
+/// window the first-party surface, so a mutation reachable only from the
+/// terminal is a mutation most of its uses cannot reach.
+#[tauri::command]
+pub fn split_series(name: String, from: String, rule: String) -> std::result::Result<(), String> {
+    wire((|| {
+        let paths = paths()?;
+        let day = day_at_local_midnight(&from)?;
+
+        // The rule first, before the store is opened. A rule that is not a
+        // rule is wrong whatever the note's occurrences look like, and
+        // reporting it as "nothing after that point" sends the reader to the
+        // wrong problem.
+        let zone = jiff::tz::TimeZone::system()
+            .iana_name()
+            .unwrap_or("UTC")
+            .to_string();
+        let zone = brain_time::Zone::new(&zone)
+            .or_else(|| brain_time::Zone::new("UTC"))
+            .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
+
+        let read = brain_parse::recognize(&rule, now_ms() as i64, zone);
+        let brain_parse::Shape::Recurring { rule: spec, .. } = read.shape else {
+            return Err(Error::Usage(format!(
+                "{rule:?} is not a repeating rule — try something like \"every tuesday at 9\""
+            )));
+        };
+
+        let boundary = {
+            let s = read_only()?;
+            let tgt = s
+                .resolve(&name)?
+                .ok_or_else(|| Error::NotFound(name.clone()))?;
+            let occurrences = s.occurrences_of(&tgt)?;
+            occurrences
+                .iter()
+                .find(|o| o.occ >= day)
+                .map(|o| o.occ)
+                .ok_or_else(|| {
+                    Error::Usage(format!(
+                        "{name} has no occurrence on or after {from} — nothing after that \
+                         point to change"
+                    ))
+                })?
+        };
+
+        brain_store::promote::split_series(&paths, &name, boundary, spec)
+    })())
+}
+
+/// A `YYYY-MM-DD` date at local midnight.
+fn day_at_local_midnight(s: &str) -> Result<i64> {
+    let date: jiff::civil::Date = s
+        .parse()
+        .map_err(|_| Error::Usage(format!("{s:?} is not a date — write it as 2026-09-15")))?;
+    date.to_zoned(jiff::tz::TimeZone::system())
+        .map(|z| z.timestamp().as_millisecond())
+        .map_err(|_| Error::Usage(format!("{s:?} is not a date that exists")))
+}
+
 /// What the recognizer saw, when it was not sure enough to act.
 ///
 /// Deliberately says how sure it was. A suggestion the reader cannot calibrate
