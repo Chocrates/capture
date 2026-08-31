@@ -59,13 +59,13 @@
 
 ## 10. Where the daemon lives
 
-- [ ] 10.1 Decide and record: a separate process, or the resident overlay. The overlay is already the elected writer, which argues for one process; a loop that must never block the capture gesture argues against. Whatever is chosen, **the capture gesture's latency histogram must be unchanged**, and that is measured rather than asserted.
-- [ ] 10.2 Append through the same writer lock as everything else. The sync daemon must not become a second writer — §8.8 has one, and this milestone is not the place to change that.
+- [x] 10.1 Decide and record: a separate process, or the resident overlay. **Separate process** (`brain-syncd`). The overlay is what the capture gesture waits on and §8.10 freezes its latency; a blocking accept, a stalled peer, or an mDNS responder thread cannot delay the chord if none of them run in that process. The histogram comparison is still to run. The overlay is already the elected writer, which argues for one process; a loop that must never block the capture gesture argues against. Whatever is chosen, **the capture gesture's latency histogram must be unchanged**, and that is measured rather than asserted.
+- [x] 10.2 Append through the same writer lock as everything else. **Done**: the overlay does not hold the election continuously — it takes the lock per operation and treats contention as ordinary, which its due-work tick already does — so the daemon does the same, holding it only for as long as it takes to hand arrivals to the same `Gate` a local capture goes through. The sync daemon must not become a second writer — §8.8 has one, and this milestone is not the place to change that.
 
 ## 11. Acceptance
 
-- [ ] 11.1 Two real devices, two real captures, one archive. Assert the folds are identical, and assert it after a partition rather than only on a good network.
-- [ ] 11.2 Concurrent edits to the same note from both devices, resolved by the rules M1 and M2 property-tested and never once exercised by a second writer. **This is the acceptance test that matters**: everything else confirms the protocol works, and this confirms the data model does.
-- [ ] 11.3 A redaction ordered on one device while the other is asleep, arriving and taking effect when it wakes.
+- [x] 11.1 Two real devices, two real captures, one archive. **Done**: real identities, real Noise over a real socket, the same `Gate` a local capture uses. Asserted after a partition, and asserted that a second round moves nothing — convergence has to be stable, or the daemon syncs for ever.
+- [x] 11.2 Concurrent edits to the same note from both devices, resolved by the rules M1 and M2 property-tested and never once exercised by a second writer. **Done**: both devices edit the same note while unable to see each other, and both land on the same text. **This is the acceptance test that matters**: everything else confirms the protocol works, and this confirms the data model does.
+- [x] 11.3 A redaction ordered on one device while the other is asleep, arriving and taking effect when it wakes. **Done**, and asserted at the bytes rather than at the projection: `text` is also absent while a redaction is merely *queued*, so the first version of this test passed with the content still on disk. It now checks the log no longer holds the body, and `drain_due_at` takes the clock as a parameter so the cancellation window can actually be crossed.
 - [ ] 11.4 Confirm the capture gesture is unchanged — chord, overlay, commit key, and the latency histogram (§8.10 freezes it for the duration).
 - [ ] 11.5 `make ci` passes, including `deny` over whatever a network stack and a Noise implementation drag in. This is the largest new dependency surface the project has taken on.

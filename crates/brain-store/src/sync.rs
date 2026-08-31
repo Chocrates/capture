@@ -22,11 +22,43 @@ pub struct StoreArchive<'a, 'g> {
     /// Wall-clock milliseconds, supplied rather than read, so a sync is
     /// testable without waiting for time to pass.
     now: u64,
+    /// What was taken this round, waiting to be folded.
+    ///
+    /// Accumulated rather than folded per event. A fold re-computes every note
+    /// an event touches, and doing that once per arriving event would make
+    /// catching up after a week off quadratic in the number of edits to the
+    /// same note — the same lesson `append_all` learned when writing five
+    /// review events one at a time cost a third of a second.
+    taken: Vec<Envelope>,
 }
 
 impl<'a, 'g> StoreArchive<'a, 'g> {
     pub fn new(gate: &'g mut Gate<'a>, now: u64) -> Self {
-        Self { gate, now }
+        Self {
+            gate,
+            now,
+            taken: Vec::new(),
+        }
+    }
+
+    /// Fold everything this round took into the projection.
+    ///
+    /// Must be called after the exchange. `Gate` puts events in the log and
+    /// nothing else — the log is the archive, and the projection is derived
+    /// data that something has to derive. Without this a sync moves every
+    /// event correctly and no surface shows any of them, which is the failure
+    /// the two-device test caught.
+    pub fn settle(&mut self) -> crate::Result<usize> {
+        if self.taken.is_empty() {
+            return Ok(0);
+        }
+        let taken = core::mem::take(&mut self.taken);
+        self.gate.fold(&taken, self.now as i64)
+    }
+
+    /// How many events are waiting to be folded.
+    pub fn pending(&self) -> usize {
+        self.taken.len()
     }
 }
 
@@ -55,7 +87,11 @@ impl Archive for StoreArchive<'_, '_> {
         // handed it over — transport security proves "the desktop sent this",
         // and only a per-event signature proves "the phone wrote it".
         match self.gate.offer(&e, self.now) {
-            Ok(Outcome::Took(_)) => true,
+            Ok(Outcome::Took(crate::log::Ingested::Duplicate)) => true,
+            Ok(Outcome::Took(_)) => {
+                self.taken.push(e);
+                true
+            }
             // Set aside rather than taken: authentic, stored at its position,
             // relayed onward, excluded from the fold until whatever it is
             // waiting for arrives. Reported as taken because it *was* taken —

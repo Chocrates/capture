@@ -303,8 +303,16 @@ fn reconcile<T: brain_sync::transport::Transport>(
     let mut gate = Gate::open(&mut s.log, &mut s.state, &ops)?;
     let mut archive = StoreArchive::new(&mut gate, now());
 
-    exchange(secure, &mut archive)
-        .map_err(|e| brain_store::Error::Usage(format!("exchange failed: {e:?}")))
+    let done = exchange(secure, &mut archive)
+        .map_err(|e| brain_store::Error::Usage(format!("exchange failed: {e:?}")))?;
+
+    // The log has them; the projection does not until this runs. Without it a
+    // round moves every event correctly and no surface shows any of them.
+    let folded = archive.settle()?;
+    if folded > 0 {
+        tracing::debug!(folded, "arrivals folded into the projection");
+    }
+    Ok(done)
 }
 
 /// Membership and what this device holds, without taking the writer lock.

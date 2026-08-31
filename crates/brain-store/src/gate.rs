@@ -217,6 +217,19 @@ impl<'a> Gate<'a> {
     }
 
     /// The roster as it currently stands.
+    /// Fold arrived events into the projection.
+    ///
+    /// The gate puts events in the log and stops there, because the log is the
+    /// archive and everything else is derived. Something still has to derive
+    /// it, and for events that arrived from a peer that something is here.
+    ///
+    /// Incremental rather than a rebuild: a restore touches every note at once
+    /// and earns a rebuild, while a sync round touches whatever a peer wrote
+    /// since last time — usually a handful.
+    pub fn fold(&mut self, arriving: &[Envelope], now: i64) -> Result<usize> {
+        crate::incremental::apply(self.state, self.log, arriving, now)
+    }
+
     /// The log this gate guards, for reads.
     ///
     /// Read-only on purpose: every write goes through `offer`, which is the

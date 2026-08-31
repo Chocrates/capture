@@ -1,0 +1,352 @@
+//! Two real stores, one archive.
+//!
+//! Real identities, real Noise over a real socket, and the same `Gate` a local
+//! capture goes through. What is deliberately *not* here is the daemon's loop:
+//! this asserts that two devices converge, not that a timer fires.
+//!
+//! §11.2 calls the concurrent-edit case the acceptance test that matters, and
+//! it is right to: everything else confirms the protocol works, and that one
+//! confirms the data model does. Every merge rule M1 and M2 property-tested
+//! was, until now, exercised by exactly one writer.
+
+use std::net::{TcpListener, TcpStream};
+
+use brain_store::gate::Gate;
+use brain_store::ops::Ops;
+use brain_store::paths::StorePaths;
+use brain_store::session::{Admitted, Session};
+use brain_store::sync::StoreArchive;
+use brain_sync::anti_entropy::exchange;
+use brain_sync::session::Session as Secure;
+use brain_sync::tcp::Tcp;
+
+struct Device {
+    paths: StorePaths,
+}
+
+impl Device {
+    fn new(name: &str) -> Device {
+        let root = std::env::temp_dir().join(format!(
+            "brain-2dev-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = StorePaths::under(&root);
+        let fresh = brain_store::store::create(&paths, 1_700_000_000_000).unwrap();
+
+        let mut log = brain_store::log::Log::open(&paths.events).unwrap();
+        log.append(&fresh.root).unwrap();
+        log.append(&fresh.roster_key).unwrap();
+
+        let ops = Ops::open(&paths.ops).unwrap();
+        let generation = ops.generation().unwrap();
+        brain_store::projection::Store::open(&brain_store::projection::generation_path(
+            &paths.state,
+            generation,
+        ))
+        .unwrap();
+
+        let (wall, counter) = fresh.clock.persist();
+        let mut identity = fresh.identity;
+        identity
+            .advance(&paths, fresh.roster_key.header.seq, wall, counter)
+            .unwrap();
+
+        Device { paths }
+    }
+
+    fn identity(&self) -> brain_store::Identity {
+        brain_store::Identity::load(&self.paths).unwrap()
+    }
+
+    fn admitted(&self) -> Admitted {
+        let id = self.identity();
+        Admitted {
+            pubkey: id.public().to_bytes(),
+            incarnation: id.incarnation().0,
+            noise: id.noise_public(),
+        }
+    }
+
+    fn session(&self) -> Session {
+        Session::open(self.paths.clone()).unwrap()
+    }
+
+    /// Capture, and return the note's permanent name.
+    ///
+    /// The slug rather than the id, because a slug is what both devices call
+    /// the note and the test is about them agreeing.
+    fn capture(&self, text: &str) -> String {
+        let mut s = self.session();
+        let body = brain_store::session::capture_body(text).unwrap();
+        s.capture(&body).unwrap().slug
+    }
+
+    fn read(&self) -> brain_store::projection::Store {
+        let generation = Ops::open(&self.paths.ops).unwrap().generation().unwrap();
+        brain_store::projection::Store::open_read(&brain_store::projection::generation_path(
+            &self.paths.state,
+            generation,
+        ))
+        .unwrap()
+    }
+
+    /// Whether the log still holds the bytes of the note's capture.
+    ///
+    /// The projection hiding the text is not the promise. `text` is also None
+    /// while a redaction is merely *queued*, so a test that checked only that
+    /// would pass with the content still on disk — which is the one outcome a
+    /// redaction exists to prevent.
+    fn still_holds_body(&self, id: &brain_core::EventId) -> bool {
+        let log = brain_store::log::Log::open_read(&self.paths.events).unwrap();
+        log.all()
+            .unwrap()
+            .iter()
+            .find(|e| &e.header.id() == id)
+            .map(|e| e.body.is_some())
+            .unwrap_or(false)
+    }
+
+    fn id_of(&self, slug: &str) -> brain_core::EventId {
+        self.read()
+            .resolve(slug)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no note named {slug}"))
+    }
+
+    fn note_count(&self) -> u64 {
+        self.read().note_count().unwrap()
+    }
+
+    /// The text of a note, by the name both devices know it as.
+    fn text_of(&self, slug: &str) -> Option<String> {
+        let id = self.read().resolve(slug).unwrap()?;
+        self.read().note(&id).unwrap().and_then(|n| n.text)
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.paths.root).ok();
+    }
+}
+
+/// An edit body, with the nonce the session minted.
+fn edit(nonce: [u8; 16], text: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    minicbor::encode(
+        &brain_core::body::EditBody {
+            nonce,
+            text: text.into(),
+        },
+        &mut b,
+    )
+    .unwrap();
+    b
+}
+
+/// Run one round of anti-entropy between two stores over a real socket.
+fn sync(a: &Device, b: &Device) {
+    let a_id = a.identity();
+    let b_id = b.identity();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let b_paths = b.paths.clone();
+    let b_secret = b_id.noise_secret();
+    let responder = std::thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        let tcp = Tcp::new(stream).unwrap();
+        let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
+
+        let mut s = Session::open(b_paths.clone()).unwrap();
+        let ops = Ops::open(&b_paths.ops).unwrap();
+        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
+        let mut archive = StoreArchive::new(&mut gate, 1_700_000_100_000);
+        let done = exchange(&mut secure, &mut archive).expect("the responder finished");
+        archive.settle().expect("folded what arrived");
+        done
+    });
+
+    let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
+    let mut secure =
+        Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
+
+    {
+        let mut s = Session::open(a.paths.clone()).unwrap();
+        let ops = Ops::open(&a.paths.ops).unwrap();
+        let mut gate = Gate::open(&mut s.log, &mut s.state, &ops).unwrap();
+        let mut archive = StoreArchive::new(&mut gate, 1_700_000_100_000);
+        exchange(&mut secure, &mut archive).expect("the initiator finished");
+        archive.settle().expect("folded what arrived");
+    }
+
+    responder.join().expect("no panic");
+}
+
+/// Pair two fresh devices: each admits the other, so either may dial.
+fn pair(a: &Device, b: &Device) {
+    a.session().admit(&b.admitted()).unwrap();
+    b.session().admit(&a.admitted()).unwrap();
+}
+
+#[test]
+fn two_devices_two_captures_one_archive() {
+    // §11.1. Each device writes something the other has never seen, and after
+    // one round both hold both.
+    let a = Device::new("a-conv");
+    let b = Device::new("b-conv");
+    pair(&a, &b);
+
+    let from_a = a.capture("written on the laptop");
+    let from_b = b.capture("written on the phone");
+
+    sync(&a, &b);
+
+    assert_eq!(a.text_of(&from_b).as_deref(), Some("written on the phone"));
+    assert_eq!(b.text_of(&from_a).as_deref(), Some("written on the laptop"));
+    assert_eq!(a.note_count(), b.note_count(), "the two folds disagree");
+}
+
+#[test]
+fn they_converge_after_a_partition() {
+    // Asserted after a partition rather than only on a good network: several
+    // captures pile up on each side while they cannot see each other, and one
+    // round settles all of them.
+    let a = Device::new("a-part");
+    let b = Device::new("b-part");
+    pair(&a, &b);
+
+    let mut mine = Vec::new();
+    let mut theirs = Vec::new();
+    for i in 0..5 {
+        mine.push(a.capture(&format!("laptop note {i}")));
+        theirs.push(b.capture(&format!("phone note {i}")));
+    }
+
+    sync(&a, &b);
+
+    for slug in mine.iter().chain(theirs.iter()) {
+        assert!(a.text_of(slug).is_some(), "the laptop is missing an event");
+        assert!(b.text_of(slug).is_some(), "the phone is missing an event");
+    }
+    assert_eq!(a.note_count(), b.note_count());
+}
+
+#[test]
+fn a_second_round_moves_nothing() {
+    // Convergence is stable, not oscillating. A round that kept finding work
+    // would mean the two never agree they are done, and the daemon would sync
+    // for ever.
+    let a = Device::new("a-stable");
+    let b = Device::new("b-stable");
+    pair(&a, &b);
+    a.capture("one");
+    b.capture("two");
+
+    sync(&a, &b);
+    let counts = (a.note_count(), b.note_count());
+    sync(&a, &b);
+
+    assert_eq!((a.note_count(), b.note_count()), counts);
+}
+
+#[test]
+fn concurrent_edits_to_one_note_are_resolved_the_same_way_on_both() {
+    // §11.2, the acceptance test that matters. Everything else confirms the
+    // protocol works; this confirms the data model does. Both devices edit the
+    // same note while unable to see each other, and the merge rules — property
+    // tested since M1 and never once exercised by a second writer — have to
+    // land both replicas on the same text.
+    let a = Device::new("a-edit");
+    let b = Device::new("b-edit");
+    pair(&a, &b);
+
+    let note = a.capture("the original");
+    sync(&a, &b);
+    assert_eq!(b.text_of(&note).as_deref(), Some("the original"));
+
+    let on_a = a.id_of(&note);
+    let on_b = b.id_of(&note);
+    assert_eq!(on_a, on_b, "the two devices know the note by different ids");
+
+    // Neither has seen the other's change.
+    a.session()
+        .append(brain_core::Kind::EDIT, Some(on_a), None, |nonce| {
+            edit(nonce, "edited on the laptop")
+        })
+        .unwrap();
+    b.session()
+        .append(brain_core::Kind::EDIT, Some(on_b), None, |nonce| {
+            edit(nonce, "edited on the phone")
+        })
+        .unwrap();
+
+    sync(&a, &b);
+
+    let on_a = a.text_of(&note);
+    let on_b = b.text_of(&note);
+    assert_eq!(
+        on_a, on_b,
+        "the two devices resolved a concurrent edit differently, so the archive \
+         has permanently diverged"
+    );
+    assert!(
+        on_a.as_deref() == Some("edited on the laptop")
+            || on_a.as_deref() == Some("edited on the phone"),
+        "neither edit won: {on_a:?}"
+    );
+}
+
+#[test]
+fn a_redaction_ordered_while_the_other_slept_takes_effect_when_it_wakes() {
+    // §11.3. The phone is asleep when the redaction is ordered, so the eager
+    // push cannot reach it; anti-entropy delivers it on the next round. The
+    // point of the test is that the *destruction* happens on arrival — the
+    // content being gone everywhere is what a redaction promises, and a device
+    // that merely learned about it would still be holding the text.
+    let a = Device::new("a-redact");
+    let b = Device::new("b-redact");
+    pair(&a, &b);
+
+    let note = a.capture("the thing that should not have been written down");
+    sync(&a, &b);
+    let id = b.id_of(&note);
+    // Taken before the redaction: destroying a note rewrites its slug, so the
+    // name it was captured under stops resolving.
+    let on_a = a.id_of(&note);
+    assert!(
+        b.text_of(&note).is_some() && b.still_holds_body(&id),
+        "the phone never had the content, so this proves nothing"
+    );
+
+    // Ordered while the phone is unreachable.
+    brain_store::mutate::redact(&a.paths, &note).unwrap();
+
+    // Past the cancellation window. It is measured from the redaction's own
+    // timestamp so that every replica destroys at the same instant rather than
+    // each starting its own clock on arrival — which is exactly why a test
+    // that could not move time could only assert the destruction was queued.
+    let after_the_window = a.read().redact_queue().unwrap()[0].2 + 1;
+    a.session().drain_due_at(after_the_window).unwrap();
+    assert!(
+        !a.still_holds_body(&on_a),
+        "the device that ordered the redaction still holds the bytes"
+    );
+
+    // The phone wakes.
+    sync(&a, &b);
+    b.session().drain_due_at(after_the_window).unwrap();
+
+    assert_eq!(
+        b.text_of(&note),
+        None,
+        "the redaction arrived and the content survived it"
+    );
+    assert!(
+        !b.still_holds_body(&id),
+        "the note is hidden but its bytes are still on the other device's disk"
+    );
+}

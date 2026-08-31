@@ -56,6 +56,17 @@ pub struct Session {
     _writer: Writer,
 }
 
+/// What a pairing learned about the device being admitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Admitted {
+    /// The signing key membership is keyed by (§5.3).
+    pub pubkey: [u8; 32],
+    /// The incarnation whose origin is admitted with it.
+    pub incarnation: [u8; 16],
+    /// The X25519 key a session is opened against.
+    pub noise: [u8; 32],
+}
+
 impl Session {
     /// Open a store for writing.
     ///
@@ -354,8 +365,19 @@ impl Session {
     }
 
     pub fn drain_due(&mut self) -> Result<crate::due::Drained> {
+        self.drain_due_at(now_ms())
+    }
+
+    /// Drain as of a given moment.
+    ///
+    /// The clock is a parameter for the same reason `store::create` takes one:
+    /// a redaction does not execute until its cancellation window has passed,
+    /// and a test that could not move time could only ever assert that the
+    /// destruction was *queued* — which is indistinguishable from the content
+    /// still being on disk, and is the one outcome the feature exists to
+    /// prevent.
+    pub fn drain_due_at(&mut self, now: u64) -> Result<crate::due::Drained> {
         let ops = Ops::open(&self.paths.ops)?;
-        let now = now_ms();
         let mut done = crate::due::Drained::default();
 
         // What each origin has already destroyed, for the ceiling below.
@@ -426,6 +448,31 @@ impl Session {
         let id = e.header.id();
         self.commit(&[e])?;
         Ok(id)
+    }
+
+    /// Admit another device: this one vouching for its key.
+    ///
+    /// The event a pairing produces. Every other device learns the newcomer by
+    /// folding this rather than by pairing with it, which is what makes
+    /// pairing one physical gesture instead of one per pair of devices (§5.3).
+    ///
+    /// The subject's origin is not named — it is derived from the key and
+    /// incarnation — so an admission cannot claim an origin the subject does
+    /// not own, including one another device is already using.
+    pub fn admit(&mut self, subject: &Admitted) -> Result<brain_core::EventId> {
+        let (pubkey, incarnation, noise) = (subject.pubkey, subject.incarnation, subject.noise);
+        self.append(Kind::DEVICE_ADD, None, None, move |nonce| {
+            let body = brain_core::body::OriginClaimBody {
+                nonce,
+                pubkey,
+                incarnation,
+                // Without it the newcomer is a member nobody can dial.
+                noise: Some(noise),
+            };
+            let mut b = Vec::new();
+            minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
+            b
+        })
     }
 
     /// Author several events of one kind and make them durable together.
