@@ -800,58 +800,13 @@ pub fn retire_device(key: String) -> std::result::Result<(), String> {
 #[tauri::command]
 pub fn split_series(name: String, from: String, rule: String) -> std::result::Result<(), String> {
     wire((|| {
-        let paths = paths()?;
-        let day = day_at_local_midnight(&from)?;
-
-        // The rule first, before the store is opened. A rule that is not a
-        // rule is wrong whatever the note's occurrences look like, and
-        // reporting it as "nothing after that point" sends the reader to the
-        // wrong problem.
         let zone = jiff::tz::TimeZone::system()
             .iana_name()
             .unwrap_or("UTC")
             .to_string();
-        let zone = brain_time::Zone::new(&zone)
-            .or_else(|| brain_time::Zone::new("UTC"))
-            .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
-
-        let read = brain_parse::recognize(&rule, now_ms() as i64, zone);
-        let brain_parse::Shape::Recurring { rule: spec, .. } = read.shape else {
-            return Err(Error::Usage(format!(
-                "{rule:?} is not a repeating rule — try something like \"every tuesday at 9\""
-            )));
-        };
-
-        let boundary = {
-            let s = read_only()?;
-            let tgt = s
-                .resolve(&name)?
-                .ok_or_else(|| Error::NotFound(name.clone()))?;
-            let occurrences = s.occurrences_of(&tgt)?;
-            occurrences
-                .iter()
-                .find(|o| o.occ >= day)
-                .map(|o| o.occ)
-                .ok_or_else(|| {
-                    Error::Usage(format!(
-                        "{name} has no occurrence on or after {from} — nothing after that \
-                         point to change"
-                    ))
-                })?
-        };
-
-        brain_store::promote::split_series(&paths, &name, boundary, spec)
+        brain_store::promote::split_at(&paths()?, &name, &from, &rule, now_ms() as i64, &zone)
+            .map(|_| ())
     })())
-}
-
-/// A `YYYY-MM-DD` date at local midnight.
-fn day_at_local_midnight(s: &str) -> Result<i64> {
-    let date: jiff::civil::Date = s
-        .parse()
-        .map_err(|_| Error::Usage(format!("{s:?} is not a date — write it as 2026-09-15")))?;
-    date.to_zoned(jiff::tz::TimeZone::system())
-        .map(|z| z.timestamp().as_millisecond())
-        .map_err(|_| Error::Usage(format!("{s:?} is not a date that exists")))
 }
 
 /// What the recognizer saw, when it was not sure enough to act.

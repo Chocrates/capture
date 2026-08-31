@@ -31,7 +31,7 @@ use brain_parse::{CONFIDENCE_FLOOR, Recognition, Shape, When};
 use brain_time::Zone;
 
 use crate::session::{Session, encode};
-use crate::{Result, StorePaths};
+use crate::{Error, Result, StorePaths};
 
 /// The score a recognition needs before anything is written, in hundredths.
 ///
@@ -403,6 +403,99 @@ pub fn carries_forward(paths: &StorePaths, name: &str) -> Result<()> {
 
     fields.carries_forward = true;
     correct(paths, name, Promoted::Series(fields))
+}
+
+/// Change a series from one occurrence onward, named the way a person would.
+///
+/// The store's half of `brain split` and of the window's "Change from…". Both
+/// surfaces had a copy of this — parse a date, parse a rule, find the
+/// boundary, call [`split_series`] — which is two sets of rules about what a
+/// date means and which occurrence it picks. The second set is the one that
+/// drifts, because it is the one exercised least.
+///
+/// `now` is supplied rather than read so the rule is interpreted against a
+/// stated moment, which is what makes the same phrase mean the same thing
+/// here as it does at capture.
+pub fn split_at(
+    paths: &StorePaths,
+    name: &str,
+    from: &str,
+    rule_text: &str,
+    now: i64,
+    zone: &str,
+) -> Result<Split> {
+    // The rule first, before the store is opened. A rule that is not a rule is
+    // wrong whatever the note's occurrences look like, and reporting it as
+    // "nothing after that point" sends the reader to the wrong problem.
+    let zone = Zone::new(zone)
+        .or_else(|| Zone::new("UTC"))
+        .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
+
+    let read = brain_parse::recognize(rule_text, now, zone);
+    let Shape::Recurring { rule, .. } = read.shape else {
+        return Err(Error::Usage(format!(
+            "{rule_text:?} is not a repeating rule — try something like \"every tuesday at 9\""
+        )));
+    };
+
+    let day = local_midnight(from)?;
+
+    let (boundary, before) = {
+        let s = Session::open(paths.clone())?;
+        let tgt = s
+            .state
+            .resolve(name)?
+            .ok_or_else(|| Error::NotFound(name.to_string()))?;
+        let occurrences = s.state.occurrences_of(&tgt)?;
+        if occurrences.is_empty() {
+            return Err(Error::Usage(format!("{name} is not a recurring series")));
+        }
+
+        // The first occurrence on or after the day named, not an exact match:
+        // a person says "from September" and means the next one, not one that
+        // has to fall on a particular instant.
+        let at = occurrences.iter().find(|o| o.occ >= day).ok_or_else(|| {
+            Error::Usage(format!(
+                "{name} has no occurrence on or after {from} — nothing after that point to change"
+            ))
+        })?;
+        let boundary = at.occ;
+        (
+            boundary,
+            occurrences.iter().filter(|o| o.occ < boundary).count(),
+        )
+    };
+
+    split_series(paths, name, boundary, rule)?;
+    Ok(Split { boundary, before })
+}
+
+/// What a split did.
+///
+/// Deliberately without a count of what follows. The occurrences after the
+/// boundary were produced by the *old* rule, so reporting their number would
+/// state how often the new rule fires — a different question, with a different
+/// answer, that this has not asked.
+pub struct Split {
+    /// The occurrence the change starts at.
+    pub boundary: i64,
+    /// How many occurrences before it keep the rule they had.
+    pub before: usize,
+}
+
+/// A `YYYY-MM-DD` date at local midnight.
+///
+/// Deliberately not the full recognizer. "Next tuesday" is fine for capturing
+/// something and wrong for naming a boundary in a schedule that will outlive
+/// the sentence: the person reading it back in a year needs to know which day
+/// was meant.
+fn local_midnight(s: &str) -> Result<i64> {
+    let date: jiff::civil::Date = s
+        .parse()
+        .map_err(|_| Error::Usage(format!("{s:?} is not a date — write it as 2026-09-15")))?;
+    date.to_zoned(jiff::tz::TimeZone::system())
+        .map(|z| z.timestamp().as_millisecond())
+        .map_err(|_| Error::Usage(format!("{s:?} is not a date that exists")))
 }
 
 /// Change a series from one occurrence onward.

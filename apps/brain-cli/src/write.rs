@@ -624,64 +624,16 @@ fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
 /// thing nobody knows about their own calendar, and it stops being true the
 /// moment an occurrence is cancelled.
 pub fn split_series(paths: StorePaths, name: &str, from: &str, rule_text: &str) -> Result<()> {
-    let day = parse_day(from)?;
-
-    // The new rule, read the same way a capture's would be. One recognizer, so
-    // "every other tuesday" means here what it means when captured.
     let now = jiff::Timestamp::now().as_millisecond().max(0);
-    let zone = zone_here();
-    // UTC if the machine has no zone name, which is what a capture does too:
-    // refusing over a missing zone would make the command unusable on exactly
-    // the machines least able to fix it.
-    let zone = brain_time::Zone::new(&zone)
-        .or_else(|| brain_time::Zone::new("UTC"))
-        .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
-    let recognised = brain_parse::recognize(rule_text, now, zone);
-    let brain_parse::Shape::Recurring { rule, .. } = recognised.shape else {
-        return Err(Error::Usage(format!(
-            "{rule_text:?} is not a repeating rule — try something like \"every tuesday at 9\""
-        )));
-    };
+    let done = brain_store::promote::split_at(&paths, name, from, rule_text, now, &zone_here())?;
 
-    // Checked before the store is opened. A rule that is not a rule is wrong
-    // whatever the note's occurrences look like, and reporting it as "nothing
-    // after that point" — which is what happened when the checks ran the other
-    // way round — sends the reader looking at the wrong thing entirely.
-    let (tgt, boundary, before) = {
-        let s = Session::open(paths.clone())?;
-        let tgt = s
-            .state
-            .resolve(name)?
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-        let occurrences = s.state.occurrences_of(&tgt)?;
-        if occurrences.is_empty() {
-            return Err(Error::Usage(format!("{name} is not a recurring series")));
-        }
-
-        // The first occurrence on or after the day named. Not an exact match:
-        // a person says "from September" and means the next one, not one that
-        // has to fall on a particular instant.
-        let Some(at) = occurrences.iter().find(|o| o.occ >= day) else {
-            return Err(Error::Usage(format!(
-                "{name} has no occurrence on or after {from} — nothing after that point to change"
-            )));
-        };
-        let boundary = at.occ;
-        let before = occurrences.iter().filter(|o| o.occ < boundary).count();
-        (tgt, boundary, before)
-    };
-    let _ = tgt;
-
-    brain_store::promote::split_series(&paths, name, boundary, rule)?;
-
-    say!("Split {name} at {}.", day_of(boundary));
-    say!("  {before} occurrence(s) before it keep the old rule");
+    say!("Split {name} at {}.", day_of(done.boundary));
+    say!(
+        "  {} occurrence(s) before it keep the old rule",
+        done.before
+    );
     say!("  from it onward: {rule_text:?}");
     say!();
-    // Deliberately not a count of what follows. The occurrences after the
-    // boundary were produced by the *old* rule, and reporting their number
-    // would state how often the new rule fires — a different question, with a
-    // different answer, that this has not asked.
     say!("The past is unchanged: the old rule still says what it said, and");
     say!("what follows is a new note carrying the same text. Two entries with");
     say!("one name in the timeline is the split, not a duplicate.");
@@ -694,22 +646,6 @@ fn zone_here() -> String {
         .iana_name()
         .unwrap_or("UTC")
         .to_string()
-}
-
-/// A day, as `YYYY-MM-DD`, at local midnight.
-///
-/// Deliberately not the full recogniser. "Next tuesday" is fine for capturing
-/// something and wrong for naming a boundary in a schedule that will outlive
-/// the sentence — the person reading this back in a year needs to know which
-/// day was meant.
-fn parse_day(s: &str) -> Result<i64> {
-    let date: jiff::civil::Date = s
-        .parse()
-        .map_err(|_| Error::Usage(format!("{s:?} is not a date — write it as 2026-09-15")))?;
-    let tz = jiff::tz::TimeZone::system();
-    date.to_zoned(tz)
-        .map(|z| z.timestamp().as_millisecond())
-        .map_err(|_| Error::Usage(format!("{s:?} is not a date that exists")))
 }
 
 fn day_of(ms: i64) -> String {

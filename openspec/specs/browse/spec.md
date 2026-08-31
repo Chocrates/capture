@@ -74,6 +74,29 @@ thing a rule can be split at.
 - **AND** this SHALL require the device's key to be typed, as destruction
   requires the note's name
 
+#### Scenario: Adding a device from the window
+- **WHEN** the user starts a pairing
+- **THEN** the code SHALL be shown immediately
+- **AND** the window SHALL remain usable while it waits, because the answer
+  arrives whenever somebody walks to the other device
+
+### Requirement: Recovering from a lockout stays a command
+
+Re-admission after every device has been retired SHALL NOT require a window
+surface, and its absence there is deliberate rather than unfinished.
+
+§8.4's argument is about *ordinary* gestures: muting must not cost more than
+destroying. Re-admission is neither ordinary nor a gesture — it is two long
+signatures carried between two machines, in a state where nothing else works —
+and a form for pasting hex is not what makes that recoverable. What makes it
+recoverable is that it needs no server and no network.
+
+#### Scenario: A lockout
+- **WHEN** every device has been retired
+- **THEN** recovery SHALL be possible from the command line alone
+- **AND** SHALL require two devices, because one compromised device is what
+  caused the lockout
+
 ### Requirement: A shared confirmation says what it is confirming
 
 Where one dialog serves more than one irreversible action, it SHALL state the
