@@ -599,3 +599,40 @@ fn two_signatures_undo_a_lockout() {
         "a co-signed re-admission did not restore membership"
     );
 }
+
+#[test]
+fn a_readmission_has_to_be_written_by_a_member() {
+    // The deadlock this avoids, found by running it: a retired device cannot
+    // open a session — that is what retiring it did — so a re-admission *it*
+    // authored has no route to the devices refusing it. The remedy cannot
+    // travel through the refusal it exists to undo.
+    //
+    // Written by a member, it is an ordinary event and replicates like one.
+    let a = Device::new("a-readmit-route");
+    let b = Device::new("b-readmit-route");
+    pair(&a, &b);
+    sync(&a, &b);
+
+    let subject = b.admitted();
+    a.session().retire(&subject.pubkey, None).unwrap();
+
+    // Authored by a, which is still a member.
+    let nonce = [0u8; 16];
+    let digest = brain_core::body::readmit_digest(&subject.pubkey, &subject.incarnation, &nonce);
+    let signer = a.identity();
+    let sig = ed25519_dalek::Signer::sign(signer.signing(), &digest).to_bytes();
+    a.session()
+        .readmit_with(&subject, &signer.public().to_bytes(), &sig, nonce)
+        .unwrap();
+
+    // It reaches b by ordinary anti-entropy, and both agree b is a member.
+    sync(&a, &b);
+    for (who, d) in [("a", &a), ("b", &b)] {
+        let log = brain_store::log::Log::open_read(&d.paths.events).unwrap();
+        let roster = brain_core::roster::build(&log.all().unwrap());
+        assert!(
+            roster.keys.contains(&subject.pubkey),
+            "{who} still treats the re-admitted device as retired"
+        );
+    }
+}

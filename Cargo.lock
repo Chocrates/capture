@@ -624,10 +624,12 @@ dependencies = [
  "brain-core",
  "brain-store",
  "brain-sync",
+ "if-addrs",
  "jiff",
  "minicbor",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]

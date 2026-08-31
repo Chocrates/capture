@@ -17,6 +17,8 @@
 //! to take it means somebody else is writing, which is not an error and is not
 //! reported as one.
 
+mod nudge;
+
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -125,6 +127,13 @@ fn run() -> Result<(), brain_store::Error> {
     // Advertising is best-effort. mDNS is blocked on many corporate and guest
     // networks, and a daemon that refused to run without it would refuse
     // exactly where the static fallback exists to help.
+    // The two moments a timer handles worst: a laptop that has just been
+    // opened, and a machine that has just joined the network its peers are on.
+    {
+        let tx = tx.clone();
+        nudge::watch_into(tx);
+    }
+
     let mut beacon = match Beacon::new() {
         Ok(b) => Some(b),
         Err(e) => {
@@ -162,6 +171,19 @@ fn run() -> Result<(), brain_store::Error> {
                         tracing::info!(%e, "a peer connection ended");
                     }
                 }
+                Ok(Arrival::Nudged(what)) => {
+                    if what == nudge::Nudge::Network {
+                        // Everything discovery holds belongs to the old
+                        // network: remembered addresses point at it, and the
+                        // pseudonyms were derived against it, so peers here
+                        // would not be recognised even if they were visible.
+                        if let Some(b) = beacon.as_mut() {
+                            b.forget();
+                        }
+                    }
+                    tracing::debug!(?what, "syncing now rather than on the timer");
+                    break;
+                }
                 Err(_) => {
                     if wrote_something(&paths, &mut watch) {
                         tracing::debug!("something was captured here; syncing now");
@@ -194,6 +216,8 @@ fn wrote_something(paths: &StorePaths, watch: &mut brain_store::watch::Watch) ->
 
 enum Arrival {
     Dialled(std::net::TcpStream),
+    /// The machine woke, or the network changed under it.
+    Nudged(nudge::Nudge),
 }
 
 /// One round: advertise what this device holds, and reconcile with whoever is
@@ -478,22 +502,61 @@ fn parse_dev(hex: &str) -> Option<brain_core::Dev> {
 }
 
 /// Whatever can be said about which network this is.
+///
+/// The *subnets* this machine sits on, not its own addresses. A host address
+/// changes when DHCP reassigns one on the same network, which would rotate the
+/// pseudonym for no reason and lose sight of every peer; the prefix does not.
+///
+/// This being a constant was worse than it looked. §5.2's whole point is that
+/// the advertised name differs per network, so that an observer cannot follow
+/// a device from a café to an office — and with fixed evidence it did not
+/// differ at all. The property was tested by passing two `Network` values to
+/// a pure function, and the daemon only ever produced one.
 fn network_evidence() -> Vec<u8> {
-    // Deliberately coarse. What matters is that it is stable while attached to
-    // one network and different on another; getting it exactly right is a
-    // platform question, and getting it wrong costs discovery latency rather
-    // than correctness.
-    let mut out = Vec::new();
-    for iface in local_addresses() {
-        out.extend_from_slice(iface.to_string().as_bytes());
+    let mut nets: Vec<String> = Vec::new();
+    for iface in if_addrs::get_if_addrs().unwrap_or_default() {
+        if iface.is_loopback() {
+            continue;
+        }
+        let (tag, addr, mask): (&str, Vec<u8>, Vec<u8>) = match iface.addr {
+            if_addrs::IfAddr::V4(v4) => ("4", v4.ip.octets().into(), v4.netmask.octets().into()),
+            if_addrs::IfAddr::V6(v6) => ("6", v6.ip.octets().into(), v6.netmask.octets().into()),
+        };
+
+        // A netmask of all ones describes one address rather than a network,
+        // and IPv6 privacy extensions mint a fresh one of those every few
+        // hours. Including them would rotate the pseudonym on a network that
+        // had not changed, which loses sight of every peer for the same reason
+        // moving networks does.
+        if mask.iter().all(|b| *b == 0xFF) {
+            continue;
+        }
+
+        let prefix: Vec<u8> = addr.iter().zip(&mask).map(|(a, m)| a & m).collect();
+        nets.push(format!("{tag}:{prefix:?}"));
     }
-    out
+
+    // Sorted, because the order interfaces come back in is not promised and
+    // two orderings would be two networks as far as the pseudonym is
+    // concerned.
+    nets.sort();
+    nets.dedup();
+    nets.join("|").into_bytes()
 }
 
+/// Where a peer can actually reach this machine.
+///
+/// Loopback excluded: it was the only thing advertised before, so anything
+/// that found this device over mDNS was told to dial itself. Only the
+/// remembered-address fallback ever worked, which is why the two-device runs
+/// succeeded and proved less than they appeared to.
 fn local_addresses() -> Vec<std::net::IpAddr> {
-    // A placeholder until the daemon enumerates interfaces properly. Binding
-    // to all interfaces still works; what suffers is the advertised address.
-    vec![std::net::IpAddr::from([127, 0, 0, 1])]
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .map(|i| i.ip())
+        .collect()
 }
 
 /// A per-peer jitter that does not need a source of randomness.

@@ -381,6 +381,47 @@ pub fn cosign(paths: StorePaths, blob: &str) -> Result<()> {
     let digest = brain_core::body::readmit_digest(&key, &incarnation, &nonce);
     let sig = ed25519_dalek::Signer::sign(identity.signing(), &digest);
 
+    // If this device is still a member, it writes the re-admission itself
+    // rather than handing back a signature to carry.
+    //
+    // Not a convenience. A retired device cannot open a session — that is what
+    // retiring it did — so a re-admission it authored has no way to reach the
+    // devices that refuse it, and the remedy cannot travel through the refusal
+    // it exists to undo. Authored here it is an ordinary event from a member,
+    // and it replicates like one.
+    let log = brain_store::log::Log::open_read(&paths.events)?;
+    let mut roster = brain_core::roster::build(&log.all()?);
+    roster.honour_self(&identity.public().to_bytes());
+    drop(log);
+
+    if roster.keys.contains(&identity.public().to_bytes()) {
+        let subject = Admitted {
+            pubkey: key,
+            incarnation,
+            // Not known here, and not needed: an origin claim or a pairing
+            // publishes it, and this device already holds one for a peer it
+            // had admitted before. Zero would be a claim, so the roster's own
+            // record is left to stand.
+            noise: [0u8; 32],
+        };
+        let mut s = Session::open(paths.clone())?;
+        s.readmit_with(
+            &subject,
+            &identity.public().to_bytes(),
+            &sig.to_bytes(),
+            nonce,
+        )?;
+
+        say!("Re-admitted {}.", short(&key));
+        say!("It is a member again as soon as this reaches it.");
+        say!();
+        say!("Nothing to carry back: this device is still a member, so it wrote");
+        say!("the re-admission itself. A retired device cannot open a session,");
+        say!("so one it wrote could never have reached the devices refusing it.");
+        return Ok(());
+    }
+
+    say!("This device is retired too, so it cannot write the re-admission.");
     say!("On the other device:");
     say!();
     say!(
