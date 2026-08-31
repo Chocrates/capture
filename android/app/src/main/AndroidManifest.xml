@@ -32,6 +32,38 @@
             android:launchMode="singleTop"
             android:windowSoftInputMode="stateVisible|adjustResize" />
 
+        <!--
+          The share-sheet target. Invisible: it captures and finishes, because
+          a share sheet is already a deliberate act with the content chosen,
+          and asking to confirm would ask the same question twice.
+
+          Translucent rather than NoDisplay. NoDisplay requires the activity to
+          call finish() before onResume() completes, and this one cannot: the
+          capture has to be committed before it reports success, and that is
+          asynchronous. With NoDisplay the platform throws, the process dies,
+          and the shared text is lost — which was the first version's actual
+          behaviour, and the failure it produces is invisible from the sharing
+          application's side.
+        -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:label="capture">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Selected text in any app, without leaving it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".CaptureTile"
             android:exported="true"

@@ -782,6 +782,26 @@ pub fn capture_body(text: &str) -> Result<Vec<u8>> {
     capture_body_in(text, None)
 }
 
+/// The same, carrying where the text came from.
+///
+/// For a share-style capture: something was shared out of another application
+/// and the URL it came from is worth keeping, because a quotation without its
+/// source is a thing you cannot go back to. §2.3's envelope has carried a
+/// `source_url` field since M1 with nothing able to fill it — the desktop has
+/// no share gesture, and the phone is the first surface that does.
+pub fn capture_body_from(text: &str, source_url: Option<&str>) -> Result<Vec<u8>> {
+    let nonce = entropy::nonce()?;
+    let mut ambient = ambient::collect(&ambient::Host);
+    ambient.source_url = source_url.map(String::from);
+
+    Ok(encode(&CaptureBody {
+        nonce: nonce.0,
+        text: text.to_string(),
+        tz: Some(local_zone()),
+        ambient,
+    }))
+}
+
 /// The same, carrying a zone chosen by the caller.
 ///
 /// Used where a capture continues an existing one rather than being made now —
@@ -857,12 +877,20 @@ pub enum Committed {
 /// someone off to retype something that is already safe, which is a worse
 /// outcome than the delay in it becoming searchable.
 pub fn capture(paths: &StorePaths, text: &str) -> Result<Committed> {
-    let body = capture_body(text)?;
+    commit_body(paths, &capture_body(text)?)
+}
 
-    match Session::open_for_capture(paths.clone()).and_then(|mut s| s.capture(&body)) {
+/// Store a body that has already been built.
+///
+/// The spool fallback lives here rather than in each caller, because there is
+/// now more than one way to build a capture body — a typed one and a shared
+/// one — and two copies of "and if that fails, spool it" is one copy that
+/// eventually does not.
+pub fn commit_body(paths: &StorePaths, body: &[u8]) -> Result<Committed> {
+    match Session::open_for_capture(paths.clone()).and_then(|mut s| s.capture(body)) {
         Ok(c) => Ok(Committed::Stored(c.slug)),
         Err(store_failed) => {
-            spool::push(&paths.spool, &body).map_err(|spool_failed| {
+            spool::push(&paths.spool, body).map_err(|spool_failed| {
                 // Both places gone. The only case where a capture is genuinely
                 // lost, so it says so rather than reporting the second failure
                 // and quietly hiding the first.

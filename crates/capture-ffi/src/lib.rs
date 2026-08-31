@@ -189,6 +189,26 @@ impl Archive {
         }
     }
 
+    /// Capture something shared out of another application.
+    ///
+    /// The URL is kept in the ambient envelope rather than pasted into the
+    /// text: a quotation without its source is a thing you cannot go back to,
+    /// and putting it in the text would make it part of what you wrote — it
+    /// would be searched, edited and redacted as if you had typed it.
+    ///
+    /// §2.3's envelope has carried `source_url` since M1 with nothing able to
+    /// fill it, because the desktop has no share gesture. This is the first
+    /// surface that does.
+    pub fn capture_shared(&self, text: String, source_url: Option<String>) -> Result<Captured> {
+        let _writing = self.write_lock()?;
+        let body = capture_store::session::capture_body_from(&text, source_url.as_deref())?;
+
+        match capture_store::session::commit_body(&self.paths, &body)? {
+            Committed::Stored(slug) => Ok(Captured::Stored { slug }),
+            Committed::Spooled => Ok(Captured::Spooled),
+        }
+    }
+
     /// The most recent notes, newest first.
     pub fn timeline(&self, limit: u32) -> Result<Vec<NoteSummary>> {
         let store = self.read()?;
