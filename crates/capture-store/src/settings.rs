@@ -43,7 +43,14 @@ pub enum Kind {
 pub struct Setting {
     pub key: &'static str,
     /// The value used when nobody has chosen one.
-    pub default: &'static str,
+    ///
+    /// `None` where there is no such value — where the unchosen case is
+    /// decided by a rule evaluated locally rather than by a constant. The
+    /// notifier is the example: with one device the answer is "this one", and
+    /// that is a sentence rather than a value. Writing a device key here as a
+    /// stand-in default would be the machine-authored preference §8.9 forbids,
+    /// wearing a different hat.
+    pub default: Option<&'static str>,
     /// What it does, in the words `capture status` shows.
     pub what: &'static str,
     pub kind: Kind,
@@ -53,7 +60,7 @@ pub struct Setting {
 pub const KNOWN: &[Setting] = &[
     Setting {
         key: "timeline.limit",
-        default: "50",
+        default: Some("50"),
         what: "how many notes `capture timeline` shows",
         kind: Kind::Number {
             min: 1.0,
@@ -62,7 +69,7 @@ pub const KNOWN: &[Setting] = &[
     },
     Setting {
         key: "capture.text_scale",
-        default: "1.35",
+        default: Some("1.35"),
         // One knob rather than four. The overlay's sizes were chosen against
         // each other — the field larger than the headings, the headings larger
         // than the legend — and a scale keeps those relationships while making
@@ -70,6 +77,25 @@ pub const KNOWN: &[Setting] = &[
         // the legend bigger than the thing they are typing.
         what: "how large the capture overlay's text is",
         kind: Kind::Number { min: 0.8, max: 2.5 },
+    },
+    Setting {
+        key: crate::notifier::KEY,
+        // No compiled-in value, and that absence is the whole design (§8.9).
+        // Until somebody chooses, the notifier is decided by a rule evaluated
+        // locally and written nowhere — so `capture status` can say "default"
+        // and mean it, and a better rule later reaches everybody rather than
+        // only those who never ran the program.
+        //
+        // An earlier draft had the first paired device emit a `setting`
+        // choosing itself. That is a machine-authored preference recorded as a
+        // user decision, and it is indistinguishable afterwards from one
+        // somebody made.
+        default: None,
+        what: "which device says something when a cue fires",
+        // A device key, as `capture peers` shows it. Not validated against the
+        // roster here: membership changes, and a setting that was valid when
+        // written must not become unwritable in the log it already lives in.
+        kind: Kind::Text,
     },
 ];
 
@@ -80,7 +106,7 @@ pub fn known(key: &str) -> Option<&'static Setting> {
 
 /// The compiled-in value for a key.
 pub fn default_for(key: &str) -> Option<&'static str> {
-    known(key).map(|s| s.default)
+    known(key).and_then(|s| s.default)
 }
 
 /// Whether this key and value may be written.
@@ -159,13 +185,42 @@ mod tests {
         // A default that would be refused if somebody typed it is a default
         // nobody can restore, and the failure appears only when they try.
         for s in KNOWN {
-            validate(s.key, Some(s.default))
+            let Some(default) = s.default else {
+                // Rule-decided. There is no value to restore, so there is
+                // nothing here that could be refused.
+                continue;
+            };
+            validate(s.key, Some(default))
                 .unwrap_or_else(|e| panic!("the default for {} is not valid: {e}", s.key));
         }
         assert!(
             !KNOWN.is_empty(),
             "there are no settings, so this checks nothing"
         );
+    }
+
+    #[test]
+    fn the_notifier_can_actually_be_set() {
+        // It could not be, for two milestones. `notifier::chosen` read the key,
+        // `notifier::KEY` named it, and `validate` had never heard of it — so
+        // the only answer the function could give was "nobody has chosen", for
+        // ever, whatever anybody did. Nothing was unwired in a way a caller
+        // check could see: every function had callers, and the mechanism they
+        // formed had no way in.
+        assert!(validate(crate::notifier::KEY, Some("f2969a111cc8")).is_ok());
+        assert!(
+            validate(crate::notifier::KEY, None).is_ok(),
+            "and unset again, which is a decision too"
+        );
+    }
+
+    #[test]
+    fn the_notifier_has_no_compiled_in_default() {
+        // §8.9. With one device the answer is "this one", which is a rule
+        // evaluated locally rather than a value — and a device key written
+        // here as a stand-in would be a machine-authored preference wearing a
+        // different hat.
+        assert_eq!(default_for(crate::notifier::KEY), None);
     }
 
     #[test]

@@ -61,16 +61,29 @@ pub fn default_rule() -> &'static str {
 /// §2.4.1 already describes for a geofence.
 pub fn observable(cue_type: &str) -> bool {
     match cue_type {
-        // A clock and a branch are both readable from here.
-        "time" | "recurring" | "device_wake" | "git_branch" => true,
+        // A clock is readable anywhere.
+        "time" | "recurring" | "device_wake" => true,
 
-        // Not observable on this target, and saying so is the point. An intent
-        // that claimed to watch this would be registered, reported as working,
-        // and permanently silent.
+        // Where the repository is, which is not a phone.
+        "git_branch" => !ANDROID,
+
+        // Not observable on GNOME/Wayland, and saying so is the point. An
+        // intent that claimed to watch this would be registered, reported as
+        // working, and permanently silent. Nor on Android, where there is no
+        // notion of another application's focus available to this one.
         "app_focus" => false,
 
-        // A phone's to see (§2.4.1), and there is no phone until M4.
-        "location" => false,
+        // A phone's to see (§2.4.1). False on the desktop not because the
+        // feature is missing but because the desktop cannot observe it: a
+        // geofence answered by a machine that does not move is a geofence that
+        // never fires, or fires once and never stops.
+        //
+        // True here says only that the *platform* can observe it. Whether this
+        // particular device may is a runtime question — the permission — and
+        // one a store cannot answer. The surface that knows reports it (§7.3),
+        // because an intent failing invisibly is worse than no intent: the
+        // person believes something is watching when nothing is.
+        "location" => ANDROID,
 
         // Needs a calendar read that M2 does not have.
         "calendar_start" => false,
@@ -78,6 +91,13 @@ pub fn observable(cue_type: &str) -> bool {
         _ => false,
     }
 }
+
+/// Whether this build is the phone.
+///
+/// The same function, answering differently where it runs. A device declares
+/// what it can see, and these two see different things — which is the whole
+/// reason §2.4.1 routes a cue to a device rather than to "the notifier".
+const ANDROID: bool = cfg!(target_os = "android");
 
 /// Say something, by whatever means this desktop offers.
 ///
@@ -126,16 +146,32 @@ mod tests {
         // Declaring a cue type requires being able to observe it. Accepting
         // `app_focus` here would produce an intent that is registered, reported
         // as working, and silently never fires.
-        assert!(!observable("app_focus"), "GNOME/Wayland cannot see this");
-        assert!(!observable("location"), "no phone until M4");
+        assert!(!observable("app_focus"), "no platform here can see this");
+
+        // A geofence is the phone's to observe. Answered by a machine that
+        // does not move, it either never fires or fires once and never stops.
+        assert_eq!(
+            observable("location"),
+            cfg!(target_os = "android"),
+            "location is observable exactly where there is something that moves"
+        );
+
+        // And the converse: a branch is where the repository is.
+        assert_eq!(observable("git_branch"), !cfg!(target_os = "android"));
         assert!(!observable("calendar_start"));
     }
 
     #[test]
-    fn the_cues_a_desktop_can_see_are_accepted() {
-        for cue in ["time", "recurring", "device_wake", "git_branch"] {
-            assert!(observable(cue), "{cue} is readable from a desktop");
+    fn a_clock_is_readable_from_any_device() {
+        for cue in ["time", "recurring", "device_wake"] {
+            assert!(observable(cue), "{cue} needs nothing but a clock");
         }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn a_desktop_can_see_the_repository_it_holds() {
+        assert!(observable("git_branch"));
     }
 
     #[test]

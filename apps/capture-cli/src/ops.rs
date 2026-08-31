@@ -422,7 +422,10 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     say!("Settings");
     let chosen = state.settings()?;
     for s in settings::KNOWN {
-        let (key, default, what) = (s.key, s.default, s.what);
+        let (key, what) = (s.key, s.what);
+        // A setting with no compiled-in value is decided by a rule, and the
+        // rule is what to print in the column where a value would go.
+        let default = s.default.unwrap_or("by rule");
         let picked = chosen.iter().find(|(k, _, _)| k == key);
         match picked {
             Some((_, Some(v), _)) => say!("  {key:<18} {v:<10} set by you — {what}"),
@@ -725,11 +728,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_known_setting_has_a_default() {
+    fn every_known_setting_has_a_default_or_says_it_has_none() {
         // The compiled-in value is what makes "never chosen" a usable state
-        // rather than an absence the caller has to handle.
+        // rather than an absence every caller has to handle — except where the
+        // unchosen case is genuinely a rule, and then the absence is the point.
         for s in settings::KNOWN {
-            assert!(!s.default.is_empty(), "{} has no default", s.key);
+            // Either a value, or an explicit absence meaning "a rule decides".
+            // What is not allowed is an empty string, which reads as a value
+            // and behaves as neither.
+            assert!(
+                s.default != Some(""),
+                "{} has an empty default, which is neither a value nor a rule",
+                s.key
+            );
             assert!(!s.what.is_empty(), "{} has no description", s.key);
         }
         assert!(
