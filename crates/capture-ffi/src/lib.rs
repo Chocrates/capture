@@ -230,6 +230,23 @@ pub enum Watching {
     Always,
 }
 
+/// A recording attached to a note.
+#[derive(Debug, uniffi::Record)]
+pub struct Recording {
+    /// Its content-addressed name, for asking any device that has the bytes.
+    pub name: String,
+    pub media_type: String,
+    pub bytes: u64,
+    pub duration_ms: Option<u32>,
+    /// Whether *this* device holds the bytes.
+    ///
+    /// False is ordinary rather than broken: a phone evicts aggressively
+    /// (§5.6) and the bytes come back on the next round with a device that
+    /// still has them. A surface should say "not on this device" and offer to
+    /// fetch, not report a missing recording.
+    pub here: bool,
+}
+
 /// A place to watch for, as the platform needs it.
 ///
 /// Coordinates are micro-degrees because that is what the event body holds —
@@ -953,6 +970,40 @@ impl Archive {
                     .into(),
             }),
         }
+    }
+
+    /// The recording a note refers to, if it refers to one.
+    ///
+    /// Read from the event rather than the projection, which has no blob table
+    /// yet. One note, one lookup — a timeline does not ask this, so the cost
+    /// stays where a person opened something.
+    pub fn recording_of(&self, name: String) -> Result<Option<Recording>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+
+        let log = capture_store::log::Log::open_read(&self.paths.events)?;
+        let Some(event) = log.by_id(&tgt)? else {
+            return Ok(None);
+        };
+        let Some(body) = event.body.as_deref() else {
+            // Redacted. The reference went with the body, which is the point:
+            // a destroyed note does not leave a surface offering to play what
+            // it was destroyed to be rid of.
+            return Ok(None);
+        };
+        let Ok(capture) = minicbor::decode::<capture_core::body::CaptureBody>(body) else {
+            return Ok(None);
+        };
+
+        Ok(capture.blob.map(|b| Recording {
+            name: capture_store::blobs::name(&b.hash),
+            media_type: b.media_type,
+            bytes: b.bytes,
+            duration_ms: b.duration_ms,
+            here: capture_store::blobs::have(&self.paths.blobs, &b.hash),
+        }))
     }
 
     /// The bytes of a recording, if this device holds them.

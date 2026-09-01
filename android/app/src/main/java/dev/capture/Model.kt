@@ -14,6 +14,7 @@ import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
+import uniffi.capture_ffi.Recording
 import uniffi.capture_ffi.Intent as Plan
 import uniffi.capture_ffi.Resurfaced
 import uniffi.capture_ffi.Watching
@@ -92,6 +93,10 @@ class Model(private val archive: Archive) : ViewModel() {
     var note by mutableStateOf<NoteSummary?>(null)
         private set
 
+    /** The recording the note on screen refers to, where it refers to one. */
+    var recording by mutableStateOf<Recording?>(null)
+        private set
+
     /** The destruction waiting on the note on screen, where one is waiting. */
     var pending by mutableStateOf<Pending?>(null)
         private set
@@ -121,6 +126,7 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Note -> load {
                 note = archive.note(to.name)
                 pending = archive.pendingRedaction(to.name)
+                recording = archive.recordingOf(to.name)
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
@@ -230,6 +236,10 @@ class Model(private val archive: Archive) : ViewModel() {
             }
         }
     }
+
+    /** The bytes of the recording on screen, if this device holds them. */
+    suspend fun bytesOf(name: String): ByteArray? =
+        withContext(Dispatchers.IO) { archive.recording(name) }
 
     /** What became of an offered note. Two outcomes, and neither is a grade. */
     fun reviewed(name: String, outcome: String) = load {

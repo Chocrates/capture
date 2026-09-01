@@ -170,7 +170,7 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                     onOffer = { model.offerPairing(model.addresses()) },
                     onJoin = model::joinPairing,
                 )
-                is Screen.Note -> NotePage(model.note, model.pending, model)
+                is Screen.Note -> NotePage(model.note, model.pending, model.recording, model)
             }
         }
     }

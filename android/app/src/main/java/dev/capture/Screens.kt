@@ -21,16 +21,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import uniffi.capture_ffi.AgendaEntry
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
 import uniffi.capture_ffi.Pending
+import uniffi.capture_ffi.Recording
 
 /**
  * The timeline: everything, newest first, grouped by the day it belongs to.
@@ -91,7 +95,7 @@ private fun NoteRow(note: NoteSummary, onOpen: (String) -> Unit) {
 
 /** One note in full, and everything that can be done to it. */
 @Composable
-fun NotePage(note: NoteSummary?, pending: Pending?, model: Model) {
+fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model: Model) {
     if (note == null) {
         Empty("Loading.")
         return
@@ -115,9 +119,62 @@ fun NotePage(note: NoteSummary?, pending: Pending?, model: Model) {
                 Text("Muted.", style = MaterialTheme.typography.labelMedium)
             }
             if (note.pinned) Text("Pinned.", style = MaterialTheme.typography.labelMedium)
+            recording?.let { Listen(it, model) }
         }
         HorizontalDivider()
         Actions(note, pending, model)
+    }
+}
+
+/**
+ * A recording, and whether it is here to be played.
+ *
+ * "Not on this device" is an ordinary state, not a fault: a phone evicts
+ * aggressively (§5.6) and the bytes come back on the next round with a device
+ * that still holds them. Saying that is different from saying the recording is
+ * missing, and a person deleting the note because it looked broken would be
+ * acting on the difference.
+ */
+@Composable
+private fun Listen(recording: Recording, model: Model) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var playing by remember { mutableStateOf(false) }
+
+    Column {
+        Text(
+            recording.durationMs
+                ?.let { "A recording, ${it / 1000u} seconds" }
+                ?: "A recording",
+            style = MaterialTheme.typography.labelMedium,
+        )
+        if (!recording.here) {
+            Text(
+                "Not on this device yet. It will arrive on the next sync with " +
+                    "a device that has it.",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        } else {
+            TextButton({
+                if (playing) {
+                    Playback.stop()
+                    playing = false
+                } else {
+                    scope.launch {
+                        val bytes = model.bytesOf(recording.name)
+                        if (bytes == null) {
+                            // Held a moment ago and not now: evicted between
+                            // the read and the tap, which is unlikely and not
+                            // impossible.
+                            Toast.short(context, "Those bytes are no longer on this device.")
+                        } else {
+                            playing = true
+                            Playback.play(context, bytes) { playing = false }
+                        }
+                    }
+                }
+            }) { Text(if (playing) "Stop" else "Play") }
+        }
     }
 }
 

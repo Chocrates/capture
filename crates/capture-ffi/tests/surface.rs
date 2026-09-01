@@ -620,12 +620,36 @@ fn a_recording_is_captured_with_no_words_and_read_back() {
         "and it is still filed under a day computed where it happened"
     );
 
+    // The note knows what it refers to, so a surface can offer to play it.
+    let held = a.recording_of(slug.clone()).unwrap().expect("it has one");
+    assert_eq!(held.media_type, "audio/ogg");
+    assert_eq!(held.bytes, recording.len() as u64);
+    assert_eq!(held.duration_ms, Some(9310));
+    assert!(held.here, "this device recorded it, so it holds it");
+    assert_eq!(
+        a.recording(held.name.clone()).unwrap().as_deref(),
+        Some(&recording[..]),
+        "and the bytes come back byte for byte"
+    );
+
     // The bytes are addressed by their content, so the same recording captured
     // twice is one file. Nothing dedupes; the naming makes it impossible.
     let again = a
         .capture_voice(recording.clone(), "audio/ogg".into(), Some(9310))
         .unwrap();
     assert_ne!(again, slug, "two captures are two notes");
+    assert_eq!(
+        a.recording_of(again).unwrap().map(|r| r.name),
+        Some(held.name),
+        "pointing at one recording, because the content decides the name"
+    );
+
+    // A note with no recording says so, rather than failing.
+    let typed = match a.capture("an ordinary typed note".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+    assert!(a.recording_of(typed).unwrap().is_none());
 
     std::fs::remove_dir_all(&root).ok();
 }
