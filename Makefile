@@ -17,7 +17,7 @@ SCRATCH ?= /tmp/capture-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
-        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge unwired \
+        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept unwired \
         build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -430,3 +430,16 @@ android-converge: android-app
 	@echo '--- android: converging with a desktop'
 	@cargo build -p capture-cli -p capture-syncd
 	@sh tools/converge.sh
+
+## android-accept: the milestone's acceptance run, on a connected emulator
+#
+# Capture from each surface, pair, sync, converge, retire — the whole loop,
+# against a real `capture` process. Slow and stateful: it clears the
+# application's data and starts a daemon, so it is not part of `make android`.
+#
+# What it does not cover is printed when it passes, rather than left implied:
+# real mDNS discovery and a real geofence firing both need a physical device.
+android-accept: android-app
+	@echo '--- android: acceptance'
+	@cargo build -p capture-cli -p capture-syncd
+	@set -e; . ./tools/android-env.sh; python3 tools/acceptance.py

@@ -98,7 +98,10 @@ missing — and each leaves plans that look registered and are not.
 
 ## 8. Acceptance
 
-- [ ] 8.1 On the emulator: capture from each surface, pair, sync, converge, retire. Scripted and repeatable.
+- [x] 8.1 On the emulator: capture from each surface, pair, sync, converge, retire. Scripted and repeatable. **`make android-accept`, passing.** Empty state, tile capture, share-sheet capture, pairing from the phone against a real `capture pair`, sync, convergence in both directions, the capability exchange, and retirement.
+  - **It taps by text, not by coordinate.** A coordinate is a claim about a layout, and the layout moves: driving this by hand, a tap aimed at "Sync now" landed on "Notify me there" the moment a peer row appeared above it — which set a notifier and looked for several minutes like the archive had authored a setting on somebody's behalf. An element that has moved should not be tappable at its old position.
+  - Verified it can fail: with the desktop's address broken it exits 1 after four genuine passes, and prints what was actually on screen instead of the expectation.
+  - It says what it does not cover rather than leaving it implied. Real mDNS and a real geofence firing are 8.2's, and a run that quietly skipped them would read as coverage.
 - [ ] 8.2 On a physical device: the tile from the lock screen, a geofence actually firing, and behaviour across a real doze cycle. These are what the emulator models least faithfully and what is most likely to be broken in the field — a simulated geofence is much weaker evidence than a real one.
 - [ ] 8.3 Confirm the desktop capture gesture is unchanged — chord, overlay, commit key, latency histogram. §8.10 freezes it for this milestone.
 - [ ] 8.4 `make ci` still passes, and `make android` passes alongside it.
