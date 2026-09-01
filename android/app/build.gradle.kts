@@ -42,6 +42,27 @@ android {
         }
     }
 
+    buildTypes {
+        release {
+            // Shrunk and stripped, because the debug build is not the thing
+            // whose speed is worth knowing. §2.1 makes capture's cost the
+            // point, and a measurement taken against an unstripped 74 MB
+            // library per ABI is a measurement of the wrong program.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+
+            // Signed with the debug key, deliberately and only so it can be
+            // installed on a bench. This is not a distribution build and there
+            // is no release key in this repository — putting one here is how
+            // signing keys end up in version control.
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     buildFeatures {
         compose = true
     }
@@ -64,6 +85,11 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    // Named explicitly to raise it above the 1.1.0 that arrives transitively.
+    // `registerForActivityResult` — how this asks for the microphone and for
+    // location — needs 1.3.0 or newer, and lint is right that the older one on
+    // the classpath is a runtime hazard rather than a warning to silence.
+    implementation(libs.androidx.fragment)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

@@ -99,12 +99,14 @@ class CaptureActivity : ComponentActivity() {
         // gesture that feels unresponsive, a slow commit is one that feels
         // unfinished.
         window.decorView.post {
-            runCatching {
-                Store.of(this).took(
-                    "$surface-window",
-                    (System.currentTimeMillis() - began).toULong(),
-                )
-            }
+            // The clock is read before anything else, because `Store.of` opens
+            // the archive on its first call and Kotlin evaluates a receiver
+            // before its arguments — so the first version of this measured
+            // "window appeared *and* archive opened" and reported it as the
+            // window being slow. The two are separate costs and only one of
+            // them is this window's.
+            val appeared = System.currentTimeMillis() - began
+            runCatching { Store.of(this).took("$surface-window", appeared.toULong()) }
         }
 
         setContent {

@@ -25,4 +25,21 @@ object Store {
             archive ?: Archive.open(context.applicationContext.filesDir.absolutePath)
                 .also { archive = it }
         }
+
+    /**
+     * Open it now, off the main thread, so the first capture does not pay for
+     * it.
+     *
+     * Opening resolves the store, loads the device identity and creates
+     * everything on first run. That is real work, and the capture surfaces are
+     * the last place to spend it — §2.1's argument is that capture costs
+     * almost nothing at the moment a thought arrives, and "almost nothing plus
+     * opening a database" is not that.
+     *
+     * Safe to call repeatedly: the second call finds it open.
+     */
+    fun warm(context: Context) {
+        val app = context.applicationContext
+        Thread { runCatching { of(app) } }.start()
+    }
 }

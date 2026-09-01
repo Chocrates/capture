@@ -38,6 +38,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
+        android:name=".App"
         android:label="capture"
         android:supportsRtl="true"
         android:allowBackup="false">

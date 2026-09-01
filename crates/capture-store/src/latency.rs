@@ -39,7 +39,20 @@
 /// Fine near the bottom because that is where the interesting distinctions are
 /// — 8 ms and 60 ms feel completely different — and coarse at the top because
 /// past a point the only fact that matters is "far too slow".
-pub const BOUNDS: &[u64] = &[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+pub const BOUNDS: &[u64] = &[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+
+// Extended past a second because a second is not the top of the range that
+// matters any more. The original bounds were for the desktop overlay, which
+// appears in single-digit milliseconds and where anything over a second is
+// simply "broken". The phone measures a window that has to start a process
+// first, and on an emulator that lands above 1024ms every time — so the
+// histogram said "over 1024ms" and could not say whether that meant 1.1
+// seconds or eleven.
+//
+// Changing the shape discards histograms recorded under the old one, which
+// `from_counts` already does deliberately: mixing counts from different
+// buckets would produce a number that looks like a measurement and is not.
+// These are local operational counts and losing them costs nothing.
 
 /// Counts per bucket, plus one for everything slower than the last bound.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -166,7 +179,10 @@ mod tests {
         let mut h = Histogram::default();
         h.record(60_000);
         assert_eq!(h.total(), 1);
-        assert!(h.summary().unwrap().contains("over 1024ms"));
+        // Against the last bound rather than a literal, so extending the
+        // scale does not quietly turn this into a test of nothing.
+        let last = BOUNDS[BOUNDS.len() - 1];
+        assert!(h.summary().unwrap().contains(&format!("over {last}ms")));
     }
 
     #[test]

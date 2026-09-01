@@ -17,7 +17,7 @@ SCRATCH ?= /tmp/capture-scratch-$(USER)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
-        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept unwired \
+        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired \
         build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -443,3 +443,21 @@ android-accept: android-app
 	@echo '--- android: acceptance'
 	@cargo build -p capture-cli -p capture-syncd
 	@set -e; . ./tools/android-env.sh; python3 tools/acceptance.py
+
+## android-release: build the application as it would actually ship
+#
+# Shrunk, stripped, and signed with the debug key so it can be installed on a
+# bench. Not a distribution build: there is no release key in this repository,
+# because that is how signing keys end up in version control.
+#
+# Worth having because the debug build is not the thing whose speed is worth
+# knowing — §2.1 makes capture's cost the point, and the debug library is 74 MB
+# per ABI before stripping.
+android-release:
+	@echo '--- android: release library'
+	@set -e; . ./tools/android-env.sh; \
+	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
+	   -o android/app/src/main/jniLibs build -p capture-ffi --release
+	@echo '--- android: release app'
+	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleRelease
+	@ls -la android/app/build/outputs/apk/release/app-release.apk
