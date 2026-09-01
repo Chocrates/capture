@@ -9,6 +9,7 @@
 //! fold taking it, and the fold must be a function of the event set alone.
 
 pub mod ambient;
+pub mod blobs;
 pub mod db;
 pub mod descriptor;
 pub mod drain;

@@ -177,6 +177,7 @@ mod tests {
             text: text.to_string(),
             tz: None,
             ambient: Ambient::default(),
+            blob: None,
         };
         let mut out = Vec::new();
         minicbor::encode(&b, &mut out).unwrap();

@@ -308,6 +308,7 @@ pub fn capture_body(nonce: u8, text: &str) -> Vec<u8> {
         text: text.to_string(),
         tz: Some("Europe/London".to_string()),
         ambient: Ambient::default(),
+        blob: None,
     })
 }
 

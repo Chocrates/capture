@@ -17,6 +17,9 @@ capture-time = { path = "../capture-time" }
 # responder to do it.
 capture-sync = { path = "../capture-sync" }
 capture-core = { path = "../capture-core", features = ["std"] }
+# Naming blobs by their content (§5.6). The same hash the event ids use, so a
+# device has one implementation of "what these bytes are called".
+blake3 = { workspace = true, features = ["std"] }
 ed25519-dalek = { workspace = true, features = ["std", "rand_core"] }
 minicbor = { workspace = true }
 rusqlite = { workspace = true }

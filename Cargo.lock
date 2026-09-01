@@ -824,6 +824,7 @@ dependencies = [
 name = "capture-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "capture-core",
  "capture-parse",
  "capture-sync",

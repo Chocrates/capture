@@ -70,6 +70,7 @@ fn payload(n: u64) -> Vec<u8> {
         text: format!("capture {n}"),
         tz: None,
         ambient: Default::default(),
+        blob: None,
     };
     let mut b = Vec::new();
     minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");

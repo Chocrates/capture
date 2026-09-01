@@ -51,6 +51,7 @@ fn fixture_body() -> CaptureBody {
             branch: Some("rework-auth".to_string()),
             source_url: None,
         },
+        blob: None,
     }
 }
 
@@ -808,4 +809,54 @@ fn a_reissued_retirement_encodes_the_same_way_for_ever() {
         // key(32) · heads: array(0) · superseded id(32).
         "845011111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222228058205555555555555555555555555555555555555555555555555555555555555555"
     );
+}
+
+/// A capture carrying a recording (§5.6).
+///
+/// The pair with the plain capture above is the point. A capture that has no
+/// blob encodes exactly as it did before blobs existed — minicbor elides a
+/// trailing `None` — so every note already in a log still recomputes its id,
+/// still verifies its signature, and every hand-written link to it still
+/// resolves. That is not a nicety: §1.3 makes re-folding both the recovery
+/// path and the migration strategy, so an encoding change that altered
+/// existing ids would make every archive in the world unrecoverable.
+#[test]
+fn a_capture_with_a_recording_encodes_the_same_way_for_ever() {
+    let mut body = fixture_body();
+    body.blob = Some(capture_core::body::BlobRef {
+        hash: [0x9d; 32],
+        media_type: String::from("audio/ogg"),
+        bytes: 41822,
+        duration_ms: Some(9310),
+    });
+
+    assert_eq!(
+        hex(&canonical_of(&body)),
+        // capture: array(5) — nonce(16) · text · tz · ambient · blob, where
+        // the blob is array(4): hash(32) · media type · bytes · duration.
+        "8550abababababababababababababababab766275646765742034306b2c20726576697369742051326d4575726f70652f4c6f6e646f6e85f6f6712f686f6d652f752f776f726b2f61636d656461636d656b7265776f726b2d617574688458209d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d69617564696f2f6f676719a35e19245e"
+    );
+
+    // And the same capture without one is byte-for-byte what it always was.
+    let plain = fixture_body();
+    assert_eq!(
+        canonical_of(&plain),
+        canonical_body(),
+        "a capture with no blob must encode as it did before blobs existed"
+    );
+    assert!(
+        canonical_of(&plain).len() < canonical_of(&body).len(),
+        "the field costs nothing when absent"
+    );
+
+    // A blob is addressed by what it contains, so two captures of the same
+    // recording name the same bytes. Nothing here dedupes; the naming makes
+    // duplication impossible in the first place.
+    let mut again = fixture_body();
+    again.text = String::from("a different note about the same recording");
+    again.blob = body.blob.clone();
+    let (Some(a), Some(b)) = (&body.blob, &again.blob) else {
+        panic!("both carry a blob")
+    };
+    assert_eq!(a.hash, b.hash, "the content decides the name");
 }

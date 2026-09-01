@@ -43,6 +43,60 @@ pub struct CaptureBody {
     /// Ambient context observed at capture, at no cost to the user.
     #[n(3)]
     pub ambient: Ambient,
+    /// Bytes captured alongside — a recording, a photograph (§5.6).
+    ///
+    /// On the capture rather than in an event of its own, because the slug is
+    /// derived from the root capture and nothing else (§4.3). A reference that
+    /// arrived as a later event would make a note's permanent name depend on
+    /// whether that event had turned up yet, and two replicas folding in
+    /// different orders would name the same note differently.
+    ///
+    /// A trailing field, so every capture written before blobs existed encodes
+    /// exactly as it did — minicbor elides a trailing `None`, so the id of
+    /// every note already in the log still recomputes.
+    #[n(4)]
+    pub blob: Option<BlobRef>,
+}
+
+/// Bytes held outside the log, named by what they contain (§5.6).
+///
+/// # Why the content decides the name
+///
+/// The hash *is* the address, so verification is free — a replica that fetched
+/// the wrong bytes cannot fail to notice — and duplicates are impossible: the
+/// same recording captured twice is one blob with two references.
+///
+/// # Why the bytes are not in the event
+///
+/// A log is replicated in full to every device and is meant to be read in ten
+/// years. Forty megabytes of audio inside an event would be sent to every
+/// replica whether it wanted the recording or not, and could never be dropped
+/// from a phone without dropping the note along with it. Keeping the reference
+/// small and the bytes fetchable is what makes eviction possible at all
+/// (§5.6) — a constrained device drops the bytes and keeps the note.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct BlobRef {
+    /// `blake3` of the content.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub hash: [u8; 32],
+    /// What the bytes are, as an IANA media type.
+    ///
+    /// Recorded at capture because it cannot be recovered later with
+    /// confidence, and a recording nothing can decide how to play is a
+    /// recording nobody can hear.
+    #[n(1)]
+    pub media_type: String,
+    /// How many bytes, so a device knows what it is agreeing to fetch before
+    /// it starts, and can tell a truncated transfer from a complete one.
+    #[n(2)]
+    pub bytes: u64,
+    /// How long it runs, in milliseconds, where that means anything.
+    ///
+    /// Written at capture by the device that recorded it. Not derived later
+    /// from the bytes: a surface listing recordings should not have to fetch
+    /// forty megabytes to find out one of them is nine seconds long.
+    #[n(3)]
+    pub duration_ms: Option<u32>,
 }
 
 /// Retrieval scaffolding gathered automatically at capture.
@@ -660,6 +714,7 @@ mod tests {
             text: text.to_string(),
             tz: Some("Europe/London".to_string()),
             ambient: Ambient::default(),
+            blob: None,
         }
     }
 

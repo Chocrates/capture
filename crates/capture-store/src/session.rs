@@ -799,6 +799,7 @@ pub fn capture_body_from(text: &str, source_url: Option<&str>) -> Result<Vec<u8>
         text: text.to_string(),
         tz: Some(local_zone()),
         ambient,
+        blob: None,
     }))
 }
 
@@ -818,6 +819,7 @@ pub fn capture_body_in(text: &str, tz: Option<&str>) -> Result<Vec<u8>> {
         // a different day when read in another.
         tz: Some(tz.map(String::from).unwrap_or_else(local_zone)),
         ambient: ambient::collect(&ambient::Host),
+        blob: None,
     }))
 }
 
