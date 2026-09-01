@@ -38,6 +38,7 @@
 extern crate alloc;
 
 pub mod anti_entropy;
+pub mod blob;
 pub mod discovery;
 #[cfg(feature = "mdns")]
 pub mod mdns;

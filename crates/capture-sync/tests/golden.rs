@@ -314,3 +314,75 @@ fn a_hello_saying_what_it_watches_encodes_the_same_way_for_ever() {
         "an explicit empty list is a statement and an absent field is not"
     );
 }
+
+/// Asking for bytes, and being given them (§5.6).
+///
+/// These travel inside the Noise session like every other message. A separate
+/// byte-serving path is the easy mistake the design names by name: it would
+/// put a recording in the clear on the local network while the note describing
+/// it was encrypted, which is worse than not having the feature.
+#[test]
+fn wanting_and_sending_a_blob_encode_the_same_way_for_ever() {
+    let hash = String::from("b3:9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d");
+
+    // Asking from a non-zero offset is the ordinary case, not an edge one: an
+    // interrupted forty megabyte transfer resumes rather than restarts, and a
+    // phone on a bad connection that started over each round would never
+    // finish at all.
+    let want = Message::Want {
+        hash: hash.clone(),
+        have_bytes: 32768,
+    };
+    assert_eq!(
+        hex(&encoded(&want)),
+        // Want (variant 8) · array(2): text(67) — "b3:" and 64 hex
+        // characters, each one a byte because the name travels as text
+        // rather than as the 32 bytes it describes · have_bytes.
+        "820882784362333a39643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964198000"
+    );
+
+    let blob = Message::Blob {
+        hash: hash.clone(),
+        offset: 32768,
+        total: 41822,
+        data: vec![0x11, 0x22, 0x33],
+    };
+    assert_eq!(
+        hex(&encoded(&blob)),
+        // Blob (variant 9) · array(4): hash · offset · total · data as bytes.
+        "820984784362333a3964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396419800019a35e43112233"
+    );
+
+    // A miss is stated rather than left to a timeout. A device that has
+    // evicted a blob is in the ordinary case and the asker should go to
+    // somebody else at once — §5.6 makes eviction aggressive on constrained
+    // devices precisely because it is cheap and recoverable, which is only
+    // true if a miss is fast.
+    let miss = Message::NoBlob { hash };
+    assert_eq!(
+        hex(&encoded(&miss)),
+        "820a81784362333a39643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964396439643964"
+    );
+}
+
+/// A chunk fits in a Noise message, with its framing.
+///
+/// The number is pinned here rather than remembered. An earlier draft of the
+/// design specified 65536-byte chunks, which do not fit at all — the transport
+/// would have refused every one of them, and only at the moment somebody first
+/// tried to move a recording.
+#[test]
+fn a_full_chunk_fits_inside_one_noise_message() {
+    let blob = Message::Blob {
+        hash: String::from("b3:9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d"),
+        offset: 0,
+        total: 40 * 1024 * 1024,
+        data: vec![0u8; capture_sync::blob::CHUNK],
+    };
+    assert!(
+        encoded(&blob).len() <= capture_sync::session::MAX_PAYLOAD,
+        "a chunk plus its framing is {} bytes, and a Noise message holds {}",
+        encoded(&blob).len(),
+        capture_sync::session::MAX_PAYLOAD,
+    );
+}

@@ -907,6 +907,66 @@ impl Archive {
         Ok(())
     }
 
+    /// Capture a recording (§5.6, §2.2).
+    ///
+    /// The bytes are stored before the event is written, so a note can never
+    /// refer to a recording nobody holds. It is an ordering rather than a
+    /// check, which makes the bad state impossible instead of unlikely.
+    ///
+    /// No text, and no transcription here. §2.2 says the phone's job ends at
+    /// "the audio exists" — a transcript is enrichment, it arrives later as an
+    /// edit if it arrives at all, and §4.3 forbids deriving the note's
+    /// permanent name from it because machine output changes and a name must
+    /// not.
+    ///
+    /// Returns the slug, which is derived from the date because there are no
+    /// words yet.
+    pub fn capture_voice(
+        &self,
+        bytes: Vec<u8>,
+        media_type: String,
+        duration_ms: Option<u32>,
+    ) -> Result<String> {
+        let _writing = self.write_lock()?;
+
+        let hash = capture_store::blobs::put(&self.paths.blobs, &bytes)?;
+        let body = capture_store::session::capture_body_with_blob(
+            "",
+            capture_core::body::BlobRef {
+                hash,
+                media_type,
+                bytes: bytes.len() as u64,
+                duration_ms,
+            },
+        )?;
+
+        match capture_store::session::commit_body(&self.paths, &body)? {
+            Committed::Stored(slug) => Ok(slug),
+            // A recording that could not be committed is not spooled: the
+            // spool holds text, and forty megabytes of audio in it would be a
+            // different mechanism wearing the same name. The bytes are on
+            // disk and the event is not, which is recoverable and is said
+            // plainly rather than reported as success.
+            Committed::Spooled => Err(CaptureError::Refused {
+                reason: "the store could not be written, so the recording was kept \
+                         but no note was made for it"
+                    .into(),
+            }),
+        }
+    }
+
+    /// The bytes of a recording, if this device holds them.
+    ///
+    /// `None` where it does not, which is the ordinary state of a phone that
+    /// evicts aggressively (§5.6) rather than a fault — the bytes come back on
+    /// the next round with a device that has them.
+    pub fn recording(&self, name: String) -> Result<Option<Vec<u8>>> {
+        let Some(hash) = capture_store::blobs::parse(&name) else {
+            return Err(CaptureError::NotFound { name });
+        };
+        Ok(capture_store::blobs::get(&self.paths.blobs, &hash)?)
+    }
+
     /// Places to watch for, for the platform to register.
     ///
     /// Only the location intents, and only their coordinates: deciding *what

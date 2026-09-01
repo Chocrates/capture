@@ -583,3 +583,49 @@ fn a_plan_about_a_place_that_cannot_fire_says_so() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn a_recording_is_captured_with_no_words_and_read_back() {
+    // §2.2: the phone's job ends at "the audio exists". No transcription here,
+    // and the note's permanent name is not derived from one — §4.3 forbids it,
+    // because machine output changes and a name must not.
+    let root = scratch("voice");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let recording = vec![0x33u8; 5000];
+    let slug = a
+        .capture_voice(recording.clone(), "audio/ogg".into(), Some(9310))
+        .unwrap();
+
+    let note = a.note(slug.clone()).unwrap();
+    assert_eq!(note.slug, slug);
+    assert!(
+        note.text.as_deref().unwrap_or("").is_empty(),
+        "a recording has no words yet, and inventing some would be a guess \
+         written into the log"
+    );
+    // Named from its date, because there are no words to name it from — and
+    // that date is UTC, which is not always the same day as here. A name has
+    // to be identical on every replica for ever, so it cannot be computed
+    // through a timezone database that devices carry their own versions of.
+    // Which day the note is *filed* under is a separate question, answered in
+    // the note's own zone by `NoteSummary::day`.
+    let named_for = &slug[..10];
+    assert!(
+        named_for.starts_with("20") && named_for.matches('-').count() == 2,
+        "a textless capture is named from its date: {slug}"
+    );
+    assert!(
+        a.note(slug.clone()).unwrap().day.len() == 10,
+        "and it is still filed under a day computed where it happened"
+    );
+
+    // The bytes are addressed by their content, so the same recording captured
+    // twice is one file. Nothing dedupes; the naming makes it impossible.
+    let again = a
+        .capture_voice(recording.clone(), "audio/ogg".into(), Some(9310))
+        .unwrap();
+    assert_ne!(again, slug, "two captures are two notes");
+
+    std::fs::remove_dir_all(&root).ok();
+}

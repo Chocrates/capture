@@ -186,6 +186,64 @@ pub enum Message {
     /// protocol could have.
     #[n(7)]
     Done,
+
+    /// Send me these bytes, from here on (§5.6).
+    ///
+    /// Inside the Noise session like every other message. A separate
+    /// byte-serving path is the easy mistake here and the design names it:
+    /// it would put a recording in the clear on the local network while the
+    /// note describing it was encrypted, which is a worse outcome than not
+    /// having the feature.
+    #[n(8)]
+    Want {
+        /// The content's own name, `b3:` and 64 hex characters.
+        #[n(0)]
+        hash: String,
+        /// How much the asker already has.
+        ///
+        /// Not always zero, which is the whole point: an interrupted forty
+        /// megabyte transfer resumes rather than restarts. A phone that loses
+        /// its network halfway through a recording and starts again from the
+        /// beginning on the next round will, on a bad enough connection,
+        /// never finish at all.
+        #[n(1)]
+        have_bytes: u64,
+    },
+
+    /// Here is part of them.
+    ///
+    /// One chunk per message. The chunk size lives with the transport, which
+    /// is what knows how much fits in a Noise message.
+    #[n(9)]
+    Blob {
+        #[n(0)]
+        hash: String,
+        /// Where this chunk starts, so a receiver can tell an out-of-order or
+        /// duplicated answer from the next piece.
+        #[n(1)]
+        offset: u64,
+        /// The total size, repeated in every chunk so a receiver knows when it
+        /// is finished without having to have seen the reference. A blob may
+        /// be fetched by a device that wants the bytes and has not yet folded
+        /// the event that describes them.
+        #[n(2)]
+        total: u64,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        data: Vec<u8>,
+    },
+
+    /// I do not have those bytes.
+    ///
+    /// Stated rather than left to a timeout. A device that has evicted a blob
+    /// is in the ordinary case, not a fault, and the asker should go to
+    /// somebody else immediately rather than wait — §5.6 makes eviction
+    /// aggressive on constrained devices precisely because it is cheap and
+    /// recoverable, which is only true if a miss is fast.
+    #[n(10)]
+    NoBlob {
+        #[n(0)]
+        hash: String,
+    },
 }
 
 #[cfg(test)]

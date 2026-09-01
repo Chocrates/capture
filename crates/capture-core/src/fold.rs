@@ -685,9 +685,16 @@ fn apply_capture(
     // identity alone — the same name a redaction leaves behind, and for the
     // same reason: a name built from destroyed words would still be carrying
     // them.
-    let date = "1970-01-01";
+    // The capture's own moment, not a placeholder. This read `1970-01-01`
+    // until a surface existed that could make a textless capture — nothing
+    // could reach it, so every image and every empty capture would have been
+    // named for the epoch the first time one was written.
+    //
+    // UTC rather than the capture's zone, deliberately: see `slug::utc_date`.
+    // A permanent name must not depend on which timezone database folded it.
+    let date = slug::utc_date(e.header.hlc.wall as i64);
     let s = match text.as_deref() {
-        Some(t) => slug::derive(t, date, &tgt),
+        Some(t) => slug::derive(t, &date, &tgt),
         None => slug::derive_redacted(&tgt),
     };
 

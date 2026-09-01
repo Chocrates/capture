@@ -860,3 +860,37 @@ fn a_capture_with_a_recording_encodes_the_same_way_for_ever() {
     };
     assert_eq!(a.hash, b.hash, "the content decides the name");
 }
+
+/// The date a textless note is named for.
+///
+/// Pinned because it goes into a permanent name. UTC rather than the capture's
+/// own zone: a name has to be identical on every replica for ever, and a date
+/// computed through a timezone database would depend on which version of that
+/// database folded it — devices carry their own and the time model says they
+/// can disagree.
+#[test]
+fn the_date_in_a_name_is_the_same_everywhere_for_ever() {
+    use capture_core::slug::utc_date;
+
+    assert_eq!(utc_date(0), "1970-01-01");
+    assert_eq!(utc_date(1_788_134_400_000), "2026-08-31");
+
+    // A leap day, and the day after it, because February is where every
+    // hand-rolled calendar goes wrong.
+    assert_eq!(utc_date(1_709_164_800_000), "2024-02-29");
+    assert_eq!(utc_date(1_709_251_200_000), "2024-03-01");
+
+    // A century that is not a leap year, which is the case the simple rule
+    // gets wrong and which no test written this decade would otherwise reach.
+    assert_eq!(utc_date(4_107_456_000_000), "2100-02-28");
+    assert_eq!(utc_date(4_107_542_400_000), "2100-03-01");
+
+    // Before the epoch. A clock that has been set wrong is not a reason to
+    // panic or to produce a name nobody can read.
+    assert_eq!(utc_date(-1), "1969-12-31");
+
+    // The boundary itself: the last millisecond of a day and the first of the
+    // next belong to different days.
+    assert_eq!(utc_date(86_399_999), "1970-01-01");
+    assert_eq!(utc_date(86_400_000), "1970-01-02");
+}

@@ -185,3 +185,90 @@ impl Archive for StoreArchive<'_, '_> {
         }
     }
 }
+
+/// This device's bytes, for the blob phase of a round (§5.6).
+///
+/// Reads the log for what is referenced rather than the projection, because
+/// the projection has no blob table yet. That is a scan per round, which is
+/// honest at present volumes and is the obvious thing to replace with a table
+/// when it stops being — the schema may add tables, so it is a change with
+/// somewhere to go rather than a wall.
+pub struct StoreBlobs {
+    paths: crate::StorePaths,
+}
+
+impl StoreBlobs {
+    pub fn new(paths: crate::StorePaths) -> Self {
+        StoreBlobs { paths }
+    }
+
+    /// Every blob the log refers to.
+    fn referenced(&self) -> Vec<(String, capture_core::body::BlobRef)> {
+        let Ok(log) = crate::log::Log::open_read(&self.paths.events) else {
+            return Vec::new();
+        };
+        let Ok(events) = log.all() else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for e in events {
+            if e.header.kind != capture_core::event::Kind::CAPTURE {
+                continue;
+            }
+            let Some(body) = e.body.as_deref() else {
+                // Redacted. The reference is gone with the body, which is the
+                // point: a destroyed note does not leave a device fetching the
+                // recording it was destroyed to be rid of.
+                continue;
+            };
+            let Ok(capture) = minicbor::decode::<capture_core::body::CaptureBody>(body) else {
+                continue;
+            };
+            if let Some(blob) = capture.blob {
+                out.push((crate::blobs::name(&blob.hash), blob));
+            }
+        }
+        out
+    }
+}
+
+impl capture_sync::blob::Blobs for StoreBlobs {
+    fn wanted(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .referenced()
+            .into_iter()
+            .filter(|(name, _)| {
+                crate::blobs::parse(name)
+                    .map(|h| !crate::blobs::have(&self.paths.blobs, &h))
+                    .unwrap_or(false)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn have_bytes(&self, hash: &str) -> u64 {
+        crate::blobs::parse(hash)
+            .map(|h| crate::blobs::partial_bytes(&self.paths.blobs, &h))
+            .unwrap_or(0)
+    }
+
+    fn chunk(&self, hash: &str, offset: u64) -> Option<(u64, Vec<u8>)> {
+        let h = crate::blobs::parse(hash)?;
+        let bytes = crate::blobs::get(&self.paths.blobs, &h).ok()??;
+        let total = bytes.len() as u64;
+        let from = offset.min(total) as usize;
+        let to = (from + capture_sync::blob::CHUNK).min(bytes.len());
+        Some((total, bytes[from..to].to_vec()))
+    }
+
+    fn store(&mut self, hash: &str, offset: u64, total: u64, data: &[u8]) -> bool {
+        let Some(h) = crate::blobs::parse(hash) else {
+            return false;
+        };
+        crate::blobs::take(&self.paths.blobs, &h, offset, total, data).unwrap_or(false)
+    }
+}

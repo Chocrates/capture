@@ -143,6 +143,75 @@ pub fn have_bytes(blobs: &Path, hash: &[u8; 32]) -> u64 {
         .unwrap_or(0)
 }
 
+/// Where a blob is assembled before it is whole.
+///
+/// Beside the final file rather than in a temporary directory, so that a
+/// transfer resumes across a restart: the bytes already fetched have to still
+/// be there next time, or "resumable" means only "resumable within one run",
+/// which on a phone is close to meaningless.
+fn partial_of(blobs: &Path, hash: &[u8; 32]) -> PathBuf {
+    let p = path_of(blobs, hash);
+    p.with_extension("part")
+}
+
+/// How much of an unfinished blob is already here.
+pub fn partial_bytes(blobs: &Path, hash: &[u8; 32]) -> u64 {
+    std::fs::metadata(partial_of(blobs, hash))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Take a chunk that arrived. Returns whether the blob is now whole.
+///
+/// Appends only at the end of what is already held. A chunk that claims to
+/// start somewhere else is refused rather than written: the file is named by
+/// its content, and writing bytes at the wrong offset produces a file whose
+/// name is a lie — the one thing content addressing exists to make impossible.
+pub fn take(blobs: &Path, hash: &[u8; 32], offset: u64, total: u64, data: &[u8]) -> Result<bool> {
+    if have(blobs, hash) {
+        return Ok(true);
+    }
+
+    let partial = partial_of(blobs, hash);
+    std::fs::create_dir_all(partial.parent().expect("a blob path has a parent"))?;
+
+    let held = partial_bytes(blobs, hash);
+    if offset != held {
+        return Err(Error::Usage(format!(
+            "a chunk of {} arrived for offset {offset} with {held} bytes held",
+            name(hash)
+        )));
+    }
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&partial)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    drop(f);
+
+    if partial_bytes(blobs, hash) < total {
+        return Ok(false);
+    }
+
+    // Whole, allegedly. Verified before it is given the name that vouches for
+    // it — a peer that sent the wrong bytes, or the right bytes damaged, must
+    // not end up with those bytes under a name every other replica trusts.
+    let mut bytes = Vec::new();
+    std::fs::File::open(&partial)?.read_to_end(&mut bytes)?;
+    if blake3::hash(&bytes).as_bytes() != hash {
+        std::fs::remove_file(&partial)?;
+        return Err(Error::Usage(format!(
+            "{} arrived complete and is not what its name says",
+            name(hash)
+        )));
+    }
+
+    std::fs::rename(&partial, path_of(blobs, hash))?;
+    Ok(true)
+}
+
 /// Drop this device's copy, keeping the note.
 ///
 /// Not destruction: the bytes are refetchable from any replica that still has

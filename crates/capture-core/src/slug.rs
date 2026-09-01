@@ -84,6 +84,46 @@ pub struct Slug {
     pub basis: SlugBasis,
 }
 
+/// The UTC date of a moment, as `YYYY-MM-DD`.
+///
+/// # Why UTC, when §2.3 is emphatic that a day belongs to the zone it happened
+/// in
+///
+/// Because this names a note, and a name has to be identical on every replica
+/// for ever. A date computed in the capture's own zone would depend on a
+/// timezone database, and devices carry their own — the time model says so and
+/// says they can disagree. A note folded on a phone with one tzdata version
+/// and a desktop with another could then be given two different permanent
+/// names, and §1.3 makes re-folding the recovery path, so the name would
+/// change under somebody's feet on a rebuild.
+///
+/// Which day a note is *filed* under is a different question with a different
+/// answer, computed in the note's own zone where the surfaces need it. This is
+/// only the readable part of a name whose uniqueness lives entirely in its
+/// suffix.
+///
+/// Pure integer arithmetic, because this crate has no clock and no calendar —
+/// the algorithm is the standard days-from-civil inverse, valid across the
+/// whole range a 64-bit millisecond timestamp can express.
+pub fn utc_date(ms: i64) -> alloc::string::String {
+    let days = ms.div_euclid(86_400_000);
+
+    // Shift the era so that March is the first month: leap days then land at
+    // the end of a year and the arithmetic has no special cases.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    alloc::format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Derive the canonical slug for a note.
 ///
 /// `capture_text` is the root capture's text; `date` is its capture date as

@@ -803,6 +803,28 @@ pub fn capture_body_from(text: &str, source_url: Option<&str>) -> Result<Vec<u8>
     }))
 }
 
+/// A capture whose content is bytes rather than words (§5.6).
+///
+/// The text stays empty and that is deliberate: §2.2 says a voice note has no
+/// text at capture time, and §4.3 forbids deriving a slug from a later
+/// transcript — machine output changes, and a note's permanent name must not.
+/// So it is named from its date, and the words arrive later as an edit if they
+/// arrive at all.
+///
+/// The bytes are stored before this is called. A reference to a blob nobody
+/// holds would be a note pointing at nothing, and the ordering is what makes
+/// that impossible rather than unlikely.
+pub fn capture_body_with_blob(text: &str, blob: capture_core::body::BlobRef) -> Result<Vec<u8>> {
+    let nonce = entropy::nonce()?;
+    Ok(encode(&CaptureBody {
+        nonce: nonce.0,
+        text: text.to_string(),
+        tz: Some(local_zone()),
+        ambient: ambient::collect(&ambient::Host),
+        blob: Some(blob),
+    }))
+}
+
 /// The same, carrying a zone chosen by the caller.
 ///
 /// Used where a capture continues an existing one rather than being made now —

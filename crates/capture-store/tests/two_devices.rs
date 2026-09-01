@@ -175,13 +175,15 @@ fn sync(a: &Device, b: &Device) {
         let stream = listener.accept().unwrap().0;
         let tcp = Tcp::new(stream).unwrap();
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
-        capture_store::round::reconcile(&b_paths, &mut secure, AT).expect("the responder finished")
+        capture_store::round::reconcile(&b_paths, &mut secure, AT, false)
+            .expect("the responder finished")
     });
 
     let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
     let mut secure =
         Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
-    capture_store::round::reconcile(&a.paths, &mut secure, AT).expect("the initiator finished");
+    capture_store::round::reconcile(&a.paths, &mut secure, AT, true)
+        .expect("the initiator finished");
 
     responder.join().expect("no panic");
 }
@@ -669,4 +671,91 @@ fn each_device_learns_what_the_other_can_watch_for() {
             "{who} recorded an empty capability: {learned:?}"
         );
     }
+}
+
+#[test]
+fn a_recording_follows_the_note_that_refers_to_it() {
+    // §5.6. The reference is in the log and the bytes are not, so a device
+    // that has synced every event can still be holding a note that points at
+    // a recording it does not have. The blob phase is what closes that, and
+    // without it the feature is a note saying "voice note" and nothing to
+    // play.
+    let a = Device::new("a-blob");
+    let b = Device::new("b-blob");
+    pair(&a, &b);
+
+    // Bytes first, then the note. A reference to a blob nobody holds is a
+    // note pointing at nothing, and the order is what makes that impossible.
+    let recording = vec![0x7fu8; 70_000];
+    let hash = capture_store::blobs::put(&a.paths.blobs, &recording).unwrap();
+
+    let body = capture_store::session::capture_body_with_blob(
+        "",
+        capture_core::body::BlobRef {
+            hash,
+            media_type: String::from("audio/ogg"),
+            bytes: recording.len() as u64,
+            duration_ms: Some(9310),
+        },
+    )
+    .unwrap();
+    let slug = a.session().capture(&body).unwrap().slug;
+
+    assert!(
+        !capture_store::blobs::have(&b.paths.blobs, &hash),
+        "the other device has no reason to have these yet"
+    );
+
+    sync(&a, &b);
+
+    assert!(
+        b.read().resolve(&slug).unwrap().is_some(),
+        "the note itself arrived"
+    );
+    assert_eq!(
+        capture_store::blobs::get(&b.paths.blobs, &hash).unwrap(),
+        Some(recording),
+        "and so did the bytes it refers to, byte for byte"
+    );
+}
+
+#[test]
+fn a_recording_the_other_device_never_had_is_not_waited_for() {
+    // A device that has evicted a blob is in the ordinary state §5.6 wants
+    // constrained devices to be in, not a broken one. A round that hung, or
+    // failed, because the peer could not supply some bytes would make
+    // eviction expensive — and the whole argument for evicting aggressively
+    // is that it costs nothing.
+    let a = Device::new("a-gone");
+    let b = Device::new("b-gone");
+    pair(&a, &b);
+
+    let recording = vec![0x5au8; 4096];
+    let hash = capture_store::blobs::put(&a.paths.blobs, &recording).unwrap();
+    let body = capture_store::session::capture_body_with_blob(
+        "",
+        capture_core::body::BlobRef {
+            hash,
+            media_type: String::from("audio/ogg"),
+            bytes: recording.len() as u64,
+            duration_ms: None,
+        },
+    )
+    .unwrap();
+    a.session().capture(&body).unwrap();
+
+    // Gone from the only device that had them, after the note was written.
+    capture_store::blobs::evict(&a.paths.blobs, &hash).unwrap();
+
+    sync(&a, &b);
+
+    assert!(
+        !capture_store::blobs::have(&b.paths.blobs, &hash),
+        "there was nothing to fetch"
+    );
+    assert_eq!(
+        a.note_count(),
+        b.note_count(),
+        "and the round still moved every event"
+    );
 }

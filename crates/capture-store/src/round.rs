@@ -37,7 +37,7 @@ use crate::identity::Identity;
 use crate::ops::Ops;
 use crate::paths::StorePaths;
 use crate::session::Session;
-use crate::sync::StoreArchive;
+use crate::sync::{StoreArchive, StoreBlobs};
 use crate::{Error, Result};
 
 #[cfg(feature = "mdns")]
@@ -195,7 +195,7 @@ pub fn dial(
     let mut secure = Secure::initiate(tcp, &identity.noise_secret(), &noise)
         .map_err(|e| Error::Usage(format!("handshake refused: {e:?}")))?;
 
-    reconcile(paths, &mut secure, now)
+    reconcile(paths, &mut secure, now, true)
 }
 
 /// Answer a peer that dialled this device.
@@ -237,7 +237,7 @@ pub fn answer(
         )));
     };
 
-    let done = reconcile(paths, &mut secure, now)?;
+    let done = reconcile(paths, &mut secure, now, false)?;
     // Alive, but not necessarily reachable at the address it dialled from —
     // that is an ephemeral source port. Where to call it back comes from the
     // advertisement, or from a remembered address, not from this.
@@ -251,6 +251,7 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     paths: &StorePaths,
     secure: &mut Secure<T>,
     now: u64,
+    dialled: bool,
 ) -> Result<Exchanged> {
     let mut s = Session::open(paths.clone())?;
     let ops = Ops::open(&paths.ops)?;
@@ -280,6 +281,27 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
         && let Some(member) = archive.member_behind(&noise)
     {
         ops.learned_observes(&member, &done.peer_observes)?;
+    }
+
+    // Then the bytes (§5.6), if either side is short of any.
+    //
+    // One direction at a time, and which side goes first is decided by who
+    // dialled — not because the dialler is privileged, but because both sides
+    // have to agree on the order and that is the one fact both of them
+    // already know. Interleaving would mean each answering requests while
+    // awaiting its own, and a stall in one direction would be
+    // indistinguishable from a stall in the other.
+    let mut mine = StoreBlobs::new(paths.clone());
+    if dialled {
+        capture_sync::blob::fetch(secure, &mut mine)
+            .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
+        capture_sync::blob::serve(secure, &mine)
+            .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
+    } else {
+        capture_sync::blob::serve(secure, &mine)
+            .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
+        capture_sync::blob::fetch(secure, &mut mine)
+            .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
     }
 
     Ok(done)
