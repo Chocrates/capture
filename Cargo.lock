@@ -787,6 +787,7 @@ name = "capture-ffi"
 version = "0.1.0"
 dependencies = [
  "capture-core",
+ "capture-parse",
  "capture-store",
  "capture-time",
  "jiff",

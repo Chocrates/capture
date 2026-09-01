@@ -687,3 +687,160 @@ fn each_capture_surface_reports_what_it_cost() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn two_things_at_the_same_time_are_drawn_side_by_side() {
+    // §4.4's column packing, through the surface a phone calls. Two meetings
+    // at nine are two meetings; a day that put them in one column would have a
+    // surface draw them on top of each other, and the one underneath is the
+    // one somebody misses.
+    //
+    // Promoted by hand rather than through the recogniser, which is a separate
+    // question with its own tests. This is about what happens to occurrences
+    // once they exist.
+    let root = scratch("side-by-side");
+    let a = Archive::open(root.clone()).unwrap();
+    let paths = capture_store::paths::StorePaths::under(std::path::Path::new(&root));
+
+    // Daily, so there is one today whatever day this runs on — an expansion
+    // horizon is measured from now, and a date picked in advance falls outside
+    // it eventually.
+    let now = jiff::Timestamp::now().as_millisecond();
+    let daily = |at: i64| {
+        capture_core::body::Promoted::Series(capture_core::body::SeriesFields {
+            when: capture_core::body::When::Timed {
+                start_ms: at,
+                end_ms: Some(at + 60 * 60 * 1000),
+                tz: "UTC".into(),
+            },
+            rule: capture_core::body::RuleSpec {
+                freq: 1,
+                interval: 1,
+                by_day: 0b0111_1111,
+                by_month_day: Vec::new(),
+                count: None,
+                until: None,
+            },
+            carries_forward: false,
+            split_from: None,
+        })
+    };
+
+    for (what, at) in [
+        ("standup", now),
+        ("design review", now),
+        ("lunch", now + 5 * 60 * 60 * 1000),
+    ] {
+        let slug = match a.capture(what.into()).unwrap() {
+            Captured::Stored { slug } => slug,
+            Captured::Spooled => panic!("spooled"),
+        };
+        capture_store::promote::correct(&paths, &slug, daily(at)).unwrap();
+    }
+
+    let today = a.today();
+    let on_axis: Vec<_> = a
+        .agenda(today.clone())
+        .unwrap()
+        .into_iter()
+        .filter(|e| !e.all_day && !e.due)
+        .collect();
+
+    // Grouped by the occurrence's own start rather than compared against the
+    // moment the series was written: expansion places an occurrence where the
+    // rule says, which is near that moment and not equal to it.
+    let earliest = on_axis
+        .iter()
+        .map(|e| e.start_ms)
+        .min()
+        .expect("a day with things on it");
+    let at_once: Vec<_> = on_axis.iter().filter(|e| e.start_ms == earliest).collect();
+    assert_eq!(
+        at_once.len(),
+        2,
+        "two things at once on {today}: {on_axis:?}"
+    );
+    assert_eq!(
+        at_once[0].columns, 2,
+        "two things at once are two columns wide"
+    );
+    assert_ne!(
+        at_once[0].column, at_once[1].column,
+        "and not in the same one, or they are drawn on top of each other"
+    );
+
+    // The cluster decides the width, not the day: one overlap in the morning
+    // must not squeeze an unrelated lunch into half the page.
+    if let Some(alone) = on_axis.iter().find(|e| e.start_ms != earliest) {
+        assert_eq!(alone.columns, 1, "a lonely entry has the width to itself");
+        assert_eq!(alone.column, 0);
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn overlapping_things_on_a_day_get_columns_of_their_own() {
+    // §4.4. Two meetings at the same time are two meetings, and a surface that
+    // drew them in one column would draw them on top of each other. The
+    // packing is the same code the desktop runs — two implementations would be
+    // two answers to "do these overlap", visible only as two devices
+    // disagreeing about what Tuesday looks like.
+    let root = scratch("packing");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let day = a.today();
+    let entries = a.agenda(day.clone()).unwrap();
+
+    // An empty day still answers, and answers with a width of one rather than
+    // zero: a surface dividing by `columns` should not have to know that a day
+    // with nothing on it is a special case.
+    for e in &entries {
+        assert!(e.columns >= 1, "a cluster is at least one column wide");
+        assert!(e.column < e.columns, "a column sits inside its cluster");
+    }
+
+    // All-day entries and due tasks are left off the hour axis entirely, which
+    // is why they keep the defaults rather than being packed against hours
+    // they were never given.
+    for e in entries.iter().filter(|e| e.all_day || e.due) {
+        assert_eq!(e.column, 0);
+        assert_eq!(e.columns, 1);
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_capture_that_names_a_time_reaches_the_agenda() {
+    // §3.1 puts parsing after the commit, so a capture never waits for it —
+    // and something has to run the sweep afterwards or a note that plainly
+    // says "9am" is never promoted, never expanded, and never appears on any
+    // calendar. On the desktop the next command that writes does it. A phone
+    // that only captures and reads never writes anything else, so `settle` is
+    // the one call that has to.
+    let root = scratch("promoted");
+    let a = Archive::open(root.clone()).unwrap();
+
+    a.capture("standup at 9am".into()).unwrap();
+
+    // What a phone does when it comes forward.
+    a.settle().unwrap();
+
+    let today = a.today();
+    let on_day = a.agenda(today.clone()).unwrap();
+    assert!(
+        !on_day.is_empty(),
+        "nothing reached the agenda for {today}: a note saying 9am is not on \
+         any calendar, on any device, until something else happens to write"
+    );
+
+    // And it is the one-off that arrived, which is the case that was missing:
+    // a single-instance event lives in `promotions` and gains an occurrence
+    // row only once somebody writes an exception against it, so a query over
+    // expansions alone finds nothing.
+    assert_eq!(on_day.len(), 1);
+    assert!(!on_day[0].all_day, "a moment, not a floating date");
+
+    std::fs::remove_dir_all(&root).ok();
+}

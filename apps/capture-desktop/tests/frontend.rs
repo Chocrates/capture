@@ -242,12 +242,16 @@ fn the_page_draws_an_unwritten_end_as_wide_as_the_packer_reserves() {
     // them taller than that and occurrences the packer called separate are
     // drawn touching — which is exactly what happened on a real day, at 13:43
     // and 14:00, seventeen minutes apart and overlapping on screen.
+    // Read from the store, where the packer lives now that a phone draws the
+    // same day. The guard follows the constant: pointed at the old file it
+    // would have gone on passing against a copy nothing used.
     let rust = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ipc.rs"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/capture-store/src/calendar.rs"),
     )
-    .expect("ipc.rs is readable");
+    .expect("the packer is readable");
     assert!(
-        rust.contains("const UNWRITTEN: i64 = 15 * 60 * 1000;"),
+        rust.contains("pub const UNWRITTEN: i64 = 15 * 60 * 1000;"),
         "the packer's reservation changed; the page still assumes fifteen minutes"
     );
     assert!(

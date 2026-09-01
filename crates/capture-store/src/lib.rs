@@ -10,6 +10,7 @@
 
 pub mod ambient;
 pub mod blobs;
+pub mod calendar;
 pub mod db;
 pub mod descriptor;
 pub mod drain;

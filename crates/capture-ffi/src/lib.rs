@@ -295,6 +295,34 @@ pub struct AgendaEntry {
     pub due: bool,
     /// Already ticked off.
     pub done: bool,
+    /// When it ends, where that was written down.
+    pub end_ms: Option<i64>,
+    /// Which column it sits in, among things it overlaps (§4.4).
+    pub column: u32,
+    /// How many columns its cluster is wide, so it can be drawn at `1/columns`.
+    ///
+    /// The cluster decides, not the day: a single three-way overlap at noon
+    /// must not squeeze the morning into thirds.
+    pub columns: u32,
+}
+
+impl capture_store::calendar::Timed for AgendaEntry {
+    fn start_ms(&self) -> i64 {
+        self.start_ms
+    }
+
+    fn end_ms(&self) -> Option<i64> {
+        self.end_ms
+    }
+
+    fn on_axis(&self) -> bool {
+        !self.all_day && !self.due
+    }
+
+    fn place(&mut self, column: usize, columns: usize) {
+        self.column = column as u32;
+        self.columns = columns as u32;
+    }
 }
 
 /// A named page, as the wiki sidebar lists it.
@@ -496,10 +524,21 @@ impl Archive {
                 all_day: true,
                 due: false,
                 done: false,
+                end_ms: None,
+                column: 0,
+                columns: 1,
             });
         }
 
-        for (tgt, occ) in store.occurring_between(from, to)? {
+        // `happening_between`, not `occurring_between`. The second is series
+        // expansions only: a one-off event lives in `promotions` and gains an
+        // occurrence row only once somebody writes an exception against it. So
+        // the phone's agenda showed recurring things and silently omitted
+        // every single-instance event — "dentist thursday 2pm", promoted at
+        // 85% confidence, on no calendar at all. Both other surfaces already
+        // called the right one; this was the third implementation of the same
+        // question and the one that got it wrong.
+        for (tgt, occ) in store.happening_between(from, to)? {
             out.push(AgendaEntry {
                 slug: store.slug_of(&tgt)?.unwrap_or_default(),
                 text: store.text_of(&tgt)?,
@@ -507,6 +546,9 @@ impl Archive {
                 all_day: occ.all_day,
                 due: false,
                 done: occ.done,
+                end_ms: occ.end_ms,
+                column: 0,
+                columns: 1,
             });
         }
 
@@ -518,8 +560,17 @@ impl Archive {
                 all_day: true,
                 due: true,
                 done,
+                end_ms: None,
+                column: 0,
+                columns: 1,
             });
         }
+
+        // Packed here, by the same code the desktop runs. Two implementations
+        // would be two answers to "do these overlap", both plausible, neither
+        // checked against the other, and visible only as two devices
+        // disagreeing about what Tuesday looks like.
+        capture_store::calendar::pack(&mut out);
 
         out.sort_by_key(|e| (e.all_day, e.start_ms));
         Ok(out)

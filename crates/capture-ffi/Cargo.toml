@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 jiff = { workspace = true }
 
 [dev-dependencies]
+capture-parse = { path = "../capture-parse" }
 # To read the log directly. A test that pairing wrote no `setting` has to look
 # at the events, not at the surface — the surface is what would be wrong.
 capture-store = { path = "../capture-store", features = ["mdns"] }

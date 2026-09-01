@@ -913,79 +913,31 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
             }
         }
 
-        pack(&mut out);
+        capture_store::calendar::pack(&mut out);
         Ok(out)
     })())
 }
 
-/// How long an occurrence with no written end occupies, for overlap only.
-///
-/// Not a duration and never drawn as one. Two things at the same time are still
-/// two things at the same time, and a zero-width interval overlaps nothing — so
-/// packing would put them in one column and the page would draw them on top of
-/// each other. Fifteen minutes is enough to make them collide and short enough
-/// that it cannot manufacture a collision between meetings an hour apart.
-const UNWRITTEN: i64 = 15 * 60 * 1000;
-
-/// Assign each timed occurrence a column, so overlapping ones sit side by side.
-///
-/// §4.4 asks for column packing and does not say how. This is the ordinary
-/// algorithm: occurrences are grouped into clusters that transitively overlap,
-/// and within a cluster each takes the first column free at its start time. The
-/// cluster is what decides the width — every occurrence in it is drawn at
-/// `1/columns`, so a day with one three-way overlap at noon does not squeeze the
-/// morning.
-///
-/// All-day entries and due tasks are left alone: they have no position on an
-/// hour axis, which is the whole reason §3.2 keeps them in a band of their own.
-fn pack(rows: &mut [Occurrence]) {
-    let mut timed: Vec<usize> = (0..rows.len())
-        .filter(|&i| !rows[i].all_day && !rows[i].due)
-        .collect();
-
-    timed.sort_by_key(|&i| (rows[i].start_ms, -end_of(&rows[i])));
-
-    let mut cluster: Vec<usize> = Vec::new();
-    let mut cluster_end = i64::MIN;
-    // The end of the last occurrence in each open column.
-    let mut columns: Vec<i64> = Vec::new();
-
-    for &i in &timed {
-        // A gap closes the cluster: nothing after this point can overlap
-        // anything in it, so the width is settled and can be written down.
-        if rows[i].start_ms >= cluster_end && !cluster.is_empty() {
-            let width = columns.len().max(1);
-            for &j in &cluster {
-                rows[j].columns = width;
-            }
-            cluster.clear();
-            columns.clear();
-            cluster_end = i64::MIN;
-        }
-
-        let col = match columns.iter().position(|&end| end <= rows[i].start_ms) {
-            Some(c) => c,
-            None => {
-                columns.push(i64::MIN);
-                columns.len() - 1
-            }
-        };
-
-        let end = end_of(&rows[i]);
-        columns[col] = end;
-        rows[i].column = col;
-        cluster.push(i);
-        cluster_end = cluster_end.max(end);
+impl capture_store::calendar::Timed for Occurrence {
+    fn start_ms(&self) -> i64 {
+        self.start_ms
     }
 
-    let width = columns.len().max(1);
-    for &j in &cluster {
-        rows[j].columns = width;
+    fn end_ms(&self) -> Option<i64> {
+        self.end_ms
     }
-}
 
-fn end_of(o: &Occurrence) -> i64 {
-    o.end_ms.unwrap_or(o.start_ms + UNWRITTEN)
+    fn on_axis(&self) -> bool {
+        // All-day entries and due tasks have no position on an hour axis,
+        // which is the whole reason §3.2 and §4.4 keep them in bands of their
+        // own.
+        !self.all_day && !self.due
+    }
+
+    fn place(&mut self, column: usize, columns: usize) {
+        self.column = column;
+        self.columns = columns;
+    }
 }
 
 /// Mark a task done, or open again.
@@ -1638,7 +1590,7 @@ mod tests {
     }
 
     fn packed(mut rows: Vec<Occurrence>) -> Vec<(i64, usize, usize)> {
-        pack(&mut rows);
+        capture_store::calendar::pack(&mut rows);
         rows.iter()
             .map(|o| (o.start_ms, o.column, o.columns))
             .collect()
@@ -1749,7 +1701,7 @@ mod tests {
         // one would give it a column, and a column is a claim about a time.
         let mut rows = vec![at(9 * H, Some(10 * H)), at(9 * H, Some(10 * H))];
         rows[0].all_day = true;
-        pack(&mut rows);
+        capture_store::calendar::pack(&mut rows);
         assert_eq!((rows[0].column, rows[0].columns), (0, 1));
         assert_eq!(
             (rows[1].column, rows[1].columns),

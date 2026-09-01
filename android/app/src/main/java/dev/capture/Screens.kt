@@ -14,6 +14,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -208,20 +214,26 @@ fun Agenda(day: String, entries: List<AgendaEntry>) {
             Empty("Nothing on this day.")
             return@Column
         }
+        // Three bands, and the first is not a subdivision of the second.
+        // An all-day entry is a floating date with no position on an hour
+        // axis, and a task that is *due* on a day is a third thing again
+        // (§4.4, §3.6).
+        val allDay = entries.filter { it.allDay && !it.due }
+        val due = entries.filter { it.due }
+        val timed = entries.filter { !it.allDay && !it.due }
+
         LazyColumn {
-            items(entries) { entry ->
-                Column(Modifier.fillMaxWidth().padding(16.dp, 6.dp)) {
-                    Text(
-                        when {
-                            entry.due -> if (entry.done) "due · done" else "due"
-                            entry.allDay -> "all day"
-                            else -> ""
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    Text(entry.text ?: entry.slug, style = MaterialTheme.typography.bodyLarge)
-                }
-                HorizontalDivider()
+            if (allDay.isNotEmpty()) {
+                item { Band("All day") }
+                items(allDay) { Line(it) }
+            }
+            if (due.isNotEmpty()) {
+                item { Band("Due") }
+                items(due) { Line(it) }
+            }
+            if (timed.isNotEmpty()) {
+                item { Band("During the day") }
+                item { Hours(timed) }
             }
         }
     }
@@ -233,6 +245,92 @@ fun Agenda(day: String, entries: List<AgendaEntry>) {
  * The parent comes as a field on each page rather than as a tree, so there is
  * nothing here that can get a cycle or an orphan wrong.
  */
+@Composable
+private fun Band(what: String) {
+    Text(
+        what,
+        Modifier.padding(start = 16.dp, top = 16.dp),
+        style = MaterialTheme.typography.titleSmall,
+    )
+}
+
+@Composable
+private fun Line(entry: AgendaEntry) {
+    Column(Modifier.fillMaxWidth().padding(16.dp, 6.dp)) {
+        if (entry.due) {
+            Text(
+                if (entry.done) "done" else "not done",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        Text(entry.text ?: entry.slug, style = MaterialTheme.typography.bodyLarge)
+    }
+    HorizontalDivider()
+}
+
+/**
+ * The timed part of a day, laid out.
+ *
+ * Overlapping entries sit side by side, in the columns the archive assigned —
+ * §4.4 asks for column packing and the packing is done in Rust, by the same
+ * code the desktop runs. Nothing here decides whether two things overlap; it
+ * divides the width by a number it was given.
+ *
+ * A fixed height per hour rather than a scaled one, so an hour is the same
+ * distance everywhere on the page. A day drawn to fit would make a busy
+ * morning look identical to an empty one.
+ */
+@Composable
+private fun Hours(entries: List<AgendaEntry>) {
+    val first = entries.minOf { it.startMs }
+    val last = entries.maxOf { it.endMs ?: (it.startMs + UNWRITTEN_MS) }
+    val span = (last - first).coerceAtLeast(UNWRITTEN_MS)
+    val height = ((span / 60_000).toInt() * MINUTE).coerceAtLeast(120)
+
+    BoxWithConstraints(Modifier.fillMaxWidth().height(height.dp).padding(horizontal = 16.dp)) {
+        val full = maxWidth
+        // A loop rather than `forEach`: its lambda is not a composable
+        // context, so nothing inside it may emit.
+        for (entry in entries) {
+            val startsAt = ((entry.startMs - first) / 60_000).toInt() * MINUTE
+            val runsFor = (((entry.endMs ?: (entry.startMs + UNWRITTEN_MS)) - entry.startMs)
+                / 60_000).toInt() * MINUTE
+            val width = full / entry.columns.toInt()
+
+            Box(
+                Modifier
+                    .padding(start = width * entry.column.toInt(), top = startsAt.dp)
+                    .width(width)
+                    .height(runsFor.coerceAtLeast(24).dp),
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = MaterialTheme.shapes.extraSmall,
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight().padding(end = 2.dp),
+                ) {
+                    Text(
+                        entry.text ?: entry.slug,
+                        Modifier.padding(4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 3,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * How tall a minute is, and how long an entry with no written end is drawn.
+ *
+ * The second has to match what the packer reserved. Drawn taller, entries the
+ * packer decided were separate would be drawn touching — which is what
+ * happened on the desktop, at 13:43 and 14:00, seventeen minutes apart and
+ * overlapping on screen.
+ */
+private const val MINUTE = 1
+private const val UNWRITTEN_MS = 15L * 60 * 1000
+
 @Composable
 fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
     if (pages.isEmpty()) {
