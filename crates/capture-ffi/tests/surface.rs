@@ -653,3 +653,37 @@ fn a_recording_is_captured_with_no_words_and_read_back() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn each_capture_surface_reports_what_it_cost() {
+    // §2.1 argues capture must cost almost nothing at the moment a thought
+    // arrives, and 4.5 asks the phone to answer that rather than assert it.
+    // Per surface, because they differ in what they must do first — a share
+    // sheet arrives with the content chosen, a recording has to be encoded and
+    // hashed — and one number over all of them averages away the only useful
+    // fact, which is *which* gesture is slow.
+    let root = scratch("cost");
+    let a = Archive::open(root.clone()).unwrap();
+
+    assert!(
+        a.costs().unwrap().is_empty(),
+        "nothing is claimed before anything is measured"
+    );
+
+    a.took("tile".into(), 42).unwrap();
+    a.took("tile".into(), 58).unwrap();
+    a.took("voice".into(), 900).unwrap();
+
+    let costs = a.costs().unwrap();
+    assert_eq!(costs.len(), 2, "one line per surface: {costs:?}");
+    assert!(
+        costs.iter().any(|c| c.starts_with("tile: 2 shown")),
+        "{costs:?}"
+    );
+    assert!(
+        costs.iter().any(|c| c.starts_with("voice: 1 shown")),
+        "{costs:?}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

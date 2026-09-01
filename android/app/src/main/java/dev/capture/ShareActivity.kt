@@ -24,8 +24,12 @@ import uniffi.capture_ffi.Captured
  */
 class ShareActivity : ComponentActivity() {
 
+    /** When this arrived, so what it costs can be measured rather than claimed. */
+    private var began: Long = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        began = System.currentTimeMillis()
 
         val text = intent?.shared()
         if (text.isNullOrBlank()) {
@@ -48,6 +52,14 @@ class ShareActivity : ComponentActivity() {
                     is Captured.Spooled -> "Saved. It will be filed when the store is writable."
                 },
             )
+            // What the share gesture cost, gesture to committed. Reported
+            // separately from the tile because it starts with the content
+            // already chosen and so should be the cheapest surface there is —
+            // a claim worth checking rather than assuming.
+            runCatching {
+                Store.of(this@ShareActivity)
+                    .took("share", (System.currentTimeMillis() - began).toULong())
+            }
             finish()
         }
     }

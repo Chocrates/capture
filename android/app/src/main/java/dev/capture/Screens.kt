@@ -268,6 +268,7 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
 fun Health(
     conditions: List<Condition>,
     peers: List<Peer>,
+    costs: List<String>,
     notifier: String?,
     me: String,
     onNotifier: (String?) -> Unit,
@@ -377,6 +378,30 @@ fun Health(
             Row {
                 TextButton(onSync) { Text("Sync now") }
                 TextButton(onPair) { Text("Pair a device") }
+            }
+        }
+
+        if (costs.isNotEmpty()) {
+            item {
+                Text(
+                    "What capturing costs",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 24.dp),
+                )
+                Text(
+                    // Measured, not claimed. §2.1's argument is that capture
+                    // has to cost almost nothing at the moment a thought
+                    // arrives, and this is the only thing that can say whether
+                    // it does on this device.
+                    "Commit to stored, and how long each window took to appear. " +
+                        "The time spent typing or speaking is the person's, not " +
+                        "the system's, and measuring it would report a considered " +
+                        "sentence as a slow surface.",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            items(costs) {
+                Text(it, Modifier.padding(vertical = 4.dp), style = MaterialTheme.typography.labelMedium)
             }
         }
 

@@ -112,6 +112,7 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                 is Screen.Health -> Health(
                     model.conditions,
                     model.peers,
+                    model.costs,
                     model.notifier,
                     model.me,
                     onNotifier = model::chooseNotifier,

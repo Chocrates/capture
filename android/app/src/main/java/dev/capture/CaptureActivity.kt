@@ -71,14 +71,41 @@ class CaptureActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * When this window appeared, so its own cost can be measured.
+     *
+     * Subtracting two readings of the same clock is measuring, not deciding:
+     * the number is a fact about how long this device took, and nothing here
+     * concludes anything from it.
+     */
+    private var began: Long = 0
+
+    /** Which gesture opened this, for reporting what it cost separately. */
+    private val surface: String
+        get() = if (intent?.action == android.content.Intent.ACTION_ASSIST) "assist" else "tile"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        began = System.currentTimeMillis()
         recorder = Recorder(this)
 
         // Shown over the lock screen, and the device is not unlocked to do it.
         // The tile is reachable from there; an activity that then demanded a
         // PIN would put the whole gesture behind the thing it was avoiding.
         setShowWhenLocked(true)
+
+        // How long the window itself took to be usable. The other half of
+        // what a surface costs, and it fails differently: a slow window is a
+        // gesture that feels unresponsive, a slow commit is one that feels
+        // unfinished.
+        window.decorView.post {
+            runCatching {
+                Store.of(this).took(
+                    "$surface-window",
+                    (System.currentTimeMillis() - began).toULong(),
+                )
+            }
+        }
 
         setContent {
             MaterialTheme {
@@ -116,6 +143,15 @@ class CaptureActivity : ComponentActivity() {
 
     /** And came up again. */
     private fun spoken() {
+        // Timed from here, not from when the window opened.
+        //
+        // The first version measured the whole gesture, which for a recording
+        // includes how long the person spoke — so a thoughtful ten-second note
+        // was reported as a ten-second capture, and the surface looked slow
+        // because somebody had something to say. What this device is
+        // responsible for is what happens after the finger lifts: encoding,
+        // hashing, and writing the event.
+        val released = System.currentTimeMillis()
         val said = recorder.stop()
         if (said == null) {
             // A tap rather than a hold, or a recorder that produced nothing.
@@ -132,6 +168,12 @@ class CaptureActivity : ComponentActivity() {
                         .captureVoice(said.bytes, Recorder.MEDIA_TYPE, said.durationMs)
                 }
             }
+            outcome.onSuccess {
+                runCatching {
+                    Store.of(this@CaptureActivity)
+                        .took("voice", (System.currentTimeMillis() - released).toULong())
+                }
+            }
             outcome.onFailure {
                 // The bytes are gone with the scratch file, so this is the
                 // only chance to say so. A recording reported as saved and
@@ -142,7 +184,29 @@ class CaptureActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Say what a capture cost, from the commit to stored.
+     *
+     * Not from the window opening, which is what this measured first and was
+     * wrong: for a typed note that includes how long somebody typed, so a
+     * considered sentence was reported as a slow surface. The same mistake in
+     * the voice path timed how long a person spoke.
+     *
+     * What the device is answerable for is the part after the decision — the
+     * moment between pressing commit and the thing being safe. That is what a
+     * person actually waits through, and the only part making the software
+     * faster can change. The window's own appearance is measured separately,
+     * because it is the other half and they fail differently.
+     */
+    private fun cost(surface: String, from: Long) {
+        runCatching {
+            Store.of(this).took(surface, (System.currentTimeMillis() - from).toULong())
+        }
+    }
+
     private fun commit(text: String) {
+        // The moment the person stopped deciding and started waiting.
+        val decided = System.currentTimeMillis()
         if (text.isBlank()) {
             finish()
             return
@@ -159,6 +223,7 @@ class CaptureActivity : ComponentActivity() {
             if (result is Captured.Spooled) {
                 Toast.short(this@CaptureActivity, "Saved. It will be filed when the store is writable.")
             }
+            cost(surface, decided)
             finish()
         }
     }

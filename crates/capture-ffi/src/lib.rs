@@ -1184,6 +1184,35 @@ impl Archive {
         Ok(())
     }
 
+    /// Say how long a capture took, gesture to committed.
+    ///
+    /// Reported by the surface because only the surface knows when the gesture
+    /// began — the archive is handed text that already exists. This is
+    /// measuring, not deciding: the number is a fact about how long this
+    /// device took, and what to do about it is nobody's decision to make here.
+    ///
+    /// §2.1 argues capture must cost almost nothing at the moment a thought
+    /// arrives. A system that asserts that without measuring it is making a
+    /// promise it has no way to keep, and 4.5 asks the phone to answer the
+    /// same question the desktop's chord already answers.
+    pub fn took(&self, surface: String, ms: u64) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        ops.record_capture_latency(&surface, ms)?;
+        Ok(())
+    }
+
+    /// What each capture surface has cost, as a sentence per surface.
+    pub fn costs(&self) -> Result<Vec<String>> {
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        let mut out = Vec::new();
+        for surface in ops.measured_surfaces()? {
+            if let Some(summary) = ops.capture_latency(&surface)?.summary() {
+                out.push(format!("{surface}: {summary}"));
+            }
+        }
+        Ok(out)
+    }
+
     /// Say how much of the time this device may observe where it is.
     ///
     /// Recorded locally rather than in the log: a permission is a fact about

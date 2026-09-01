@@ -77,7 +77,27 @@
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:launchMode="singleTop"
-            android:windowSoftInputMode="stateVisible|adjustResize" />
+            android:windowSoftInputMode="stateVisible|adjustResize">
+
+            <!--
+              The assistant gesture (§8.10: long-press home → hold-to-talk).
+
+              Registering for ASSIST lets somebody choose capture as their
+              assist app, so the gesture that is already in their hand opens
+              the capture window instead of a search box.
+
+              It opens the window and does **not** start recording. The
+              gesture can fire by accident — a long press against a pocket is
+              exactly the shape of it — and a device that began recording on
+              an accidental gesture is the failure hold-to-talk was designed
+              to make impossible. The assistant gesture replaces finding the
+              application; the capture gesture is still the person's.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <!--
           The share-sheet target. Invisible: it captures and finishes, because

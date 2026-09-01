@@ -530,6 +530,47 @@ impl Ops {
         Ok(crate::latency::Histogram::from_counts(&counts))
     }
 
+    /// How long a capture took, gesture to committed, on one surface.
+    ///
+    /// Per surface rather than one number, because the surfaces differ in what
+    /// they have to do first: a tile opens a window, a share sheet arrives
+    /// with the content already chosen, a recording has to be encoded and
+    /// hashed before anything is written. One histogram over all of them would
+    /// average away the only thing worth knowing — which gesture is slow.
+    ///
+    /// Measured rather than asserted. §2.1's whole argument is that capture
+    /// has to cost almost nothing at the moment a thought arrives, and a
+    /// system that claims that without measuring it is making a promise it has
+    /// no way to keep.
+    pub fn record_capture_latency(&self, surface: &str, ms: u64) -> Result<()> {
+        let mut h = self.capture_latency(surface)?;
+        h.record(ms);
+        let encoded: Vec<String> = h.counts().iter().map(|c| c.to_string()).collect();
+        self.set(&capture_latency_key(surface), &encoded.join(","))
+    }
+
+    /// What one surface has cost so far.
+    pub fn capture_latency(&self, surface: &str) -> Result<crate::latency::Histogram> {
+        let Some(raw) = self.get(&capture_latency_key(surface))? else {
+            return Ok(crate::latency::Histogram::default());
+        };
+        let counts: Vec<u64> = raw.split(',').filter_map(|v| v.parse().ok()).collect();
+        Ok(crate::latency::Histogram::from_counts(&counts))
+    }
+
+    /// Every surface that has reported a measurement.
+    pub fn measured_surfaces(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT k FROM local WHERE k LIKE 'capture_latency.%' ORDER BY k")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.trim_start_matches("capture_latency.").to_string());
+        }
+        Ok(out)
+    }
+
     /// How far each origin has been exported.
     pub fn export_heads(&self) -> Result<BTreeMap<String, u64>> {
         let mut st = self.conn.prepare("SELECT dev, seq FROM export_head")?;
@@ -903,6 +944,10 @@ impl Ops {
 fn intent_key(id: &[u8]) -> String {
     let hex: String = id.iter().take(8).map(|b| format!("{b:02x}")).collect();
     format!("intent_fired.{hex}")
+}
+
+fn capture_latency_key(surface: &str) -> String {
+    format!("capture_latency.{surface}")
 }
 
 fn observes_key(peer: &[u8; 32]) -> String {

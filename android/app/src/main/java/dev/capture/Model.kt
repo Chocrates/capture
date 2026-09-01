@@ -74,6 +74,10 @@ class Model(private val archive: Archive) : ViewModel() {
     var notifier by mutableStateOf<String?>(null)
         private set
 
+    /** What each capture surface has cost, measured rather than claimed. */
+    var costs by mutableStateOf<List<String>>(emptyList())
+        private set
+
     /** This device's own key, to know whether the chosen one is us. */
     val me: String by lazy { archive.deviceKey() }
     var offered by mutableStateOf<List<Resurfaced>>(emptyList())
@@ -122,6 +126,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 conditions = archive.health()
                 peers = archive.peers()
                 notifier = archive.notifier()
+                costs = archive.costs()
             }
             is Screen.Note -> load {
                 note = archive.note(to.name)

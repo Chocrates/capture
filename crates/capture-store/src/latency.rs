@@ -100,12 +100,9 @@ impl Histogram {
         let p50 = self.quantile(0.50)?;
         let p95 = self.quantile(0.95)?;
         Some(format!(
-            "{total} shown, half within {p50}ms, 95% within {}",
-            if p95 == u64::MAX {
-                format!("over {}ms", BOUNDS[BOUNDS.len() - 1])
-            } else {
-                format!("{p95}ms")
-            }
+            "{total} shown, half within {}, 95% within {}",
+            bound(p50),
+            bound(p95),
         ))
     }
 
@@ -224,5 +221,53 @@ mod tests {
             h.record(*b);
             assert_eq!(h.quantile(1.0), Some(*b), "bucket {i} ({b}ms) is reachable");
         }
+    }
+}
+
+/// A quantile as a sentence, including when it fell off the end.
+///
+/// The last bucket is open-ended, so a measurement above it has no upper
+/// bound — `quantile` says so with `u64::MAX`. This was rendered for the 95th
+/// percentile and not for the median, so a device where more than half of
+/// captures were slow reported "half within 18446744073709551615ms", which is
+/// a number nobody can read and an answer to a question nobody asked.
+fn bound(q: u64) -> String {
+    if q == u64::MAX {
+        format!("over {}ms", BOUNDS[BOUNDS.len() - 1])
+    } else {
+        format!("{q}ms")
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn a_median_off_the_end_of_the_scale_is_readable() {
+        // The last bucket is open-ended, so a quantile above it has no upper
+        // bound and `quantile` says so with `u64::MAX`. That was rendered for
+        // the 95th percentile and not for the median, so a device where most
+        // captures were slow reported "half within 18446744073709551615ms" —
+        // a number nobody can read, answering a question nobody asked.
+        let mut h = Histogram::default();
+        for _ in 0..10 {
+            h.record(999_999);
+        }
+        let said = h.summary().expect("something was measured");
+        assert!(
+            !said.contains("18446744073709551615"),
+            "the scale ran out and the sentence should say so: {said}"
+        );
+        assert!(said.contains("over"), "{said}");
+    }
+
+    #[test]
+    fn an_ordinary_measurement_reads_as_a_number() {
+        let mut h = Histogram::default();
+        h.record(3);
+        let said = h.summary().expect("something was measured");
+        assert!(said.contains("ms"), "{said}");
+        assert!(!said.contains("over"), "nothing fell off the scale: {said}");
     }
 }
