@@ -491,6 +491,19 @@ impl Ops {
         Ok(self.get(&intent_key(id))?.is_some())
     }
 
+    /// When one was last delivered, if it has been.
+    ///
+    /// Separate from [`Self::intent_fired`] because the two answer different
+    /// questions. "Has this ever fired" settles a cue that happens once; a
+    /// geofence happens every time somebody arrives, and what it needs to know
+    /// is *when* — so that standing near the boundary does not produce a
+    /// notification every time the radio changes its mind.
+    pub fn intent_fired_at(&self, id: &[u8]) -> Result<Option<u64>> {
+        Ok(self
+            .get(&intent_key(id))?
+            .and_then(|v| v.trim().parse::<u64>().ok()))
+    }
+
     /// Remember that one was delivered.
     pub fn mark_intent_fired(&self, id: &[u8], at: u64) -> Result<()> {
         self.set(&intent_key(id), &at.to_string())

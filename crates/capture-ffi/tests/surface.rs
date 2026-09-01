@@ -5,7 +5,7 @@
 //! interesting question — did the store do the right thing — is then two
 //! layers and a language away from where it is answered.
 
-use capture_ffi::{Archive, Captured};
+use capture_ffi::{Archive, Captured, Watching};
 
 use capture_store::pairing::PORT as PAIRING_PORT;
 
@@ -510,6 +510,76 @@ fn a_review_session_is_offered_and_marked_as_offered() {
             .is_err(),
         "`shown` is the archive's to write"
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_plan_about_a_place_that_cannot_fire_says_so() {
+    // §7.3. An intent failing invisibly is worse than no intent: the person
+    // believes something is watching for them, stops holding it in mind, and
+    // that is the whole thing this exists to do.
+    let root = scratch("unfirable");
+    let a = Archive::open(root.clone()).unwrap();
+
+    // Watching a place is refused where the device cannot observe one, which
+    // is every device that does not move — so on a desktop there is nothing to
+    // report and this asserts the refusal instead.
+    let watching = a.watch_place(51_507_351, -128_099, 100, "buy screws".into());
+
+    if cfg!(target_os = "android") {
+        let id = watching.expect("a phone can watch a place");
+
+        a.location_permitted(Watching::Never).unwrap();
+        let complaints = a.health().unwrap();
+        assert!(
+            complaints
+                .iter()
+                .any(|c| c.tier == "attention" && c.text.contains("cannot fire")),
+            "an intent nothing is watching for is not a quiet detail: {complaints:?}"
+        );
+
+        // The trap in the middle. Android offers "while using the app", which
+        // reads like a smaller permission and is none at all for this: nobody
+        // is looking at a notes application while walking into a shop. The
+        // emulator granted exactly this, the fences registered, and nothing
+        // reported a thing — which is §7.3's failure wearing the disguise of
+        // having worked.
+        a.location_permitted(Watching::WhileOpen).unwrap();
+        let complaints = a.health().unwrap();
+        assert!(
+            complaints
+                .iter()
+                .any(|c| c.text.contains("only fire while capture is open")),
+            "a permission that cannot deliver is not a permission: {complaints:?}"
+        );
+
+        a.location_permitted(Watching::Always).unwrap();
+        assert!(
+            !a.health()
+                .unwrap()
+                .iter()
+                .any(|c| c.text.contains("plan(s) about a place")),
+            "and it stops being reported once it can actually fire"
+        );
+
+        // It fires on arrival, and not again while somebody stands at the edge.
+        assert_eq!(
+            a.arrived(id.clone()).unwrap().as_deref(),
+            Some("buy screws")
+        );
+        assert_eq!(
+            a.arrived(id).unwrap(),
+            None,
+            "a phone re-acquiring its position is not a second visit"
+        );
+    } else {
+        assert!(
+            watching.is_err(),
+            "a machine that does not move cannot watch a place: it would never \
+             fire, or fire once and never stop"
+        );
+    }
 
     std::fs::remove_dir_all(&root).ok();
 }

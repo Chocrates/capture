@@ -65,16 +65,33 @@
 
 ## 7. Cues and notification
 
-- [ ] 7.1 Geofence cues through the platform API, offered only once location permission is granted.
-- [ ] 7.2 **A `location` cue fires on the phone whatever device is the notifier.** Routing it to a designated notifier delivers "you are at the hardware shop" to a desktop at home.
-- [ ] 7.3 **An existing `location` cue on a phone without permission is reported as unfirable**, and keeps being reported. An intent failing invisibly is worse than no intent: the user believes something is watching when nothing is.
+- [~] 7.1 Geofence cues through the platform API, offered only once location permission is granted. **Built and driven on the emulator up to the point the emulator can reach**: `GeofencingClient` with `NEVER_EXPIRE` and enter-only transitions, re-registered on every launch because fences do not survive a reboot — a fence that silently stopped existing is exactly §7.3's failure. **A fence firing has not been observed** — see 8.2: Play Services geofencing on an emulator driven by `geo fix` produced no delivery and no log line at all, which is exactly why that task says a simulated geofence is much weaker evidence than a real one. What *is* verified here: the permission model, registration, the plan appearing with its coordinates, and the decision logic, which is Rust and tested on the device.
+  - `setInitialTrigger(0)`, deliberately. Registering a fence around where you already are would fire it immediately, so every restart would announce you had arrived somewhere you never left.
+  - The permission is asked for when somebody presses the button on the plans screen, never at launch. A prompt before anything has explained why is the one most often refused permanently, and this feature does not exist until somebody wants a plan about a place.
+- [x] 7.2 **A `location` cue fires on the phone whatever device is the notifier.** **Built that way**: the receiver notifies locally and never consults the notifier setting. The notifier chooses who says *time* things; a place is observable in one location and nowhere else, and routing it would deliver "you are at the hardware shop" to an empty room.
+- [x] 7.3 **An existing `location` cue on a phone without permission is reported as unfirable**, and keeps being reported. **Done and tested on the device**: health reports it under `attention`, not `worth-knowing`, and each plan says so on its own row rather than in a banner somebody dismissed once. The permission is asked of the platform on every resume, because it can be taken away in Settings while the app is in the background.
+  - A repeating cue re-arms rather than firing once. A place is not a moment: "buy screws when you are at the hardware shop" is worthless if it only ever works the first time. It also does not fire repeatedly while somebody stands at the boundary — a shop is a point with a radius, the counter is metres from its edge, and a phone re-acquiring its position crosses that edge without anybody moving.
 - [~] 7.4 The phone as notifier, chosen in the UI, authored as a `setting` — and never authored by pairing. **The setting can now be written at all**, which it could not before: `notifier::KEY` named the key, `notifier::chosen` read it, and `validate` had never heard of it — so the only answer that function could give was "nobody has chosen", for ever, whatever anybody did. Nothing was unwired in a way the caller check could see; every function had callers, and the mechanism they formed had no way in.
   - `Setting.default` is now `Option`, because the notifier has no compiled-in value and that absence is the design (§8.9). With one device the answer is "this one" — a rule evaluated locally, not a constant — and a device key written there as a stand-in would be the machine-authored preference §8.9 forbids, wearing a different hat. `capture status` prints `by rule` in the column where a value would go.
   - Still to do: the choosing UI on both surfaces.
 - [~] 7.5 Devices announce whether they can notify, so the choice is made among devices that can deliver. **`observable` is now per-platform rather than per-build**: the same function answering differently where it runs, which is the whole reason §2.4.1 routes a cue to a device rather than to "the notifier". `location` was hard-coded false with the comment "no phone until M4"; it is now true on Android and false on the desktop, and `git_branch` is the reverse. Verified by running the suite on both — the assertions are written against `cfg!`, so each platform checks the opposite thing.
   - The first run on the device passed and proved nothing: I had pushed a binary from an hour earlier. The fresh one failed exactly where it should have, which is what made the flip real.
   - Announcing it *between* devices is still to do. Today each device only knows what it can see itself.
-- [ ] 7.6 **Test that declining location leaves capture, sync and reading untouched.**
+- [x] 7.6 **Test that declining location leaves capture, sync and reading untouched.** **Driven on the emulator with all three location permissions revoked**: captured from the tile, the note appeared in the timeline, a sync round ran to `SUCCESS`, and health reported the one place-plan as unfirable while everything else carried on. A scripted version belongs with 8.1.
+
+### What the emulator taught, which was the point of building it here first
+
+**Android's "while using the app" is not a smaller permission — for this it is
+no permission at all.** The emulator granted it, the fences registered, health
+reported nothing, and nothing could ever have fired: nobody is looking at a
+notes application while walking into a hardware shop. A boolean could not
+express that, so `Watching` has three states and the middle one is named. This
+is §7.3's failure wearing the disguise of having worked, and it took granting
+the permission and reading `dumpsys package` to see it — the app said yes.
+
+**The result of `addGeofences` was ignored.** Registration can fail for reasons
+unrelated to permission — location services off, too many fences, Play Services
+missing — and each leaves plans that look registered and are not.
 
 ## 8. Acceptance
 

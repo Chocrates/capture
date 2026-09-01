@@ -75,6 +75,11 @@ dependencies {
     // under constraints it enforces rather than ones an application asks for.
     implementation(libs.androidx.work)
 
+    // Geofencing. §2.4.1 puts location cues on the phone because the phone is
+    // the only device that can observe one; this is how it observes without
+    // holding the radio open.
+    implementation(libs.play.services.location)
+
     // uniffi's generated Kotlin calls the native library through JNA.
     implementation(libs.jna) { artifact { type = "aar" } }
 

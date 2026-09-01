@@ -14,7 +14,9 @@ import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
+import uniffi.capture_ffi.Intent as Plan
 import uniffi.capture_ffi.Resurfaced
+import uniffi.capture_ffi.Watching
 import uniffi.capture_ffi.Pending
 
 /** Which surface is showing. */
@@ -27,6 +29,7 @@ sealed interface Screen {
     data class Note(val name: String) : Screen
     data object Pairing : Screen
     data object Review : Screen
+    data object Plans : Screen
 }
 
 /**
@@ -63,6 +66,16 @@ class Model(private val archive: Archive) : ViewModel() {
         private set
     var nagging by mutableStateOf<List<String>>(emptyList())
         private set
+    var plans by mutableStateOf<List<Plan>>(emptyList())
+        private set
+    /**
+     * How much of the time this device may see where it is.
+     *
+     * Asked of the platform on every resume rather than remembered: it can be
+     * taken away in Settings while the application is in the background.
+     */
+    var located by mutableStateOf(Watching.NEVER)
+        private set
     var note by mutableStateOf<NoteSummary?>(null)
         private set
 
@@ -97,6 +110,7 @@ class Model(private val archive: Archive) : ViewModel() {
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
+            is Screen.Plans -> load { plans = archive.intents() }
             // Opening a session writes — the archive records that these were
             // offered, which is what expands the interval. So it happens when
             // somebody goes to review, and not on every navigation past it.
@@ -209,6 +223,34 @@ class Model(private val archive: Archive) : ViewModel() {
         // Taken off the list, because it has been answered. Not re-opened:
         // that would spend another session.
         offered = offered.filterNot { it.slug == name }
+    }
+
+    /** Say whether the platform is currently letting this device see where it is. */
+    fun located(watching: Watching) {
+        located = watching
+        load {
+            archive.locationPermitted(watching)
+            // The plans list carries whether each can be watched here, so it
+            // is stale the moment a permission changes.
+            if (screen is Screen.Plans) plans = archive.intents()
+        }
+    }
+
+    /**
+     * Watch for a place.
+     *
+     * Coordinates in micro-degrees, because that is what goes into the event
+     * body: integers are exact and hash into an event id, where a float would
+     * make the id depend on two devices agreeing bit-for-bit about a decimal.
+     */
+    fun watchPlace(latE6: Int, lonE6: Int, radiusM: UInt, then: String) = load {
+        archive.watchPlace(latE6, lonE6, radiusM, then)
+        plans = archive.intents()
+    }
+
+    fun retract(id: String) = load {
+        archive.retractIntent(id)
+        plans = archive.intents()
     }
 
     /** Where this device can be reached, for the other one to dial. */

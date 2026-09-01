@@ -119,6 +119,38 @@ pub fn notify(summary: &str, body: &str) {
     }
 }
 
+/// How long a repeating cue waits before it may say the same thing again.
+///
+/// Not a debounce on the sensor — the platform already collapses a boundary
+/// crossing into one event. This is about the boundary itself: a shop is a
+/// point with a radius, a person at the counter is metres from the edge of it,
+/// and a phone that re-acquires its position every few minutes will cross that
+/// edge repeatedly without anybody moving. Thirty minutes is long enough that
+/// leaving and coming back is a real visit rather than a wobble.
+pub const REARM_MS: u64 = 30 * 60 * 1000;
+
+/// Whether a cue that has already fired may fire again.
+///
+/// A time cue happens once: it named a moment, the moment passed, and saying
+/// so twice is noise. A geofence happens every visit — "buy screws when you
+/// are at the hardware shop" is worthless if it only ever works the first
+/// time, and that is the difference §2.4 draws between a reminder and a plan.
+pub fn may_fire_again(last_fired: Option<u64>, now: u64, cue_type: &str) -> bool {
+    match last_fired {
+        None => true,
+        Some(_) if !repeats(cue_type) => false,
+        Some(then) => now.saturating_sub(then) >= REARM_MS,
+    }
+}
+
+/// Whether a cue describes a recurring condition rather than a single moment.
+fn repeats(cue_type: &str) -> bool {
+    matches!(
+        cue_type,
+        "location" | "recurring" | "app_focus" | "git_branch" | "device_wake"
+    )
+}
+
 /// Where fired intents are remembered.
 ///
 /// Local state rather than the log. *Which* device delivered a notification and
@@ -140,6 +172,36 @@ pub fn mark_fired(paths: &StorePaths, id: &[u8], now: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moment_fires_once_and_a_place_fires_every_visit() {
+        // The difference between a reminder and a plan (§2.4). "Buy screws
+        // when you are at the hardware shop" is worthless if it only works the
+        // first time somebody goes there.
+        assert!(may_fire_again(None, 1_000, "time"), "never fired yet");
+        assert!(
+            !may_fire_again(Some(1_000), 9_999_999_999, "time"),
+            "a moment passed once and saying so again is noise"
+        );
+        assert!(
+            may_fire_again(Some(1_000), 1_000 + REARM_MS, "location"),
+            "arriving again is a new arrival"
+        );
+    }
+
+    #[test]
+    fn standing_at_the_edge_of_a_fence_does_not_notify_repeatedly() {
+        // A shop is a point with a radius; somebody at the counter is metres
+        // from the edge, and a phone re-acquiring its position will cross that
+        // edge without anybody moving.
+        let arrived = 1_700_000_000_000;
+        assert!(!may_fire_again(Some(arrived), arrived + 60_000, "location"));
+        assert!(!may_fire_again(
+            Some(arrived),
+            arrived + REARM_MS - 1,
+            "location"
+        ));
+    }
 
     #[test]
     fn a_cue_this_device_cannot_see_is_refused() {

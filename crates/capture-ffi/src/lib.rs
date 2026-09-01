@@ -205,6 +205,58 @@ pub struct Resurfaced {
     pub suggestion: Option<String>,
 }
 
+/// How much of the time this device may see where it is.
+///
+/// Three states rather than a flag, because the middle one is a trap. A phone
+/// that may see its position *only while the application is open* will accept
+/// a geofence, register it, report it as working, and never fire it — because
+/// nobody is looking at a notes app while walking into a hardware shop. That
+/// is §7.3's failure exactly, and a boolean cannot express it.
+#[derive(Debug, PartialEq, uniffi::Enum)]
+pub enum Watching {
+    /// Not at all.
+    Never,
+    /// Only while somebody is looking at the application, which for a geofence
+    /// means never in the case that matters.
+    WhileOpen,
+    /// In the background, which is the only setting a place cue works under.
+    Always,
+}
+
+/// A place to watch for, as the platform needs it.
+///
+/// Coordinates are micro-degrees because that is what the event body holds —
+/// integers, exact, and hashed into an event id. A float there would make the
+/// id depend on two devices agreeing bit-for-bit about a decimal fraction, and
+/// would put NaN inside a value that has to compare and converge.
+#[derive(Debug, uniffi::Record)]
+pub struct Geofence {
+    /// The intent's event id, hex. This is what the platform hands back when
+    /// the fence triggers, so it is what identifies the fence.
+    pub id: String,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+    pub radius_m: u32,
+    /// What to say on arrival.
+    pub then: String,
+}
+
+/// An if-then plan, as a surface lists it.
+#[derive(Debug, uniffi::Record)]
+pub struct Intent {
+    pub id: String,
+    /// `time`, `recurring`, `location`, `app_focus`, `git_branch`, …
+    pub cue_type: String,
+    /// What it matches on, where the cue takes one.
+    pub cue_match: Option<String>,
+    pub then: String,
+    /// Whether *this* device can observe the cue at all.
+    ///
+    /// An intent nothing can watch is the failure §2.4.1 is careful about: it
+    /// looks registered, is reported as working, and is permanently silent.
+    pub observable_here: bool,
+}
+
 #[derive(Debug, uniffi::Record)]
 pub struct AgendaEntry {
     pub slug: String,
@@ -499,6 +551,43 @@ impl Archive {
                     owed.len()
                 ),
             });
+        }
+
+        // An intent that cannot fire, said out loud and kept being said.
+        //
+        // §7.3, and the reason it is `attention` rather than `worth-knowing`:
+        // an intent failing invisibly is worse than no intent at all, because
+        // the person believes something is watching for them when nothing is.
+        // They stop holding it in mind — which is the entire thing this is for.
+        let watching = ops.get(LOCATION_PERMITTED)?;
+        let places = store
+            .intents()?
+            .into_iter()
+            .filter(|i| i.cue_type == "location")
+            .count();
+        if places > 0 {
+            // The middle case is the one worth spelling out. "While the app is
+            // open" reads like a smaller version of permission and is in fact
+            // no permission at all for this purpose: nobody is looking at a
+            // notes application while walking into a shop.
+            let trouble = match watching.as_deref() {
+                Some("always") => None,
+                Some("while-open") => Some(format!(
+                    "{places} plan(s) about a place only fire while capture is open, \
+                     which is not when you would be arriving anywhere. This device \
+                     needs to see where it is in the background."
+                )),
+                _ => Some(format!(
+                    "{places} plan(s) about a place cannot fire: this device is not \
+                     allowed to see where it is. Nothing is watching for them."
+                )),
+            };
+            if let Some(text) = trouble {
+                out.push(Condition {
+                    tier: "attention".into(),
+                    text,
+                });
+            }
         }
 
         for (_id, reason) in store.quarantined()? {
@@ -809,6 +898,195 @@ impl Archive {
         Ok(())
     }
 
+    /// Places to watch for, for the platform to register.
+    ///
+    /// Only the location intents, and only their coordinates: deciding *what
+    /// to do* on arrival stays here. The platform's job is to notice a
+    /// boundary being crossed, which is the one part of this a phone does
+    /// better than anything else and the one part that must not be done by
+    /// polling a radio.
+    pub fn geofences(&self) -> Result<Vec<Geofence>> {
+        let store = self.read()?;
+        let mut out = Vec::new();
+        for i in store.intents()? {
+            if i.cue_type != "location" {
+                continue;
+            }
+            // `lat,lon` as the projection writes it. The radius is not in the
+            // projection's summary, so it comes from the body.
+            let Some((lat, lon)) = i.cue_match.as_deref().and_then(|m| m.split_once(',')) else {
+                continue;
+            };
+            let (Ok(lat_e6), Ok(lon_e6)) = (lat.parse::<i32>(), lon.parse::<i32>()) else {
+                continue;
+            };
+            out.push(Geofence {
+                id: hex(&i.id),
+                lat_e6,
+                lon_e6,
+                radius_m: self.radius_of(&i.id).unwrap_or(DEFAULT_RADIUS_M),
+                then: i.then_do,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The radius an intent asked for, read from its body.
+    ///
+    /// The projection keeps the coordinates and not the radius, because
+    /// nothing on the desktop ever needed it. Read from the event rather than
+    /// added to the projection: the schema may add tables and never columns,
+    /// and one field for one caller is not worth a table.
+    fn radius_of(&self, id: &[u8]) -> Option<u32> {
+        let log = capture_store::log::Log::open_read(&self.paths.events).ok()?;
+        let bytes: [u8; 32] = id.try_into().ok()?;
+        let event = log.by_id(&capture_core::EventId(bytes)).ok()??;
+        let body =
+            minicbor::decode::<capture_core::body::IntentBody>(event.body.as_deref()?).ok()?;
+        match body.cue {
+            capture_core::body::Cue::Location { radius_m, .. } => Some(radius_m),
+            _ => None,
+        }
+    }
+
+    /// A fence was crossed. What, if anything, to say.
+    ///
+    /// `None` where this fired recently enough that saying it again would be
+    /// noise: a shop is a point with a radius, somebody at the counter is
+    /// metres from its edge, and a phone re-acquiring its position crosses
+    /// that edge without anybody moving.
+    ///
+    /// Marking it as fired happens here rather than in the caller, so that a
+    /// surface which forgot cannot produce a notification every few minutes.
+    pub fn arrived(&self, id: String) -> Result<Option<String>> {
+        let Some(raw) = unhex(&id) else {
+            return Err(CaptureError::NotFound { name: id });
+        };
+        let store = self.read()?;
+        let Some(intent) = store.intents()?.into_iter().find(|i| i.id == raw) else {
+            // Retracted while the fence was still registered with the
+            // platform. Not an error: the answer is simply that there is
+            // nothing to say, and the caller should stop watching for it.
+            return Ok(None);
+        };
+
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        if !capture_store::notifier::may_fire_again(
+            ops.intent_fired_at(&raw)?,
+            now,
+            &intent.cue_type,
+        ) {
+            return Ok(None);
+        }
+        ops.mark_intent_fired(&raw, now)?;
+        Ok(Some(intent.then_do))
+    }
+
+    /// Make a plan about a place.
+    ///
+    /// Refused where this device cannot observe a geofence, which is every
+    /// device that does not move. That refusal is the point of §2.4.1: an
+    /// intent registered somewhere that cannot see its cue is one that looks
+    /// like it is working and never fires.
+    pub fn watch_place(
+        &self,
+        lat_e6: i32,
+        lon_e6: i32,
+        radius_m: u32,
+        then: String,
+    ) -> Result<String> {
+        let _writing = self.write_lock()?;
+        let id = capture_store::mutate::add_intent(
+            &self.paths,
+            capture_core::body::Cue::Location {
+                lat_e6,
+                lon_e6,
+                radius_m,
+            },
+            &then,
+        )?;
+        Ok(hex(&id.0))
+    }
+
+    /// Every plan, and whether this device can see its cue.
+    pub fn intents(&self) -> Result<Vec<Intent>> {
+        let store = self.read()?;
+        Ok(store
+            .intents()?
+            .into_iter()
+            .map(|i| Intent {
+                id: hex(&i.id),
+                observable_here: capture_store::notifier::observable(&i.cue_type),
+                cue_type: i.cue_type,
+                cue_match: i.cue_match,
+                then: i.then_do,
+            })
+            .collect())
+    }
+
+    /// Give one up.
+    ///
+    /// Retracted rather than removed: a plan somebody walked away from is a
+    /// fact about what they tried, and §2.4 counts being easy to abandon as
+    /// part of the case for having intents at all.
+    pub fn retract_intent(&self, id: String) -> Result<()> {
+        let _writing = self.write_lock()?;
+        let Some(raw) = unhex(&id) else {
+            return Err(CaptureError::NotFound { name: id });
+        };
+        let bytes: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| CaptureError::NotFound { name: id })?;
+        let event = capture_core::EventId(bytes);
+        capture_store::mutate::retract_intent(&self.paths, &event)?;
+        Ok(())
+    }
+
+    /// The device the user chose to be told by, if they chose one.
+    ///
+    /// `None` means nobody has chosen — not that nothing notifies. §8.9: the
+    /// unchosen case is decided by a rule and written nowhere, and the
+    /// difference between that and a choice is what makes the choice legible
+    /// later.
+    pub fn notifier(&self) -> Result<Option<String>> {
+        Ok(capture_store::notifier::chosen(&self.read()?)?)
+    }
+
+    /// Choose which device says things.
+    pub fn set_notifier(&self, device: Option<String>) -> Result<()> {
+        let _writing = self.write_lock()?;
+        capture_store::mutate::set_setting(
+            &self.paths,
+            capture_store::notifier::KEY,
+            device.as_deref(),
+        )?;
+        Ok(())
+    }
+
+    /// Say how much of the time this device may observe where it is.
+    ///
+    /// Recorded locally rather than in the log: a permission is a fact about
+    /// this installation on this handset, not about the archive, and §2.5.2
+    /// keeps that out of a log meant to be worth reading in ten years.
+    ///
+    /// It is recorded at all so that [`Self::health`] can say a place cue
+    /// cannot fire, and keep saying it. An intent failing invisibly is worse
+    /// than no intent: somebody believes something is watching for them, stops
+    /// holding it in mind, and that is the whole thing this is for.
+    pub fn location_permitted(&self, watching: Watching) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        ops.set(
+            LOCATION_PERMITTED,
+            match watching {
+                Watching::Never => "never",
+                Watching::WhileOpen => "while-open",
+                Watching::Always => "always",
+            },
+        )?;
+        Ok(())
+    }
+
     /// Carry out whatever has come due — redactions past their window,
     /// promotions, expiries.
     ///
@@ -926,6 +1204,29 @@ impl Offer {
 }
 
 /// The first bytes of a key, which is how every surface names a device.
+/// Where the location permission is remembered.
+const LOCATION_PERMITTED: &str = "android.location_permitted";
+
+/// The radius used when the intent did not name one.
+///
+/// A hundred metres: large enough that GPS error does not stop a fence
+/// triggering at all, small enough that "at the hardware shop" is not "in the
+/// retail park". The platform will not accept much less reliably anyway.
+const DEFAULT_RADIUS_M: u32 = 100;
+
+fn hex(raw: &[u8]) -> String {
+    raw.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 || s.is_empty() {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect()
+}
+
 fn named(key: &[u8; 32]) -> String {
     key[..6].iter().map(|b| format!("{b:02x}")).collect()
 }

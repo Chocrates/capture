@@ -790,6 +790,7 @@ dependencies = [
  "capture-store",
  "capture-time",
  "jiff",
+ "minicbor",
  "thiserror 2.0.20",
  "uniffi",
 ]

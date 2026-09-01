@@ -1,7 +1,9 @@
 package dev.capture
 
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,6 +30,23 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var model: Model
 
+    /**
+     * Asking to see where we are.
+     *
+     * Only ever in response to somebody pressing the button on the plans
+     * screen. A permission prompt at first launch, before anything has
+     * explained why, is the one most often refused permanently — and this
+     * feature does not exist until somebody wants a plan about a place.
+     */
+    private val askLocation = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { _ ->
+        // What was actually granted, asked of the platform rather than read
+        // from the result: "while using the app" comes back as a grant.
+        model.located(Places.watching(this))
+        Places.rearm(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         model = Model(Store.of(this))
@@ -38,9 +57,23 @@ class MainActivity : ComponentActivity() {
         // by WorkManager under constraints it enforces.
         SyncWorker.keepSyncing(this)
 
+        // Re-registered on every launch. Geofences do not survive a reboot,
+        // and a fence that silently stopped existing is the failure §7.3 is
+        // about: nothing is watching, and the plan still looks fine.
+        Places.rearm(this)
+
         setContent {
             MaterialTheme {
-                Surface(Modifier.fillMaxSize()) { App(model) }
+                Surface(Modifier.fillMaxSize()) {
+                    App(model, onAskLocation = {
+                        askLocation.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.POST_NOTIFICATIONS,
+                            ),
+                        )
+                    })
+                }
             }
         }
     }
@@ -51,12 +84,16 @@ class MainActivity : ComponentActivity() {
         // every command that writes; a phone is opened rather than invoked, so
         // this is where it happens.
         model.settle()
+        // The permission can be taken away in Settings while the app is in the
+        // background, so it is asked of the platform on every return rather
+        // than remembered from when it was granted.
+        model.located(Places.watching(this))
         model.go(model.screen)
     }
 }
 
 @Composable
-private fun App(model: Model) {
+private fun App(model: Model, onAskLocation: () -> Unit) {
     val context = LocalContext.current
     Scaffold(bottomBar = { Bar(model) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -83,6 +120,40 @@ private fun App(model: Model) {
                     model.nagging,
                     onOutcome = model::reviewed,
                     onOpen = { model.go(Screen.Note(it)) },
+                )
+                is Screen.Plans -> Plans(
+                    model.plans,
+                    model.located,
+                    onAskPermission = onAskLocation,
+                    // Background location cannot be granted from a dialog on
+                    // any recent Android: the platform requires a deliberate
+                    // trip to Settings, and that is the right amount of
+                    // friction for something that watches where you are.
+                    onAskAlways = {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.provider.Settings
+                                    .ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.fromParts("package", context.packageName, null),
+                            ),
+                        )
+                    },
+                    onWatch = { then, metres ->
+                        Here.once(
+                            context,
+                            then = { lat, lon ->
+                                model.watchPlace(
+                                    lat,
+                                    lon,
+                                    metres.toUIntOrNull() ?: 100u,
+                                    then,
+                                )
+                                Places.rearm(context)
+                            },
+                            otherwise = { Toast.short(context, it) },
+                        )
+                    },
+                    onRetract = model::retract,
                 )
                 is Screen.Pairing -> Pairing(
                     model.pairing,
@@ -122,6 +193,12 @@ private fun Bar(model: Model) {
             onClick = { model.go(Screen.Search) },
             icon = {},
             label = { Text("Search") },
+        )
+        NavigationBarItem(
+            selected = here is Screen.Plans,
+            onClick = { model.go(Screen.Plans) },
+            icon = {},
+            label = { Text("Plans") },
         )
         NavigationBarItem(
             selected = here is Screen.Review,

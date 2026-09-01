@@ -15,6 +15,20 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!--
+      Location, for geofence cues (§2.4.1) and nothing else. No coordinate is
+      ever written to the log: a cue names a place the person chose, and what
+      is recorded is that they chose it.
+
+      BACKGROUND is separate and asked for separately, because a geofence that
+      only works while the app is open is a geofence that never works — and
+      Android makes granting it a deliberate trip to Settings, which is the
+      right amount of friction for something that watches where you are.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="capture"
         android:supportsRtl="true"
@@ -103,5 +117,16 @@
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="false" />
         </service>
+
+        <!--
+          Where the platform delivers a boundary crossing. Exported false: the
+          only sender that matters is the system, and an exported receiver here
+          would let any application on the device claim somebody had arrived
+          somewhere.
+        -->
+        <receiver
+            android:name=".Arrival"
+            android:exported="false" />
+
     </application>
 </manifest>
