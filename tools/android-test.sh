@@ -9,6 +9,21 @@
 # JNI stack trace after the Kotlin layer exists.
 #
 # It builds nothing that is not already built. Run `make android-build` first.
+#
+# The list of suites comes from cargo rather than from globbing the target
+# directory, and that is not tidiness. Globbing ran every executable lying in
+# `deps/`, which meant:
+#
+#   - stale binaries from earlier builds, so every suite ran twice and a
+#     failure could be reported from code that no longer exists. That happened:
+#     a `links` binary predating a fix failed on the device while the current
+#     one passed, in the same run.
+#   - binaries that are not tests at all — `uniffi_bindgen` is a command-line
+#     tool, and pushing 90 MB of it to a phone to run it with `--test-threads`
+#     produces no output and no meaning.
+#
+# A gate that tests whatever happens to be lying around is a gate that can go
+# red for something already fixed, and green for something never built.
 
 set -eu
 
@@ -39,12 +54,38 @@ echo "device: $(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
 
 adb shell mkdir -p "$DEVICE_DIR" >/dev/null 2>&1 || true
 
+# Ask cargo which executables are this crate's tests. `--no-run` builds
+# nothing that is already built, and the JSON says exactly which files it
+# would have run.
+# The suites are the crate's lib test plus one per file in tests/. That is
+# what a test target *is*, so the source tree is the authority rather than
+# whatever is lying in the target directory.
+#
+# `cargo --message-format=json` would say the same thing and is not available
+# here: cargo-ndk consumes cargo's output rather than forwarding it, and plain
+# cargo for this target needs the whole NDK C toolchain in the environment
+# just to run a build script.
+names="capture_store"
+for f in crates/capture-store/tests/*.rs; do
+    names="$names $(basename "$f" .rs)"
+done
+
+# The newest binary per name. Cargo leaves every previous build behind, so a
+# name matches several files and only one of them is this build's.
+suites=""
+for name in $names; do
+    newest=$(ls -t "$TARGET_DIR/$name"-* 2>/dev/null |
+        grep -v '\.d$' | head -1)
+    [ -n "$newest" ] || {
+        echo "no binary for suite '$name'; run make android-build"
+        exit 1
+    }
+    suites="$suites $newest"
+done
+
 fail=0
 ran=0
-for binary in "$TARGET_DIR"/*; do
-    case "$binary" in
-        *.d | *.rlib | *.rmeta | *.so) continue ;;
-    esac
+for binary in $suites; do
     [ -x "$binary" ] || continue
 
     name=$(basename "$binary" | sed 's/-[0-9a-f]*$//')

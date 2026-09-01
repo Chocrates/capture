@@ -541,9 +541,15 @@ fn a_plan_can_be_walked_away_from() {
     // so an intent once made could not be withdrawn from any surface.
     let sc = Scratch::new("forget");
     let p = sc.paths();
+    // A time cue, because every device has a clock. This asked for a
+    // `git_branch` until a phone existed, and then failed on the phone —
+    // correctly, since `add_intent` refuses a cue the device cannot observe
+    // and a phone is not where a repository is. Retracting has nothing to do
+    // with which cue it was, so the test should not have depended on one that
+    // only some devices can watch.
     capture_store::mutate::add_intent(
         &p,
-        capture_core::body::Cue::GitBranch("main".into()),
+        capture_core::body::Cue::Time(1_700_000_000_000),
         "do the thing",
     )
     .unwrap();

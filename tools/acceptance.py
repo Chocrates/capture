@@ -120,6 +120,29 @@ def main():
     ui.wait_for("shared from elsewhere")
     check(True, "text shared from another application is captured")
 
+    step("an update, over an existing archive")
+    # The path most likely to be taken in an emergency and least likely to
+    # have been run. A restored or updated installation that minted a fresh
+    # identity would give one machine two origins, and every peer would have
+    # to learn both — which is the corruption §1 mints a new incarnation on
+    # restore to prevent.
+    ui.tap("Health")
+    before = ui.wait_for("(this phone)")[0]
+    apk = os.path.join(
+        ROOT, "android", "app", "build", "outputs", "apk", "debug", "app-debug.apk"
+    )
+    check(os.path.exists(apk), "there is an apk to reinstall")
+    ui.adb("install", "-r", apk, timeout=300)
+    ui.adb("shell", "am", "force-stop", APP)
+    ui.adb("shell", "am", "start", "-n", f"{APP}/.MainActivity")
+    time.sleep(5)
+    ui.tap("Health")
+    after = ui.wait_for("(this phone)")[0]
+    check(before == after, f"the device kept its identity across an update ({after})")
+    ui.tap("Timeline")
+    ui.wait_for("written on the phone")
+    check(True, "and everything it had written")
+
     step("a desktop with something of its own")
     cli("init")
     cli("+", "written on the desktop")

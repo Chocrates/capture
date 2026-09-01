@@ -17,7 +17,7 @@
 
 - [~] 3.1 Store in app-private storage. The tests use `context.filesDir`, which is the right place; what survives an update is still to confirm. `allowBackup` is **off**: the archive carries a per-device identity, and a platform backup restored onto a second device would give two devices one origin and therefore two devices issuing the same sequence numbers — the corruption §1 mints a new incarnation on restore to prevent.
 - [x] 3.2 Mint an identity on first run, exactly as `capture init` does. **Done and tested on device**: opening the same directory twice returns the same device key. A fresh identity per open would give one machine many origins and every peer would have to learn each of them.
-- [ ] 3.3 **Test a restore**: reinstall over an existing store and assert the origin is unchanged, or that a new incarnation is claimed properly if it is not. Restore is the path most likely to be taken in an emergency and least likely to have been run.
+- [x] 3.3 **Test a restore**: reinstall over an existing store and assert the origin is unchanged. **Done, and now part of `make android-accept`** rather than a thing done once: the acceptance run installs over the existing archive mid-flow and asserts both the device key and the notes survive. A restored installation that minted a fresh identity would give one machine two origins, and every peer would have to learn both.
 - [ ] 3.4 Spool captures when the store cannot be written, and surface it. Same promise as the desktop, more load-bearing here: the platform kills applications routinely and without warning.
 
 ## 4. Capture surfaces
@@ -103,8 +103,10 @@ missing — and each leaves plans that look registered and are not.
   - Verified it can fail: with the desktop's address broken it exits 1 after four genuine passes, and prints what was actually on screen instead of the expectation.
   - It says what it does not cover rather than leaving it implied. Real mDNS and a real geofence firing are 8.2's, and a run that quietly skipped them would read as coverage.
 - [ ] 8.2 On a physical device: the tile from the lock screen, a geofence actually firing, and behaviour across a real doze cycle. These are what the emulator models least faithfully and what is most likely to be broken in the field — a simulated geofence is much weaker evidence than a real one.
-- [ ] 8.3 Confirm the desktop capture gesture is unchanged — chord, overlay, commit key, latency histogram. §8.10 freezes it for this milestone.
-- [ ] 8.4 `make ci` still passes, and `make android` passes alongside it.
+- [~] 8.3 Confirm the desktop capture gesture is unchanged — chord, overlay, commit key, latency histogram. §8.10 freezes it for this milestone. Nothing in M4 touched `capture-overlay` or the chord, and `make ci` covers the overlay's own suites. **Pressing the chord on a live session is still to do by hand** — it was last confirmed working after the rename, and it is not something a headless run can assert.
+- [x] 8.4 `make ci` still passes, and `make android` passes alongside it. **Both green** — `make android` reports 12 suites passing on the device.
+  - Getting there required fixing the gate itself. `tools/android-test.sh` globbed every executable in `deps/`, so it ran **stale binaries from earlier builds** — every suite ran twice, and a `links` binary predating a fix failed on the device while the current one passed in the same run — and **binaries that are not tests**, pushing 90 MB of `uniffi_bindgen` to a phone to run it with `--test-threads`. A gate that tests whatever is lying around can go red for something already fixed and green for something never built. The suites now come from the source tree, which is what a test target is, taking the newest binary per name.
+  - And with the gate honest, it found a real failure: `a_plan_can_be_walked_away_from` created a `git_branch` intent, which a phone now correctly refuses — a branch cue fires where the repository is, and that is not a phone. The test is about retracting a plan and had no business depending on a cue only some devices can watch.
 - [ ] 8.5 Use it for a week as the primary capture surface, and record what makes capture feel slow or uncertain. This is M1's item 13.6 finally answerable, on the device where most thoughts actually arrive.
 
 ## 9. The blob plane (§5.6), before voice can land
