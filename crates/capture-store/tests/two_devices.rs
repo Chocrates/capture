@@ -630,3 +630,43 @@ fn a_readmission_has_to_be_written_by_a_member() {
         );
     }
 }
+
+#[test]
+fn each_device_learns_what_the_other_can_watch_for() {
+    // §7.5. Choosing a notifier among devices that cannot deliver is choosing
+    // silence, and until a device says what it can see there is no way to make
+    // that choice on anything but hope.
+    //
+    // Both sides here are the same build on the same platform, so what this
+    // proves is the exchange rather than the difference — the difference is
+    // `notifier::observable`, which is asserted per-platform in its own tests
+    // and run on both.
+    let a = Device::new("a-cues");
+    let b = Device::new("b-cues");
+    pair(&a, &b);
+
+    let before = Ops::open_read(&a.paths.ops)
+        .unwrap()
+        .peer_observes(&b.identity().public().to_bytes())
+        .unwrap();
+    assert!(before.is_empty(), "nothing is known before anyone speaks");
+
+    sync(&a, &b);
+
+    for (who, from, about) in [("a", &a, &b), ("b", &b, &a)] {
+        let learned = Ops::open_read(&from.paths.ops)
+            .unwrap()
+            .peer_observes(&about.identity().public().to_bytes())
+            .unwrap();
+        assert!(
+            learned.contains(&String::from("time")),
+            "{who} learned nothing about what the other watches: {learned:?}"
+        );
+        // And it is a claim about that device, not a copy of our own list
+        // written under its name.
+        assert!(
+            !learned.is_empty() && learned.iter().all(|c| !c.is_empty()),
+            "{who} recorded an empty capability: {learned:?}"
+        );
+    }
+}

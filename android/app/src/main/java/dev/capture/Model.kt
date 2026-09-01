@@ -62,6 +62,19 @@ class Model(private val archive: Archive) : ViewModel() {
         private set
     var peers by mutableStateOf<List<Peer>>(emptyList())
         private set
+
+    /**
+     * The device chosen to say things, if one was chosen.
+     *
+     * `null` is not "nothing notifies" — it is "nobody has decided", and §8.9
+     * keeps those apart deliberately. A default written down on somebody's
+     * behalf can never be told apart afterwards from a choice they made.
+     */
+    var notifier by mutableStateOf<String?>(null)
+        private set
+
+    /** This device's own key, to know whether the chosen one is us. */
+    val me: String by lazy { archive.deviceKey() }
     var offered by mutableStateOf<List<Resurfaced>>(emptyList())
         private set
     var nagging by mutableStateOf<List<String>>(emptyList())
@@ -103,6 +116,7 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Health -> load {
                 conditions = archive.health()
                 peers = archive.peers()
+                notifier = archive.notifier()
             }
             is Screen.Note -> load {
                 note = archive.note(to.name)
@@ -225,6 +239,22 @@ class Model(private val archive: Archive) : ViewModel() {
         offered = offered.filterNot { it.slug == name }
     }
 
+    /**
+     * Choose which device says things, or stop choosing.
+     *
+     * `null` reverts to the rule, which is a third state and not the same as
+     * never having chosen — a later, better rule should follow a revert and
+     * should not overrule a choice.
+     *
+     * A place cue is unaffected either way. It fires where it is observed,
+     * because "you are at the hardware shop" delivered to a desktop at home is
+     * delivered to an empty room (§2.4.1).
+     */
+    fun chooseNotifier(device: String?) = load {
+        archive.setNotifier(device)
+        notifier = archive.notifier()
+    }
+
     /** Say whether the platform is currently letting this device see where it is. */
     fun located(watching: Watching) {
         located = watching
@@ -258,6 +288,32 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /** Settle whatever has come due. Called when the app comes forward. */
     fun settle() = load { archive.settle() }
+
+    /**
+     * Re-read whatever is on screen.
+     *
+     * A sync happens in a worker this has no handle on, so the screen that
+     * asked for one is stale the moment it succeeds — and a peer list showing
+     * "has not said what it can watch for" *after* a successful round reads as
+     * the round having failed. Cheap enough to do unconditionally: these are
+     * indexed reads against a store that is already open.
+     */
+    fun refresh() = go(screen)
+
+    /**
+     * Re-read once the round has had time to finish.
+     *
+     * Not a poll and not a progress bar: `WorkManager` owns the job and this
+     * process cannot be told when it ends. One re-read after the window a
+     * round is given is enough to turn "nothing happened" into what actually
+     * happened, and the screen is re-read on navigation anyway.
+     */
+    fun refreshSoon() {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay((SyncWorker.WINDOW_SECONDS.toLong() + 2) * 1000)
+            refresh()
+        }
+    }
 
     private fun load(work: suspend () -> Unit) {
         viewModelScope.launch {

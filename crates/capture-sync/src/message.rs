@@ -106,6 +106,21 @@ pub enum Message {
         /// live — which is correct, only slower.
         #[n(3)]
         sealed: Option<Vec<Seal>>,
+        /// The cue types this device can actually watch for.
+        ///
+        /// §7.5, and the reason it is on the wire rather than in the log: a
+        /// capability is a fact about an installation on a handset, not about
+        /// the archive. It changes when the platform changes, when a
+        /// permission is granted, when the application is updated — and an
+        /// append-only log of "this phone could see geofences on Tuesday" is
+        /// operational chatter of exactly the kind §2.5.2 keeps out of
+        /// something meant to be worth reading in ten years.
+        ///
+        /// Also a trailing field, so a peer running an older build reads the
+        /// rest of the Hello and simply says nothing about what it can watch —
+        /// which is the honest answer for a build that had never been asked.
+        #[n(4)]
+        observes: Option<Vec<String>>,
     },
 
     /// Send me this origin's events from `from` to `to`, inclusive.
@@ -196,6 +211,7 @@ mod tests {
                 vv: vv.clone(),
                 partial: false,
                 sealed: None,
+                observes: None,
             },
             Message::Range {
                 dev: String::from("aa"),
@@ -226,6 +242,7 @@ mod tests {
             vv: vv.clone(),
             partial: false,
             sealed: None,
+            observes: None,
         };
         match roundtrip(&m) {
             Message::Hello { vv: back, .. } => assert_eq!(back, vv),
@@ -242,6 +259,7 @@ mod tests {
             vv: VersionVector::new(),
             partial: true,
             sealed: None,
+            observes: None,
         };
         match roundtrip(&m) {
             Message::Hello { partial, .. } => assert!(partial),

@@ -267,6 +267,21 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     if folded > 0 {
         tracing::debug!(folded, "arrivals folded into the projection");
     }
+
+    // What the peer said it can watch for (§7.5), against whoever it turned
+    // out to be.
+    //
+    // Here rather than in `dial` and `answer` — which both know the peer
+    // already — because here is where every caller passes. Put in the two
+    // callers, it was absent from the path the two-device suite drives, so
+    // the tested round and the shipped round did different things and the
+    // test that would have noticed was the one going the other way.
+    if let Some(noise) = secure.peer()
+        && let Some(member) = archive.member_behind(&noise)
+    {
+        ops.learned_observes(&member, &done.peer_observes)?;
+    }
+
     Ok(done)
 }
 

@@ -37,6 +37,7 @@ fn hello_encodes_the_same_way_for_ever() {
         vv,
         partial: false,
         sealed: None,
+        observes: None,
     };
     assert_eq!(
         hex(&encoded(&m)),
@@ -93,6 +94,7 @@ fn the_variant_numbers_are_the_ones_recorded() {
                 vv: VersionVector::new(),
                 partial: false,
                 sealed: None,
+                observes: None,
             },
             0u8,
         ),
@@ -133,6 +135,7 @@ fn the_protocol_version_is_on_the_wire() {
         vv: VersionVector::new(),
         partial: false,
         sealed: None,
+        observes: None,
     };
     match minicbor::decode::<Message>(&encoded(&m)).unwrap() {
         Message::Hello { v, .. } => assert_eq!(v, PROTOCOL_VERSION),
@@ -237,6 +240,7 @@ fn a_hello_with_seals_encodes_the_same_way_for_ever() {
             last: EventId([0x11; 32]),
             roster: [0x22; 32],
         }]),
+        observes: None,
     };
     assert_eq!(
         hex(&encoded(&m)),
@@ -252,6 +256,61 @@ fn a_hello_with_seals_encodes_the_same_way_for_ever() {
         vv,
         partial: false,
         sealed: None,
+        observes: None,
     };
     assert!(encoded(&plain).len() < encoded(&m).len());
+}
+
+/// A Hello saying what this device can watch for (§7.5).
+///
+/// Field 4, added after seals, and the pairing with the test above is the
+/// point: an older build reads this frame, takes the four fields it knows,
+/// and ignores the fifth. That is the only kind of change this wire permits —
+/// append, never renumber — and it is checked rather than asserted in a
+/// comment.
+#[test]
+fn a_hello_saying_what_it_watches_encodes_the_same_way_for_ever() {
+    let mut vv = VersionVector::new();
+    vv.insert(String::from("aa"), 41822);
+
+    let m = Message::Hello {
+        v: PROTOCOL_VERSION,
+        vv: vv.clone(),
+        partial: false,
+        sealed: None,
+        observes: Some(vec![String::from("location"), String::from("time")]),
+    };
+    assert_eq!(
+        hex(&encoded(&m)),
+        // Hello (variant 0) · array(5): v · vv as a map · partial=false ·
+        // sealed=null, which cannot elide because a later field is present ·
+        // observes: array(2) of text.
+        "82008501a162616119a35ef4f682686c6f636174696f6e6474696d65"
+    );
+
+    // Saying nothing is shorter than saying anything, and is what every build
+    // that predates the field writes. "I did not say" and "I watch nothing"
+    // are the same behaviour and not the same statement — the second is a
+    // claim, and only a build that knows the field can make it.
+    let silent = Message::Hello {
+        v: PROTOCOL_VERSION,
+        vv: vv.clone(),
+        partial: false,
+        sealed: None,
+        observes: None,
+    };
+    assert!(encoded(&silent).len() < encoded(&m).len());
+
+    let nothing = Message::Hello {
+        v: PROTOCOL_VERSION,
+        vv,
+        partial: false,
+        sealed: None,
+        observes: Some(Vec::new()),
+    };
+    assert_ne!(
+        encoded(&nothing),
+        encoded(&silent),
+        "an explicit empty list is a statement and an absent field is not"
+    );
 }

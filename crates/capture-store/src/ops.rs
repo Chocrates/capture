@@ -779,6 +779,32 @@ impl Ops {
     }
 
     /// Remember how to open a session with a peer, learned at pairing.
+    /// Remember what a peer said it can watch for (§7.5).
+    ///
+    /// Local rather than logged. A capability is a fact about an installation
+    /// on a handset — it changes with the platform, with a permission, with an
+    /// update — and an append-only record of "this phone could see geofences
+    /// on Tuesday" is operational chatter of the kind §2.5.2 keeps out of a
+    /// log meant to be worth reading in ten years.
+    ///
+    /// An empty list is not written. A peer that said nothing is a peer that
+    /// has not been asked yet, and forgetting what it said last time on the
+    /// strength of an older build's silence would lose the answer.
+    pub fn learned_observes(&self, peer_key: &[u8; 32], cues: &[String]) -> Result<()> {
+        if cues.is_empty() {
+            return Ok(());
+        }
+        self.set(&observes_key(peer_key), &cues.join(","))
+    }
+
+    /// What a peer last said it can watch for.
+    pub fn peer_observes(&self, peer_key: &[u8; 32]) -> Result<Vec<String>> {
+        Ok(self
+            .get(&observes_key(peer_key))?
+            .map(|v| v.split(',').map(String::from).collect())
+            .unwrap_or_default())
+    }
+
     pub fn learned_noise(&self, peer_key: &[u8; 32], noise: &[u8; 32]) -> Result<()> {
         self.conn.execute(
             "INSERT INTO peer_noise (peer_key, noise) VALUES (?1, ?2)
@@ -877,6 +903,11 @@ impl Ops {
 fn intent_key(id: &[u8]) -> String {
     let hex: String = id.iter().take(8).map(|b| format!("{b:02x}")).collect();
     format!("intent_fired.{hex}")
+}
+
+fn observes_key(peer: &[u8; 32]) -> String {
+    let hex: String = peer.iter().map(|b| format!("{b:02x}")).collect();
+    format!("peer_observes.{hex}")
 }
 
 #[cfg(test)]

@@ -60,7 +60,7 @@ impl<'a, 'g> StoreArchive<'a, 'g> {
     /// The first version of this compared the two directly. Nothing failed to
     /// compile, nothing errored, and every redaction simply stayed outstanding
     /// for ever — which is the safe direction, and still wrong.
-    fn member_behind(&self, noise: &[u8; 32]) -> Option<[u8; 32]> {
+    pub fn member_behind(&self, noise: &[u8; 32]) -> Option<[u8; 32]> {
         for e in self.gate.log().all().ok()? {
             if !matches!(
                 e.header.kind,
@@ -108,6 +108,25 @@ impl Archive for StoreArchive<'_, '_> {
         // origin out is the completeness-oracle failure: a peer would ask
         // nothing about it and report agreement having received none of it.
         self.gate.log().heads().unwrap_or_default()
+    }
+
+    fn observes(&self) -> Vec<String> {
+        // What this build, on this platform, can actually watch for (§7.5).
+        // Asked of the same function every other caller asks, so a device
+        // cannot advertise a cue it would refuse to create.
+        [
+            "time",
+            "recurring",
+            "device_wake",
+            "location",
+            "app_focus",
+            "git_branch",
+            "calendar_start",
+        ]
+        .into_iter()
+        .filter(|c| crate::notifier::observable(c))
+        .map(String::from)
+        .collect()
     }
 
     fn sealed(&self) -> Vec<Seal> {

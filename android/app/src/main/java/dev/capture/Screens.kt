@@ -211,6 +211,9 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
 fun Health(
     conditions: List<Condition>,
     peers: List<Peer>,
+    notifier: String?,
+    me: String,
+    onNotifier: (String?) -> Unit,
     onSync: () -> Unit,
     onPair: () -> Unit,
 ) {
@@ -249,9 +252,42 @@ fun Health(
                 )
             }
         }
+        item {
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Text("$me (this phone)", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (notifier == me) "Says things when a cue fires" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (notifier != me) {
+                    TextButton({ onNotifier(me) }) { Text("Notify me here") }
+                }
+            }
+        }
         items(peers) { peer ->
             Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                 Text(peer.key, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    // What it can watch for, so a notifier is chosen among
+                    // devices that can deliver (§7.5). "Not known yet" rather
+                    // than an empty list read as a capability: a device that
+                    // has not been synced with has said nothing, which is not
+                    // the same as saying it watches nothing.
+                    if (peer.observes.isEmpty()) {
+                        "Has not said what it can watch for"
+                    } else {
+                        "Watches for ${peer.observes.joinToString(", ")}"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (notifier == peer.key) {
+                    Text(
+                        "Says things when a cue fires",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                } else {
+                    TextButton({ onNotifier(peer.key) }) { Text("Notify me there") }
+                }
                 // When, never "fresh" or "stale" (§6.6). The device that
                 // sleeps most is the one that must not imply currency, and
                 // this is that device.
@@ -268,6 +304,19 @@ fun Health(
             }
         }
         item {
+            // Said out loud, because the difference is the whole of §8.9: a
+            // value nobody chose is a rule that a better rule can replace, and
+            // a value somebody chose is theirs. Writing the first down as the
+            // second destroys the distinction permanently.
+            Text(
+                notifier?.let { "Chosen by you." }
+                    ?: "Nobody has chosen. Whichever device sees a cue says so.",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            if (notifier != null) {
+                TextButton({ onNotifier(null) }) { Text("Stop choosing") }
+            }
             Row {
                 TextButton(onSync) { Text("Sync now") }
                 TextButton(onPair) { Text("Pair a device") }

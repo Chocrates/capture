@@ -102,6 +102,14 @@ pub trait Archive {
         Vec::new()
     }
 
+    /// The cue types this device can actually watch for (§7.5).
+    ///
+    /// Empty by default, which is the honest answer for a replica that has
+    /// never been asked rather than a claim to watch nothing.
+    fn observes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// A digest of this replica's current roster, for comparing against the
     /// one a seal names.
     fn roster_digest(&self) -> [u8; 32] {
@@ -139,7 +147,7 @@ pub trait Archive {
 }
 
 /// What one exchange did.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Exchanged {
     /// Events taken in.
     pub received: usize,
@@ -149,6 +157,13 @@ pub struct Exchanged {
     pub refused: usize,
     /// Redactions the peer confirmed it had folded.
     pub redactions_acked: usize,
+    /// What the peer said it can watch for (§7.5).
+    ///
+    /// Empty where it said nothing, which includes every build that predates
+    /// the field. "I did not say" and "I can watch nothing" are the same
+    /// shape here and the caller treats them the same way: it learns nothing
+    /// and keeps whatever it knew before.
+    pub peer_observes: Vec<String>,
 }
 
 /// Run one round of anti-entropy to completion.
@@ -191,11 +206,23 @@ pub fn exchange<T: Transport, A: Archive>(
             } else {
                 Some(my_seals.clone())
             },
+            observes: match archive.observes() {
+                // Nothing to say is said by saying nothing, so the field
+                // elides and the frame is byte-identical to one an older
+                // build would have written.
+                v if v.is_empty() => None,
+                v => Some(v),
+            },
         },
     )?;
 
-    let (theirs, their_seals) = match decode(&session.recv_blocking()?) {
-        Some(Message::Hello { vv, sealed, .. }) => (vv, sealed.unwrap_or_default()),
+    let (theirs, their_seals, peer_observes) = match decode(&session.recv_blocking()?) {
+        Some(Message::Hello {
+            vv,
+            sealed,
+            observes,
+            ..
+        }) => (vv, sealed.unwrap_or_default(), observes.unwrap_or_default()),
         // Anything else here is a peer speaking a protocol this build does not
         // know. There is nothing to negotiate down to, so the round is simply
         // over.
@@ -226,7 +253,11 @@ pub fn exchange<T: Transport, A: Archive>(
     }
     send(session, &Message::Asked)?;
 
-    let mut out = Exchanged::default();
+    let mut out = Exchanged {
+        // Carried out of the Hello, which is the only place it is said.
+        peer_observes,
+        ..Exchanged::default()
+    };
     // Two conditions, tracked separately, because a round has two phases per
     // side and they interleave on the wire: this side stops when the peer has
     // sent everything owed *and* this side has answered everything asked.

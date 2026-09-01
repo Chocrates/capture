@@ -112,7 +112,17 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                 is Screen.Health -> Health(
                     model.conditions,
                     model.peers,
-                    onSync = { SyncWorker.now(context) },
+                    model.notifier,
+                    model.me,
+                    onNotifier = model::chooseNotifier,
+                    onSync = {
+                        SyncWorker.now(context)
+                        // The worker is out of reach once started, so the
+                        // screen is refreshed when it can next be observed to
+                        // have finished: on return to this screen, and here
+                        // after a moment for the ordinary quick case.
+                        model.refreshSoon()
+                    },
                     onPair = { model.go(Screen.Pairing) },
                 )
                 is Screen.Review -> ReviewSession(

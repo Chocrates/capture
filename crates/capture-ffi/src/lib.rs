@@ -161,6 +161,13 @@ pub struct Peer {
     pub last_seen: Option<String>,
     /// Consecutive failed dials.
     pub missed: u32,
+    /// What it last said it can watch for (§7.5).
+    ///
+    /// Empty where it has not said — which includes every device not yet
+    /// synced with, and every build that predates the field. That is not the
+    /// same as "watches nothing", and a surface offering a notifier should say
+    /// "not known yet" rather than imply the device is useless.
+    pub observes: Vec<String>,
 }
 
 /// What one sync round managed.
@@ -792,6 +799,7 @@ impl Archive {
                 addr: p.addr,
                 last_seen: p.last_seen.map(when),
                 missed: p.attempts,
+                observes: ops.peer_observes(&p.key)?,
             });
         }
 
@@ -804,6 +812,7 @@ impl Archive {
                 addr: None,
                 last_seen: None,
                 missed: 0,
+                observes: ops.peer_observes(&key)?,
             });
         }
 
@@ -1219,7 +1228,7 @@ fn hex(raw: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || s.is_empty() {
+    if !s.len().is_multiple_of(2) || s.is_empty() {
         return None;
     }
     (0..s.len() / 2)
