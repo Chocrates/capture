@@ -84,11 +84,36 @@ pub struct Token<'a> {
     pub class: Class,
 }
 
+/// Punctuation that ends a sentence rather than a value.
+///
+/// Trimmed from the *end* of a sigil's value and nowhere else. A sigil owns
+/// everything up to whitespace (see `tokenize`, which has to, so that
+/// `>2026-12-25` survives as one date) — and the cost of that was silent: a
+/// capture reading "finished it #reading." filed itself under the tag
+/// `reading.`, which is a different tag from `reading` and looks identical in
+/// every list it appears in. The one organising axis somebody writes by hand
+/// split itself on whether a sentence had a full stop.
+///
+/// Deliberately not `-`, `_` or `/`: those appear inside real values
+/// (`^acme-migration`, `>2026-12-25`) and trimming them would corrupt the
+/// thing this is trying to keep whole.
+const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\''];
+
 impl<'a> Token<'a> {
     /// The part after the sigil character, for a sigil token.
+    ///
+    /// Trailing sentence punctuation is trimmed; the token's own span is not,
+    /// because the grammar's guards are stated over where a token *is* and
+    /// narrowing that here would quietly change what matches.
     pub fn sigil_value(&self) -> Option<&'a str> {
         match self.class {
-            Class::Sigil(_) => Some(&self.text[1..]),
+            Class::Sigil(_) => {
+                let v = self.text[1..].trim_end_matches(TRAILING);
+                // A sigil with nothing left is not a mention of anything. It
+                // used to be reported as one with an empty name, which put a
+                // nameless entry on every page that lists what a note names.
+                (!v.is_empty()).then_some(v)
+            }
             _ => None,
         }
     }

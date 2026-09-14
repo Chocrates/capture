@@ -812,6 +812,50 @@ mod tests {
     }
 
     #[test]
+    fn a_sentence_ending_does_not_make_a_second_tag() {
+        // The bug this fixes was invisible by design: `#reading` and
+        // `#reading.` are different strings, so they became different tags,
+        // and the only symptom was a tag page that was missing entries
+        // somebody was certain they had written.
+        for (text, want) in [
+            ("finished it #reading.", "reading"),
+            ("finished it #reading", "reading"),
+            ("#reading, then bed", "reading"),
+            ("about #groceries: milk", "groceries"),
+            ("(see #reading)", "reading"),
+            ("really #reading!", "reading"),
+        ] {
+            assert_eq!(
+                mentions(text),
+                alloc::vec![('#', want.into())],
+                "in {text:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn trimming_does_not_reach_inside_a_value() {
+        // The characters that appear *within* real values. Trimming these
+        // would corrupt the exactness the sigil exists to provide.
+        assert_eq!(
+            mentions("^acme-migration is late"),
+            alloc::vec![('^', "acme-migration".into())],
+        );
+        assert_eq!(
+            mentions("ask @mary-jane"),
+            alloc::vec![('@', "mary-jane".into())],
+        );
+    }
+
+    #[test]
+    fn a_sigil_naming_nothing_names_nothing() {
+        // Previously reported as a mention with an empty name, which put a
+        // nameless row on every page that lists what a note names.
+        assert!(mentions("# alone").is_empty());
+        assert!(mentions("what is this #?").is_empty());
+    }
+
+    #[test]
     fn the_list_form_added_no_vocabulary() {
         // Pinned, not computed. The list form (`#tag: a, b, c`) is punctuation
         // over a sigil that already existed, and the whole argument for
