@@ -88,8 +88,8 @@ android-kotlin:
 	@echo '--- android: staging the native library for packaging'
 	@set -e; . ./tools/android-env.sh; \
 	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
-	   -o android/app/src/main/jniLibs build -p capture-ffi
-	@find android/app/src/main/jniLibs -name '*.so' | sed 's/^/    /'
+	   -o android/app/jniLibs/debug build -p capture-ffi
+	@find android/app/jniLibs/debug -name '*.so' | sed 's/^/    /'
 
 ## android-decides: fail if the Kotlin side starts deciding things
 #
@@ -446,6 +446,12 @@ android-accept: android-app
 
 ## android-release: build the application as it would actually ship
 #
+# Stages into `jniLibs/release`, which the release source set is the only
+# consumer of. Both staging steps used to write one directory, so running
+# `make android-app` after this one silently replaced the stripped libraries
+# with debug ones and the next release APK was 247 MB. Separate directories
+# make the two builds unable to overwrite each other.
+#
 # Shrunk, stripped, and signed with the debug key so it can be installed on a
 # bench. Not a distribution build: there is no release key in this repository,
 # because that is how signing keys end up in version control.
@@ -457,7 +463,7 @@ android-release:
 	@echo '--- android: release library'
 	@set -e; . ./tools/android-env.sh; \
 	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
-	   -o android/app/src/main/jniLibs build -p capture-ffi --release
+	   -o android/app/jniLibs/release build -p capture-ffi --release
 	@echo '--- android: release app'
 	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleRelease
 	@ls -la android/app/build/outputs/apk/release/app-release.apk

@@ -36,9 +36,33 @@ android {
     // own the artifact, and the one that loses caches a stale copy. The
     // Makefile is the single place that knows how to cross-compile, and this
     // only consumes what it produced.
+    // A directory per build type, which is not tidiness — it is the fix for a
+    // bug that shipped.
+    //
+    // Both staging targets used to write `src/main/jniLibs`, so whichever ran
+    // last decided what a *release* APK contained. `make android-kotlin` (and
+    // so `make android-app`) stages the debug libraries; `make android-release`
+    // stages the stripped ones. Run them in that order and `assembleRelease`
+    // packaged a 74 MB-per-ABI debug library and said nothing: the build
+    // succeeded, the app ran, and the only symptom was a 247 MB "release".
+    //
+    // Separate directories make that impossible to express. A release APK now
+    // contains release libraries or no libraries — and no libraries fails
+    // loudly on first launch rather than quietly being twelve times too big.
     sourceSets {
-        getByName("main") {
-            jniLibs.srcDir("src/main/jniLibs")
+        // Outside `src/main`, deliberately. The main source set scans
+        // everything beneath its own `jniLibs` directory, so keeping the two
+        // build types as subdirectories of it meant *both* were merged into
+        // every variant — the release build then found two copies of
+        // `libcapture_ffi.so` and refused to package either.
+        //
+        // `main` is left with no jniLibs directory at all, so there is no
+        // shared place for a staging step to write to by accident.
+        getByName("debug") {
+            jniLibs.srcDirs("jniLibs/debug")
+        }
+        getByName("release") {
+            jniLibs.srcDirs("jniLibs/release")
         }
     }
 

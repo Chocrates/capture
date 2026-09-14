@@ -15,4 +15,4 @@ Cargo.lock.orig
 /android/build/
 /android/app/build/
 /android/local.properties
-/android/app/src/main/jniLibs/
+/android/app/jniLibs/
