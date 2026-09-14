@@ -18,6 +18,7 @@ fn read(s: &str) {
     // and any of them could be the one a surface calls.
     let _ = capture_parse::tokenize(s);
     let _ = capture_parse::mentions(s);
+    let _ = capture_parse::list_of(s);
     let zone = capture_time::Zone::new("UTC").unwrap();
     let _ = capture_parse::recognize(s, 1_780_326_000_000, zone);
 }

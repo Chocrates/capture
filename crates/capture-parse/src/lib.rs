@@ -538,6 +538,107 @@ pub fn mentions(text: &str) -> alloc::vec::Vec<(char, alloc::string::String)> {
         .collect()
 }
 
+/// A list, and the items it names.
+///
+/// Returned by [`list_of`]. The tag is the slug without its sigil or its
+/// colon; the items are in the order they were written, which is their display
+/// order (§3.6 — "lists are just tags with a display order").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct List {
+    /// The tag this list files under, without the `#`.
+    pub tag: alloc::string::String,
+    /// What it names, in the order written.
+    pub items: alloc::vec::Vec<alloc::string::String>,
+}
+
+/// The separator between items.
+///
+/// A comma, and only a comma. The tokenizer already treats one as a phrase
+/// boundary, so this agrees with what the rest of the grammar thinks a comma
+/// means rather than inventing a second punctuation language.
+///
+/// The consequence, stated because it is a real limitation rather than an
+/// oversight: an item cannot contain a comma. `milk, 2%` is two items, and
+/// there is no escape. Adding one would mean a capture syntax somebody has to
+/// learn to write plain text correctly, which is the DSL §3.1.1 refuses to be.
+const ITEM_SEPARATOR: char = ',';
+
+/// Read a capture as a list, or decline.
+///
+/// `#groceries: milk, eggs, bread` names the tag `groceries` and three items.
+/// Anything else returns `None`.
+///
+/// Tier 1, like [`mentions`] and for the same reason: a sigil is written by
+/// hand and never inferred, so there is nothing here to be unsure about and no
+/// clock to consult. It is not scored and it is not a suggestion.
+///
+/// # The guards, which are the whole of it
+///
+/// Recognising this is easy; recognising it *only where it was meant* is the
+/// work. §3.1.5's rule is that a match firing inside ordinary writing is worse
+/// than no match at all, so three things must hold and each kills a real
+/// sentence somebody would otherwise have written:
+///
+/// - **Anchored.** The sigil is the first thing in the capture. `ask sarah
+///   about #groceries: she has it` is prose with a tag in it, and a list form
+///   that matched mid-line would turn every such sentence into a list of
+///   fragments.
+/// - **The tag is one slug.** No whitespace between the sigil and the colon.
+///   This is what keeps `#standup at 9:30` a tagged note about a time rather
+///   than a list named "standup at 9" — the colon in a clock time is the
+///   nearest miss there is, and it is why the rule is stated over the slug
+///   rather than over "the first colon".
+/// - **Something follows.** `#groceries:` with nothing after it names no
+///   items, and a list of nothing is not a list. It stays a tagged note.
+///
+/// # Why this reads the text and not the tokens
+///
+/// [`tokenize`](token::tokenize) gives a sigil everything up to whitespace,
+/// punctuation included — deliberately, so that `>2026-12-25` survives as one
+/// date. That means `#groceries:` arrives as a single token whose value still
+/// carries the colon, and the anchoring guard is a fact about the *text*
+/// anyway: "is this the first thing written". Reading the text directly says
+/// what is meant. Reading the tokens would mean reassembling a position the
+/// tokenizer had already discarded.
+pub fn list_of(text: &str) -> Option<List> {
+    use alloc::string::ToString;
+
+    // Anchored. Leading whitespace is allowed because it is invisible to
+    // whoever typed it; anything else before the sigil is not.
+    let rest = text.trim_start().strip_prefix('#')?;
+
+    // The tag runs to the first colon, and must be a single slug. Splitting on
+    // the *first* colon rather than the last: `#groceries: milk: the good one`
+    // names one item containing a colon, which is likelier than a tag with one
+    // in it.
+    let (tag, items) = rest.split_once(':')?;
+
+    // One slug. An empty tag is not one either — `#: milk` names nothing to
+    // file under.
+    if tag.is_empty() || tag.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    let items: alloc::vec::Vec<_> = items
+        .split(ITEM_SEPARATOR)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    // A list of nothing is a tagged note, not an empty list. Returning one
+    // would put an empty list on every surface that draws lists, for a capture
+    // whose author was writing a note.
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(List {
+        tag: tag.to_string(),
+        items,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +809,34 @@ mod tests {
                 assert_ne!(a.sigil, b.sigil, "{:?} opens two sigils", a.sigil);
             }
         }
+    }
+
+    #[test]
+    fn the_list_form_added_no_vocabulary() {
+        // Pinned, not computed. The list form (`#tag: a, b, c`) is punctuation
+        // over a sigil that already existed, and the whole argument for
+        // spelling it that way rather than as a `list` head word was that it
+        // grows neither table — §3.1.5 makes adding a word "a deliberate edit
+        // with tests attached", and this is the test that makes the next
+        // addition deliberate.
+        //
+        // If you are here because this failed: that is the point. Update the
+        // number in the same commit that adds the word, so the diff says a
+        // word was added to the language rather than burying it.
+        assert_eq!(
+            SIGILS
+                .iter()
+                .map(|s| s.sigil)
+                .collect::<alloc::vec::Vec<_>>(),
+            ['#', '@', '>', '!', '~', '^'],
+            "the list form introduces no sigil",
+        );
+        assert_eq!(
+            TASK_VERBS.len(),
+            19,
+            "the list form introduces no task verb"
+        );
+        assert_eq!(REC_HEADS.len(), 2, "the list form introduces no head word");
     }
 
     #[test]

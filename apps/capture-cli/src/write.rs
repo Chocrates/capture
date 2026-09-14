@@ -654,3 +654,38 @@ fn day_of(ms: i64) -> String {
         .map(|t| t.to_zoned(tz).strftime("%Y-%m-%d").to_string())
         .unwrap_or_else(|_| "an unknown day".into())
 }
+
+/// Tick an item off a list, or put it back.
+///
+/// Says which of the four things happened rather than reporting success for
+/// all of them. "Already done" and "just done" are different facts, and a
+/// refusal to guess between two identical items is not a failure — it is the
+/// only honest answer when completion matches by text.
+pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> {
+    use capture_store::promote::Ticked;
+
+    match capture_store::promote::tick(
+        &paths,
+        tag,
+        item,
+        done,
+        crate::read::now_ms().max(0) as u64,
+    )? {
+        Ticked::Done if done => say!("Done."),
+        Ticked::Done => say!("Open again."),
+        Ticked::Already if done => say!("Already done."),
+        Ticked::Already => say!("Not ticked."),
+        Ticked::Ambiguous(n) => {
+            say!("{n} items on #{tag} read \"{item}\".");
+            say!();
+            say!("Completion matches an item by its text, so these cannot be told");
+            say!("apart. Edit the list to say which is which.");
+        }
+        Ticked::NoSuchItem => {
+            say!("Nothing on #{tag} reads \"{item}\".");
+            say!();
+            say!("See what is on it with:  capture list {tag}");
+        }
+    }
+    Ok(())
+}

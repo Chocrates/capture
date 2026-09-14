@@ -738,3 +738,137 @@ mod tests {
         assert!(needs_parse(&a_note(), 1));
     }
 }
+
+/// What ticking an item did, so a surface can say it rather than guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ticked {
+    /// The item became a task and carries the state asked for.
+    Done,
+    /// It was already in that state. Said separately rather than reported as
+    /// success, so a surface can stay quiet instead of claiming it acted.
+    Already,
+    /// More than one item on this list reads the same, and completion matches
+    /// by text. Carries how many, because "two" and "nine" want different
+    /// words from whoever has to explain it.
+    Ambiguous(usize),
+    /// Nothing on this list reads like that.
+    NoSuchItem,
+}
+
+/// Tick an item off a list, or put it back.
+///
+/// # Why this writes a task rather than a flag
+///
+/// An expanded item has no identity in the log — it is derived from its list
+/// capture's text and its position in it (§Decisions in the change's design
+/// note). Storing completion against that position would mean editing a list
+/// silently moved the ticks: change `#groceries: milk, eggs` to `#groceries:
+/// oat milk, eggs` and everything after the edit shifts by one.
+///
+/// So completion is not stored against the item at all. Ticking captures the
+/// item as a note of its own, tags it with the list, promotes it to a task and
+/// marks that task done — ordinary events, in the log, with a time on them.
+/// The projection matches the item back to its task by `(tag, text)`.
+///
+/// That buys three things at once: completion survives a rebuild because it is
+/// not derived; it survives an *edit* of the list because it was never bound to
+/// a position; and "bought the milk" becomes a fact with a timestamp rather
+/// than a row that vanished, which is most of why a list is worth keeping.
+///
+/// It costs one thing, and the cost is real: two items reading the same text
+/// are indistinguishable, so ticking either is refused rather than guessed at.
+/// `now` is passed in rather than read here. §8.1 keeps clocks outside this
+/// crate: the store folds the same events into the same answer on every
+/// device, and a function that consulted a clock would stop being a function of
+/// its inputs. The only use for it is the mute horizon a list is read against.
+pub fn tick(paths: &StorePaths, tag: &str, item: &str, done: bool, now: u64) -> Result<Ticked> {
+    let item = item.trim();
+
+    // What the list already knows about this text, read before anything is
+    // written. Both answers below are refusals, and a refusal that had already
+    // captured a note would leave the list holding a note nobody asked for.
+    let (on_list, existing) = {
+        let store = reading(paths)?;
+        let count = store.list_item_count(tag, item)?;
+        let existing = store
+            .list(tag, now)?
+            .into_iter()
+            .find(|e| e.text == item)
+            .and_then(|e| e.task);
+        (count, existing)
+    };
+
+    if on_list > 1 {
+        return Ok(Ticked::Ambiguous(on_list));
+    }
+
+    if let Some(task) = existing {
+        // Already a note of its own. Reuse it rather than capturing a second —
+        // ticking twice must leave one task, not a pile of them.
+        let name = match reading(paths)?.note(&task)? {
+            Some(n) => n.slug,
+            None => return Ok(Ticked::NoSuchItem),
+        };
+        if state_of(paths, &name)? == Some(done) {
+            return Ok(Ticked::Already);
+        }
+        as_task_if_needed(paths, &name)?;
+        set_done(paths, &name, done)?;
+        return Ok(Ticked::Done);
+    }
+
+    // Nothing in the log about this item yet.
+    if on_list == 0 {
+        return Ok(Ticked::NoSuchItem);
+    }
+
+    // Un-ticking something never ticked is not an error and not a write.
+    // There is no promotion to reverse, and capturing a note in order to
+    // immediately mark it open would put a note in the archive to record that
+    // nothing happened.
+    if !done {
+        return Ok(Ticked::Already);
+    }
+
+    let slug = match crate::session::capture(paths, item)? {
+        crate::session::Committed::Stored(slug) => slug,
+        // Spooled means the store could not be opened, so the tag and the
+        // promotion that follow could not be written either. The item is safe
+        // and will be folded later; what it will not be is ticked.
+        crate::session::Committed::Spooled => return Ok(Ticked::NoSuchItem),
+    };
+
+    crate::mutate::tag(paths, &slug, tag)?;
+    as_task(paths, &slug, None)?;
+    set_done(paths, &slug, done)?;
+    Ok(Ticked::Done)
+}
+
+/// The current generation, read-only. The same three lines `set_done` opens
+/// with, named once because `tick` needs them four times.
+fn reading(paths: &StorePaths) -> Result<crate::projection::Store> {
+    crate::projection::Store::open_read(&crate::projection::generation_path(
+        &paths.state,
+        crate::ops::Ops::open_read(&paths.ops)?.generation()?,
+    ))
+}
+
+/// Whether a note is a task, and its state.
+fn state_of(paths: &StorePaths, name: &str) -> Result<Option<bool>> {
+    let store = reading(paths)?;
+    let Some(note) = store.resolve(name)? else {
+        return Ok(None);
+    };
+    store.task_done(&note)
+}
+
+/// Promote to a task only where it is not one already.
+///
+/// `as_task` would otherwise replace the fields, discarding a due date somebody
+/// had set on an item they later ticked.
+fn as_task_if_needed(paths: &StorePaths, name: &str) -> Result<()> {
+    if state_of(paths, name)?.is_none() {
+        as_task(paths, name, None)?;
+    }
+    Ok(())
+}

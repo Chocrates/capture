@@ -555,6 +555,58 @@ pub fn tagged(tag: String) -> std::result::Result<Vec<Note>, String> {
     })())
 }
 
+/// One line of a list.
+#[derive(Serialize)]
+pub struct ListLine {
+    pub text: String,
+    pub done: bool,
+    /// Its place in the written order, where it has one.
+    pub ord: Option<u32>,
+}
+
+/// A list: the items written under a tag, then the tasks carrying it.
+///
+/// The tag page and the list are the same question asked two ways — "what
+/// carries this" and "what is still to do about it" — so this sits beside
+/// `tagged` rather than behind a pane of its own. The proposal makes a
+/// dedicated desktop list surface a non-goal: the window already has somewhere
+/// to put an answer about a tag.
+#[tauri::command]
+pub fn list(tag: String) -> std::result::Result<Vec<ListLine>, String> {
+    wire((|| {
+        let s = read_only()?;
+        Ok(s.list(&tag, now_ms())?
+            .into_iter()
+            .map(|e| ListLine {
+                text: e.text,
+                done: e.done,
+                ord: e.ord,
+            })
+            .collect())
+    })())
+}
+
+/// Tick an item off a list, or put it back.
+///
+/// `tick_item` rather than `tick`: this window already has a `tick`, and it is
+/// the slow clock that drains due work. Two unrelated meanings under one name
+/// in one IPC surface is the kind of collision that is obvious today and is a
+/// wrong call site in six months.
+#[tauri::command]
+pub fn tick_item(tag: String, item: String, done: bool) -> std::result::Result<String, String> {
+    wire((|| {
+        let paths = paths()?;
+        Ok(
+            match capture_store::promote::tick(&paths, &tag, &item, done, now_ms())? {
+                capture_store::promote::Ticked::Done => "done".to_string(),
+                capture_store::promote::Ticked::Already => "already".to_string(),
+                capture_store::promote::Ticked::Ambiguous(n) => format!("ambiguous:{n}"),
+                capture_store::promote::Ticked::NoSuchItem => "absent".to_string(),
+            },
+        )
+    })())
+}
+
 /// One entry in the wiki's sidebar.
 #[derive(Serialize)]
 pub struct Entry {

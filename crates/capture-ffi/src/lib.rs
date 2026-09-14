@@ -74,6 +74,41 @@ impl From<capture_store::Error> for CaptureError {
 
 type Result<T> = std::result::Result<T, CaptureError>;
 
+/// One line of a list: an item written into a list capture, or a task that
+/// carries the list's tag.
+///
+/// The two arrive as one shape on purpose. To whoever is holding the phone in
+/// a shop they are the same thing — something on the list, bought or not — and
+/// which of the two it is underneath is not theirs to keep track of.
+#[derive(Debug, uniffi::Record)]
+pub struct ListLine {
+    /// What to draw.
+    pub text: String,
+    /// Whether it has been ticked off.
+    pub done: bool,
+    /// Its place in the order somebody wrote, where it has one. Absent for a
+    /// task that joined the list by carrying its tag.
+    pub ord: Option<u32>,
+}
+
+/// What ticking did, so the surface can say it rather than guess.
+///
+/// An enum rather than a bool: "already done" is not a failure and "two items
+/// read the same" is not success, and a phone that showed one word for all
+/// four would be lying in two of them.
+#[derive(Debug, uniffi::Enum)]
+pub enum Ticked {
+    /// It carries the state asked for now, and did not before.
+    Done,
+    /// It already did. The surface can stay quiet rather than claim it acted.
+    Already,
+    /// More than one item on this list reads the same. Completion matches an
+    /// item by its text, so these cannot be told apart.
+    Ambiguous { count: u32 },
+    /// Nothing on this list reads like that.
+    NoSuchItem,
+}
+
 /// One note, as a list shows it.
 #[derive(Debug, uniffi::Record)]
 pub struct NoteSummary {
@@ -110,6 +145,14 @@ pub struct NoteSummary {
     /// cancel — collapsing them into one flag would hide the only one of the
     /// two they can do anything about.
     pub redaction_queued: bool,
+    /// The tag this note's text opens a list under, where it does.
+    ///
+    /// Decided here rather than on the surface. The phone drawing a "open the
+    /// list" affordance has to know *whether this is a list*, and that is a
+    /// question about the recognizer — Kotlin re-answering it would be a
+    /// second implementation of the form, differing from this one the first
+    /// time a guard changed.
+    pub list_tag: Option<String>,
 }
 
 /// Whether a capture reached the log or the spool.
@@ -441,11 +484,16 @@ impl Archive {
     /// The most recent notes, newest first.
     pub fn timeline(&self, limit: u32) -> Result<Vec<NoteSummary>> {
         let store = self.read()?;
-        Ok(store
+        store
             .timeline(limit as usize)?
             .into_iter()
-            .map(summarise)
-            .collect())
+            .map(|n| {
+                let tag = store.list_tag_of(&n.tgt)?;
+                let mut s = summarise(n);
+                s.list_tag = tag;
+                Ok(s)
+            })
+            .collect()
     }
 
     /// One note by slug or alias.
@@ -454,9 +502,14 @@ impl Archive {
         let tgt = store
             .resolve(&name)?
             .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        let tag = store.list_tag_of(&tgt)?;
         store
             .note(&tgt)?
-            .map(summarise)
+            .map(|n| {
+                let mut s = summarise(n);
+                s.list_tag = tag;
+                s
+            })
             .ok_or(CaptureError::NotFound { name })
     }
 
@@ -486,6 +539,18 @@ impl Archive {
     /// Asked for rather than computed by the caller, for the same reason the
     /// agenda's date is parsed here: what day it is depends on a zone, and
     /// there is one implementation of that.
+    /// The zone this device is in, by name.
+    ///
+    /// One answer, used by everything here that has to turn a day into a
+    /// window. Two callers deriving it separately is how `today()` and
+    /// `agenda()` came to disagree about what day it was.
+    fn zone_name(&self) -> String {
+        jiff::tz::TimeZone::system()
+            .iana_name()
+            .unwrap_or("UTC")
+            .to_string()
+    }
+
     pub fn today(&self) -> String {
         let now = jiff::Timestamp::now();
         now.to_zoned(jiff::tz::TimeZone::system())
@@ -501,7 +566,20 @@ impl Archive {
     /// question is a calendar that disagrees with itself.
     pub fn agenda(&self, day: String) -> Result<Vec<AgendaEntry>> {
         let store = self.read()?;
-        let zone = capture_time::Zone::new("UTC").expect("UTC is always present");
+        // The zone the person is in, not UTC.
+        //
+        // `today()` answers in the system zone, so a day string arriving here
+        // names a *local* day — and turning it into a UTC window put the day
+        // boundary in the wrong place by the offset. West of Greenwich that
+        // meant the agenda went empty for the last hours of every evening:
+        // 19:00 in Chicago is already tomorrow in UTC, so everything happening
+        // today fell outside the window today was asking for.
+        //
+        // Falls back to UTC only where the system zone has no IANA name, which
+        // is the one case where there is nothing better to use.
+        let zone = capture_time::Zone::new(self.zone_name().as_str())
+            .or_else(|| capture_time::Zone::new("UTC"))
+            .expect("UTC is always present");
         let date =
             capture_time::FloatingDate::parse(&day).ok_or_else(|| CaptureError::Refused {
                 reason: format!("{day:?} is not a date — write it as 2026-09-15"),
@@ -789,6 +867,41 @@ impl Archive {
             &self.paths,
             &id_prefix,
         )?)
+    }
+
+    /// A list: the items written under a tag, then the tasks carrying it.
+    ///
+    /// Operation-shaped rather than type-shaped, like everything else here. The
+    /// alternative was exposing a general "notes carrying a tag" read and a
+    /// general "promote to task" write for Kotlin to compose into a list —
+    /// which is Kotlin deciding what a list is, and `make android-decides`
+    /// exists to stop exactly that.
+    pub fn list(&self, tag: String) -> Result<Vec<ListLine>> {
+        let store = self.read()?;
+        Ok(store
+            .list(&tag, self.now_ms())?
+            .into_iter()
+            .map(|e| ListLine {
+                text: e.text,
+                done: e.done,
+                ord: e.ord,
+            })
+            .collect())
+    }
+
+    /// Tick an item off a list, or put it back.
+    pub fn tick(&self, tag: String, item: String, done: bool) -> Result<Ticked> {
+        let _w = self.write_lock()?;
+        Ok(
+            match capture_store::promote::tick(&self.paths, &tag, &item, done, self.now_ms())? {
+                capture_store::promote::Ticked::Done => Ticked::Done,
+                capture_store::promote::Ticked::Already => Ticked::Already,
+                capture_store::promote::Ticked::Ambiguous(n) => {
+                    Ticked::Ambiguous { count: n as u32 }
+                }
+                capture_store::promote::Ticked::NoSuchItem => Ticked::NoSuchItem,
+            },
+        )
     }
 
     /// Mark a task done, or not.
@@ -1328,6 +1441,24 @@ impl Archive {
     /// exists for the moment the archive is unhealthy, and a diagnostic that
     /// stops working when the system is unwell is one you cannot use when you
     /// need it.
+    /// The wall clock, read at the binding's edge.
+    ///
+    /// This is where a clock is allowed: `capture-store` is kept pure so that
+    /// folding the same events gives the same answer everywhere, which means
+    /// the surfaces supply the one thing that genuinely varies — what time it
+    /// is for the person holding the phone.
+    fn now_ms(&self) -> u64 {
+        #[allow(
+            clippy::disallowed_methods,
+            clippy::disallowed_types,
+            reason = "the binding is the edge where the wall clock is read"
+        )]
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     fn read(&self) -> Result<capture_store::projection::Store> {
         let generation = capture_store::ops::Ops::open_read(&self.paths.ops)?.generation()?;
         Ok(capture_store::projection::Store::open_read(
@@ -1451,5 +1582,9 @@ fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
         muted_until_ms: n.muted_until.map(|t| t as i64),
         redacted: n.redacted_at.is_some(),
         redaction_queued: n.redaction_queued,
+        // Filled by the caller, which has the store open. Left absent here
+        // rather than guessed at: a summary that re-parsed the text would be a
+        // second implementation of the list form.
+        list_tag: None,
     }
 }

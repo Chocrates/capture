@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -29,13 +30,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import uniffi.capture_ffi.AgendaEntry
 import uniffi.capture_ffi.Condition
+import uniffi.capture_ffi.ListLine
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
@@ -121,6 +125,15 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 },
                 style = MaterialTheme.typography.bodyLarge,
             )
+            // The way into a list, and deliberately the only one. A list is a
+            // query over a tag (§3.7), so it is reached from the tag rather
+            // than from a tab of its own — and the tab row is already one tab
+            // past what this phone's width holds.
+            note.listTag?.let { tag ->
+                TextButton({ model.go(Screen.ListOf(tag)) }) {
+                    Text("Open the #$tag list")
+                }
+            }
             if (note.mutedUntilMs != null) {
                 Text("Muted.", style = MaterialTheme.typography.labelMedium)
             }
@@ -351,6 +364,61 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
                 }
             }
             HorizontalDivider()
+        }
+    }
+}
+
+/**
+ * A list: what is on it, and what has been bought.
+ *
+ * The surface this whole change exists for. §2.1's argument about capture
+ * applies again at the other end — standing in a shop, one hand on the phone,
+ * the gesture has to be a thumb landing on a row and nothing else. So the whole
+ * row is the target rather than a checkbox somebody has to hit.
+ *
+ * Done items stay, struck through rather than removed. A row that vanished
+ * would leave nothing to tap when it turns out the shop had none, and §6 rates
+ * a state that cannot be reversed from any device as the failure worth
+ * avoiding. Whether they should eventually hide behind a toggle is the open
+ * question this change deliberately left for a week of real use to answer.
+ */
+@Composable
+fun ListScreen(tag: String, lines: List<ListLine>, onTick: (String, Boolean) -> Unit) {
+    if (lines.isEmpty()) {
+        Empty("Nothing on the #$tag list. Capture one: #$tag: first thing, second thing")
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(lines) { line ->
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable { onTick(line.text, !line.done) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = line.done,
+                    // Null, because the row already handles it. A checkbox with
+                    // its own handler makes two targets out of one gesture and
+                    // the smaller one is the one a thumb misses.
+                    onCheckedChange = null,
+                )
+                Text(
+                    line.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textDecoration = if (line.done) TextDecoration.LineThrough else null,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+            HorizontalDivider()
+        }
+        item {
+            val left = lines.count { !it.done }
+            Text(
+                if (left == 0) "All ${lines.size} done." else "$left of ${lines.size} left.",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(16.dp),
+            )
         }
     }
 }

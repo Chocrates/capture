@@ -101,6 +101,36 @@
         </activity>
 
         <!--
+          Capture, as an icon.
+
+          An `activity-alias` rather than a second activity: it is the same
+          window, reached by a second name. The launcher shows it beside the
+          application's own icon, and it can be dragged onto a home screen like
+          anything else — which is the point, because the home screen is where
+          a thumb already is.
+
+          A home-screen widget was tried here first and removed. `RemoteViews`
+          has no `EditText`, so a widget could only ever draw a *picture* of a
+          field and open the real one on tap — an icon does the same thing with
+          nothing to place, nothing to resize, and no second surface to keep
+          working.
+
+          `targetActivity` is exported already; the alias inherits nothing and
+          declares its own exported state, which has to be true for the
+          launcher to start it.
+        -->
+        <activity-alias
+            android:name=".CaptureShortcut"
+            android:targetActivity=".CaptureActivity"
+            android:exported="true"
+            android:label="Capture">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!--
           The share-sheet target. Invisible: it captures and finishes, because
           a share sheet is already a deliberate act with the content chosen,
           and asking to confirm would ask the same question twice.

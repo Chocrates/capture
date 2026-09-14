@@ -172,6 +172,11 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                     onJoin = model::joinPairing,
                 )
                 is Screen.Note -> NotePage(model.note, model.pending, model.recording, model)
+                is Screen.ListOf -> ListScreen(
+                    tag = screen.tag,
+                    lines = model.list,
+                    onTick = { item, done -> model.tick(screen.tag, item, done) },
+                )
             }
         }
     }

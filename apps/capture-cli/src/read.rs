@@ -644,7 +644,7 @@ fn local_zone() -> String {
         .unwrap_or_else(|| "UTC".into())
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond().max(0)
 }
 
@@ -1081,6 +1081,64 @@ fn link_json(l: &LinkRow) -> String {
 
 fn backlink_json(b: &Backlink) -> String {
     format!("{{\"slug\":{},\"as\":{}}}", quote(&b.slug), quote(&b.name))
+}
+
+/// A list: its items in written order, then the tasks carrying its tag.
+///
+/// §3.7 makes a collection a saved query rather than a folder, and this prints
+/// the answer to one. There is no list to create and none to maintain — a list
+/// exists for every tag the moment somebody writes one.
+pub fn list(paths: &StorePaths, tag: &str, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let rows = store.list(tag, now_ms().max(0) as u64)?;
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|e| {
+                format!(
+                    "{{\"item\":{},\"done\":{},\"ord\":{}}}",
+                    quote(&e.text),
+                    e.done,
+                    match e.ord {
+                        Some(o) => o.to_string(),
+                        None => "null".into(),
+                    }
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        // Said rather than printed as an empty result, because the two mean
+        // different things: nothing carries this tag, as against a list that
+        // has been emptied.
+        // Not "nothing carries this tag", which would be a claim about the
+        // tag rather than about the list. A note can carry `#{tag}` and have
+        // no place on a list: the tag page holds everything, and a list holds
+        // the half somebody can tick off.
+        say!("Nothing on the #{tag} list.");
+        say!();
+        say!("Start one by capturing:  #{tag}: first thing, second thing");
+        say!("Everything carrying the tag:  capture mentions #{tag}");
+        return Ok(());
+    }
+
+    for e in &rows {
+        // A box rather than a colour, so it survives a pipe and a terminal
+        // that has opinions.
+        say!("  [{}] {}", if e.done { "x" } else { " " }, e.text);
+    }
+
+    let left = rows.iter().filter(|e| !e.done).count();
+    say!();
+    match left {
+        0 => say!("All {} done.", rows.len()),
+        n => say!("{n} of {} left.", rows.len()),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

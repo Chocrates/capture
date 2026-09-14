@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import uniffi.capture_ffi.AgendaEntry
 import uniffi.capture_ffi.Archive
 import uniffi.capture_ffi.Condition
+import uniffi.capture_ffi.ListLine
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
@@ -19,6 +20,7 @@ import uniffi.capture_ffi.Intent as Plan
 import uniffi.capture_ffi.Resurfaced
 import uniffi.capture_ffi.Watching
 import uniffi.capture_ffi.Pending
+import uniffi.capture_ffi.Ticked
 
 /** Which surface is showing. */
 sealed interface Screen {
@@ -31,6 +33,14 @@ sealed interface Screen {
     data object Pairing : Screen
     data object Review : Screen
     data object Plans : Screen
+    /**
+     * A list, by its tag.
+     *
+     * Reached from a tag rather than from a tab. §3.7 makes a collection a
+     * saved query, and a tag is where a query starts — and the tab row is
+     * already one tab past what a phone's width holds.
+     */
+    data class ListOf(val tag: String) : Screen
 }
 
 /**
@@ -58,6 +68,8 @@ class Model(private val archive: Archive) : ViewModel() {
     var agenda by mutableStateOf<List<AgendaEntry>>(emptyList())
         private set
     var pages by mutableStateOf<List<Named>>(emptyList())
+        private set
+    var list by mutableStateOf<List<ListLine>>(emptyList())
         private set
     var conditions by mutableStateOf<List<Condition>>(emptyList())
         private set
@@ -116,12 +128,37 @@ class Model(private val archive: Archive) : ViewModel() {
     var busy by mutableStateOf(false)
         private set
 
+    /**
+     * Tick an item off a list, or put it back.
+     *
+     * Reloads rather than editing the row in place. The archive decides what a
+     * list holds — an item may have been ticked on another device since this
+     * screen drew — and a phone that patched its own copy would be a second
+     * opinion about what is still to buy.
+     */
+    fun tick(tag: String, item: String, done: Boolean) {
+        load {
+            when (val outcome = archive.tick(tag, item, done)) {
+                is Ticked.Ambiguous -> trouble =
+                    "${outcome.count} items on #$tag read \"$item\". " +
+                        "Ticking matches an item by its text, so these cannot be told apart."
+                is Ticked.NoSuchItem -> trouble = "Nothing on #$tag reads \"$item\"."
+                // Done and Already are both the state asked for, and saying
+                // so twice would be noise on a surface somebody is tapping
+                // through a shop.
+                else -> trouble = null
+            }
+            list = archive.list(tag)
+        }
+    }
+
     fun go(to: Screen) {
         screen = to
         when (to) {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load { pages = archive.named() }
+            is Screen.ListOf -> load { list = archive.list(to.tag) }
             is Screen.Health -> load {
                 conditions = archive.health()
                 peers = archive.peers()

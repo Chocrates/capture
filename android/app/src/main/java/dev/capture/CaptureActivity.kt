@@ -82,7 +82,20 @@ class CaptureActivity : ComponentActivity() {
 
     /** Which gesture opened this, for reporting what it cost separately. */
     private val surface: String
-        get() = if (intent?.action == android.content.Intent.ACTION_ASSIST) "assist" else "tile"
+        get() = when (intent?.action) {
+            android.content.Intent.ACTION_ASSIST -> "assist"
+            // The launcher icon (§the alias in the manifest). ACTION_MAIN is
+            // what a launcher sends and nothing else here does, so the two
+            // gestures stay separately measured — they cost different amounts
+            // and §2.1 makes that difference the thing worth knowing.
+            android.content.Intent.ACTION_MAIN -> "icon"
+            // The tile, and anything else that opens this window without
+            // saying how. Named for the surface that dominates rather than
+            // "unknown": every other caller is a launcher of some kind and
+            // counting them together would be less honest than counting them
+            // as the one they behave like.
+            else -> "tile"
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

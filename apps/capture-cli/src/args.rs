@@ -38,25 +38,61 @@ pub enum Command {
     /// Print the shell snippet that installs the capture chord.
     ShellInit(String),
     /// Notes, newest first, grouped by capture day.
-    Timeline { limit: Option<usize>, json: bool },
+    Timeline {
+        limit: Option<usize>,
+        json: bool,
+    },
     /// One note in full.
-    Show { name: String, json: bool },
+    Show {
+        name: String,
+        json: bool,
+    },
     /// What occurs and what is due, for a day.
-    Agenda { day: Option<String>, json: bool },
+    Agenda {
+        day: Option<String>,
+        json: bool,
+    },
     /// Notes promoted to tasks.
-    Tasks { json: bool },
+    Tasks {
+        json: bool,
+    },
     /// Every note naming a person, a project, or carrying a tag.
-    Mentions { name: String, json: bool },
+    Mentions {
+        name: String,
+        json: bool,
+    },
+    List {
+        tag: String,
+        json: bool,
+    },
+    Tick {
+        tag: String,
+        item: String,
+        done: bool,
+    },
     /// Put a page under another in the wiki, or back at the top.
-    Parent { name: String, under: Option<String> },
+    Parent {
+        name: String,
+        under: Option<String>,
+    },
     /// Abandon a plan.
-    Forget { id: String },
+    Forget {
+        id: String,
+    },
     /// Assign the task type by hand, with an optional due date.
-    Task { name: String, due: Option<String> },
+    Task {
+        name: String,
+        due: Option<String>,
+    },
     /// Mark a task done, or open again.
-    TaskDone { name: String, done: bool },
+    TaskDone {
+        name: String,
+        done: bool,
+    },
     /// A bounded review session.
-    Review { json: bool },
+    Review {
+        json: bool,
+    },
     /// Make an if-then plan.
     Intent {
         cue: String,
@@ -64,15 +100,27 @@ pub enum Command {
         then: String,
     },
     /// Every plan still standing.
-    Intents { json: bool },
+    Intents {
+        json: bool,
+    },
     /// Notes captured while a recurring thing was happening.
-    During { name: String, json: bool },
+    During {
+        name: String,
+        json: bool,
+    },
     /// Show what the recognizer makes of some text, without storing anything.
-    Read { text: String },
+    Read {
+        text: String,
+    },
     /// Say that missing an instance of a series leaves something owed.
-    CarriesForward { name: String },
+    CarriesForward {
+        name: String,
+    },
     /// Record what became of a resurfaced note.
-    Reviewed { name: String, outcome: String },
+    Reviewed {
+        name: String,
+        outcome: String,
+    },
     /// Mark one occurrence of a recurring series complete, or not.
     Occurrence {
         /// The series.
@@ -83,43 +131,86 @@ pub enum Command {
         done: bool,
     },
     /// Notes matching a query.
-    Search { query: String, json: bool },
+    Search {
+        query: String,
+        json: bool,
+    },
     /// What a note points at, and what points at it.
-    Links { name: String, json: bool },
+    Links {
+        name: String,
+        json: bool,
+    },
     /// Replace a note's text with a new version.
-    Edit { name: String, text: String },
+    Edit {
+        name: String,
+        text: String,
+    },
     /// Add a tag.
-    Tag { name: String, tag: String },
+    Tag {
+        name: String,
+        tag: String,
+    },
     /// Retract a tag.
-    Untag { name: String, tag: String },
+    Untag {
+        name: String,
+        tag: String,
+    },
     /// Assign or clear a chosen name.
-    Alias { name: String, alias: Option<String> },
+    Alias {
+        name: String,
+        alias: Option<String>,
+    },
     /// Pin or unpin.
-    Pin { name: String, pinned: bool },
+    Pin {
+        name: String,
+        pinned: bool,
+    },
     /// Suppress something from surfacing.
-    Mute { what: MuteTarget },
+    Mute {
+        what: MuteTarget,
+    },
     /// Stop every redaction issued since a moment.
-    RedactCancelSince { since: u64 },
+    RedactCancelSince {
+        since: u64,
+    },
     /// Dismiss a divergence.
-    Resolve { name: String },
+    Resolve {
+        name: String,
+    },
     /// Every event that touched a note.
-    Log { name: String, json: bool },
+    Log {
+        name: String,
+        json: bool,
+    },
     /// Events set aside as unusable.
-    Quarantine { json: bool },
+    Quarantine {
+        json: bool,
+    },
     /// Events that failed authentication.
-    Rejected { json: bool },
+    Rejected {
+        json: bool,
+    },
     /// Recompute the projection from the log.
     Rebuild,
     /// Record a preference, or restore its default.
-    Set { key: String, value: Option<String> },
+    Set {
+        key: String,
+        value: Option<String>,
+    },
     /// Check every id, signature, body hash and origin chain.
-    Verify { json: bool },
+    Verify {
+        json: bool,
+    },
     /// Acknowledge that stale export files were dealt with by hand.
     ExportsPruned,
     /// Acknowledge a device admitted by some other device.
-    AdmissionSeen { key: String },
+    AdmissionSeen {
+        key: String,
+    },
     /// Every device in the roster, and when this one last reached it.
-    Peers { json: bool },
+    Peers {
+        json: bool,
+    },
     /// Admit another device, or join the roster of one.
     Pair {
         code: Option<String>,
@@ -132,27 +223,41 @@ pub enum Command {
         rule: String,
     },
     /// Stop accepting anything a device authors from now on.
-    Retire { key: String, force: bool },
+    Retire {
+        key: String,
+        force: bool,
+    },
     /// Vouch for another device's re-admission.
-    Cosign { blob: String },
+    Cosign {
+        blob: String,
+    },
     /// Re-admit this device, with another's signature.
     Readmit {
         cosign: Option<String>,
         by: Option<String>,
     },
     /// Write everything appended since the last export.
-    Export { json: bool },
+    Export {
+        json: bool,
+    },
     /// Rebuild a store from exported events.
     Restore {
         from: String,
         ignore_redactions_after: Option<u64>,
     },
     /// Clear a note's credential flag so it is exported again.
-    Unflag { name: String },
+    Unflag {
+        name: String,
+    },
     /// Destroy a note's content, after a cancellable window.
-    Redact { name: String, force: bool },
+    Redact {
+        name: String,
+        force: bool,
+    },
     /// Stop a queued redaction.
-    RedactCancel { id: String },
+    RedactCancel {
+        id: String,
+    },
     /// Print usage.
     Help,
     /// Print the version.
@@ -398,6 +503,34 @@ where
             name,
             json,
         }),
+        // `capture list groceries`. The tag without its sigil, because a
+        // leading `#` is a comment to most shells and quoting it is a thing to
+        // remember at exactly the wrong moment.
+        "list" => one_name(&args[1..], "list", |tag, json| Command::List {
+            tag: tag.trim_start_matches('#').to_string(),
+            json,
+        }),
+        // `capture tick groceries milk`, and its undo.
+        //
+        // A verb of its own rather than `capture done groceries milk`: `done`
+        // already takes `<name>` and `<name> <occ>`, and telling those apart
+        // from a list and an item by whether the second argument parses as a
+        // date is the fragile disambiguation §3.1.5's guards exist to avoid.
+        verb @ ("tick" | "untick") => match &args[1..] {
+            [tag, item] => Ok(Command::Tick {
+                tag: tag.trim_start_matches('#').to_string(),
+                item: item.clone(),
+                done: verb == "tick",
+            }),
+            [] | [_] => Err(Bad::Value {
+                command: verb.into(),
+                problem: "say which list and which item:  capture tick groceries milk".into(),
+            }),
+            [_, _, extra, ..] => Err(Bad::UnknownFlag {
+                command: verb.into(),
+                flag: extra.clone(),
+            }),
+        },
         // `capture parent <page> <under>` files it; `capture parent <page>` puts it
         // back at the top. The second form is deliberately the short one: it is
         // the undo, and an undo that is harder to type than the thing it undoes
@@ -878,6 +1011,8 @@ READING
 TIME AND TASKS
   capture agenda [day]           what is due and what occurs, default today
   capture tasks                  open tasks, newest first
+  capture list <tag>             a list: its items, and what is left
+  capture tick <tag> <item>      tick one off; untick puts it back
   capture mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)
   capture forget <id>            abandon a plan, by its id from capture intents
@@ -894,6 +1029,10 @@ TIME AND TASKS
   A capture becomes a task on its own only where a verb and a day agree —
   "call the dentist tomorrow". A verb alone is a suggestion and nothing more,
   which is what capture task is for.
+
+  A list is made by capturing one:  #groceries: milk, eggs, bread
+  One line, one capture, three items. Lists are tags, so anything else
+  carrying #groceries joins the list without being filed into it.
 
 CHANGING A NOTE
   capture edit <name> <text>     replace the text; the old version is kept

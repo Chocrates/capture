@@ -22,13 +22,26 @@ pub fn offer(paths: StorePaths) -> Result<()> {
     let offering = capture_store::pairing::Offering::open(&paths)?;
     let shown = offering.shown();
 
-    say!("On the other device, run:  capture pair {shown}");
-    say!();
-    say!("  code   {shown}");
-    say!(
-        "  here   this machine, port {}",
-        capture_store::pairing::PORT
-    );
+    let port = capture_store::pairing::PORT;
+    match here() {
+        // Said as something that can be typed, because it is about to be —
+        // into a phone, by hand, from across the room. The first version said
+        // "this machine", which is true and left the person to go and find out
+        // what this machine is called on the network.
+        Some(ip) => {
+            say!("On the other device, run:  capture pair {shown} --at {ip}:{port}");
+            say!();
+            say!("  code   {shown}");
+            say!("  here   {ip}:{port}");
+        }
+        None => {
+            say!("On the other device, run:  capture pair {shown} --at ADDRESS:{port}");
+            say!();
+            say!("  code   {shown}");
+            say!("  here   this machine, port {port} — its address could not be");
+            say!("         determined, which usually means no network is up");
+        }
+    }
     say!();
     say!("Waiting. The code stops working after one wrong attempt.");
 
@@ -38,6 +51,32 @@ pub fn offer(paths: StorePaths) -> Result<()> {
     say!("Paired with {}.", short(&admitted));
     say!("It will receive the archive on the next sync.");
     Ok(())
+}
+
+/// The address a device on the same network would dial to reach this one.
+///
+/// A connected UDP socket, which sends nothing. `connect` on a datagram socket
+/// fixes the peer and asks the routing table which interface would carry a
+/// packet there; the address reported afterwards is the one this machine
+/// presents on that route.
+///
+/// Enumerating interfaces instead would mean a dependency and a *list*, and a
+/// list is exactly what the person already has and cannot choose from — this
+/// machine answers to 10.0.3.1 on a container bridge no phone can reach, and
+/// offering both addresses makes the reader guess at the thing they asked to
+/// be told.
+///
+/// The destination is never contacted and does not need to exist. It is a
+/// documentation-range address (RFC 5737) rather than somebody's real server,
+/// so this cannot become traffic even if the reasoning above is wrong.
+fn here() -> Option<std::net::IpAddr> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?;
+    let ip = probe.local_addr().ok()?.ip();
+    // With no route at all the socket reports the unspecified address, which
+    // would be printed as "0.0.0.0" — a plausible-looking answer that cannot
+    // work. Saying nothing is better than saying that.
+    (!ip.is_unspecified()).then_some(ip)
 }
 
 /// Type a code shown on another device, and join its roster.

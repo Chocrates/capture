@@ -44,11 +44,16 @@ use crate::{Result, db};
 /// changed since it was last read. Without it an edit never reparsed, and the
 /// fields went stale while the text moved.
 ///
+/// Version 6 adds `list_items`, the expansion of a list capture. Every
+/// existing note has to be re-read for it: a capture written before the form
+/// existed becomes a list on this rebuild, which is what an additive
+/// recognizer (§3.1.3) means and is intended.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 5;
+pub const PROJECTION_SCHEMA: u32 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -352,6 +357,30 @@ CREATE TABLE IF NOT EXISTS occurrences (
 
 CREATE INDEX IF NOT EXISTS occurrences_start ON occurrences(start_ms);
 
+-- The items a list capture names. §3.6: lists are just tags with a display
+-- order.
+--
+-- Derived data on the same terms as `occurrences`, and for the same reason: one
+-- gesture is one event, and what that event *names* is read back out of its
+-- text rather than written into the log. A rebuild discards every row here and
+-- recomputes it.
+--
+-- `ord` is the position as written, which is the display order. It is the
+-- item's identity for drawing it and is deliberately **not** what completion is
+-- stored against: editing a list shifts every position after the edit, so a
+-- tick bound to a position would silently move to another item. Completion is a
+-- task in the log, matched back by `(tag, item)` — see `promote::tick`.
+CREATE TABLE IF NOT EXISTS list_items (
+  tgt  BLOB NOT NULL,
+  ord  INTEGER NOT NULL,
+  tag  TEXT NOT NULL,
+  item TEXT NOT NULL,
+  PRIMARY KEY (tgt, ord)
+) STRICT;
+
+-- Reading a list is this query, so it is the one that has to be fast.
+CREATE INDEX IF NOT EXISTS list_items_tag ON list_items(tag);
+
 -- What review has done with each note.
 --
 -- Counts of engagement and nothing about memory. §2.7 removed the graded
@@ -519,6 +548,26 @@ pub struct PromotionRow {
 /// absence: a note with no readable text is not the same thing as a note that
 /// was redacted, and rendering either as a blank row loses the distinction the
 /// reader most needs.
+/// One line of a list: an expanded item, or a task carrying its tag.
+///
+/// The two are deliberately the same shape. To whoever is reading a list they
+/// are the same thing — something on it, done or not — and only the layer
+/// underneath knows that one was written inside a list capture and the other
+/// was tagged into place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListEntry {
+    /// Where this line came from: the list capture, or the task's own note.
+    pub tgt: EventId,
+    /// Position as written, for an expanded item. Absent for a loose task,
+    /// which has no place in anybody's written order.
+    pub ord: Option<u32>,
+    pub text: String,
+    pub done: bool,
+    /// The note carrying this line's task, once it has one. An item gains one
+    /// by being ticked; before that there is nothing in the log about it.
+    pub task: Option<EventId>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NoteRow {
     pub tgt: EventId,
@@ -1515,6 +1564,146 @@ impl Store {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// A list: the items expanded under a tag, then the tasks carrying it.
+    ///
+    /// §3.7 makes a collection a saved query rather than a folder, and this is
+    /// that query. A list is not a container anything was put into — it is
+    /// everything that answers to a tag, which is why a task tagged by hand
+    /// joins the list it belongs to without being copied into it (§3.6).
+    ///
+    /// # Two populations, one sequence
+    ///
+    /// Items come from `list_items`, expanded from a list capture's text and
+    /// ordered as they were written. Tasks come from the tag itself. A task
+    /// whose text matches an item **is** that item and is returned once —
+    /// otherwise every ticked item would appear twice, once as the item and
+    /// once as the task that ticked it.
+    ///
+    /// Items first in written order, then loose tasks newest first. Items have
+    /// an order somebody chose and tasks do not, and interleaving the two by
+    /// time would scramble the one thing that was deliberate.
+    pub fn list(&self, tag: &str, now: u64) -> Result<Vec<ListEntry>> {
+        // Muted list captures are excluded here for the same reason muted
+        // notes are excluded from a tag page and from search (§2.6): muting is
+        // the cheap way to stop something resurfacing, and a surface that kept
+        // showing it would defeat that.
+        let mut st = self.conn.prepare(
+            "SELECT li.tgt, li.ord, li.item
+               FROM list_items li JOIN notes n ON n.tgt = li.tgt
+              WHERE li.tag = ?1
+                AND (n.muted_until IS NULL
+                     OR (n.muted_until != 0 AND n.muted_until <= ?2))
+              ORDER BY n.created_wall ASC, li.ord ASC",
+        )?;
+        let rows = st.query_map(params![tag, now as i64], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut items = Vec::new();
+        for r in rows {
+            let (tgt, ord, text) = r?;
+            let Some(tgt) = id_from(tgt) else { continue };
+            items.push(ListEntry {
+                tgt,
+                ord: Some(ord as u32),
+                text,
+                done: false,
+                task: None,
+            });
+        }
+
+        // The tag's own notes, which carry whatever completion there is.
+        let mut loose = Vec::new();
+        for note in self.tagged(tag, now)? {
+            let Some(text) = note.text.as_deref() else {
+                // Redacted, or queued for it. A list must not become a way to
+                // read back what redaction removed.
+                continue;
+            };
+            let done = self.task_done(&note.tgt)?;
+
+            // Matched back to its item by text, which is the whole of the
+            // identity scheme: completion is a fact in the log, and binding it
+            // to an item's position would move the tick when a list is edited.
+            match items.iter_mut().find(|i| i.text == text) {
+                Some(item) => {
+                    item.done = done.unwrap_or(false);
+                    item.task = Some(note.tgt);
+                }
+                // Only a task joins the list. A tag gathers every kind of
+                // note — `#standup at 9:30` carries one and is not something
+                // anybody ticks off — and drawing those with an empty box
+                // claims they are actionable when nothing in the log says so.
+                // The tag page (`capture mentions`) is where everything
+                // carrying a tag belongs; a list is the actionable half.
+                None if done.is_some() => loose.push(ListEntry {
+                    tgt: note.tgt,
+                    ord: None,
+                    text: text.to_string(),
+                    done: done.unwrap_or(false),
+                    task: Some(note.tgt),
+                }),
+                None => {}
+            }
+        }
+
+        items.extend(loose);
+        Ok(items)
+    }
+
+    /// Whether a note is a task, and whether it is done.
+    ///
+    /// `None` where the note is not a task at all, which is a different answer
+    /// from an open one: an item that has never been ticked has nothing in the
+    /// log about it, and saying "open" would claim a promotion nobody wrote.
+    pub fn task_done(&self, tgt: &EventId) -> Result<Option<bool>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COALESCE(done, 0) FROM promotions WHERE tgt = ?1 AND kind = 'task'",
+                params![tgt.0.to_vec()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|d| d != 0))
+    }
+
+    /// The tag a note opens a list under, where it opens one.
+    ///
+    /// Read back out of the expansion rather than re-parsed from the text. The
+    /// fold already answered this question, and a second answer computed on
+    /// the way to a surface is one that can disagree with the rows the same
+    /// surface is about to draw.
+    pub fn list_tag_of(&self, tgt: &EventId) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT tag FROM list_items WHERE tgt = ?1 ORDER BY ord LIMIT 1",
+                params![tgt.0.to_vec()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// How many items on a list carry this exact text.
+    ///
+    /// Two items reading the same thing are indistinguishable to completion,
+    /// which matches by text — so ticking one has to report the ambiguity
+    /// rather than pick. Counting is separate from reading because the caller
+    /// that needs this is refusing to act, not drawing anything.
+    pub fn list_item_count(&self, tag: &str, item: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM list_items WHERE tag = ?1 AND item = ?2",
+            params![tag, item],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// Every note carrying a tag.
@@ -2580,6 +2769,24 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                     "INSERT OR IGNORE INTO mentions (tgt, sigil, value) VALUES (?1,?2,?3)",
                     params![t, sigil.to_string(), value],
                 )?;
+            }
+
+            // A list's items, expanded. Under the same guard as mentions and
+            // for the same reason: a note whose content is withheld or
+            // destroyed must not go on naming things, or a list becomes a way
+            // to read what redaction was supposed to have removed.
+            //
+            // The rows are replaced wholesale rather than merged, so an edit
+            // that shortens a list does not leave the items it dropped behind.
+            tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+            if let Some(list) = capture_parse::list_of(text) {
+                for (ord, item) in list.items.iter().enumerate() {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO list_items (tgt, ord, tag, item)
+                         VALUES (?1,?2,?3,?4)",
+                        params![t, ord as i64, list.tag, item],
+                    )?;
+                }
             }
         }
 

@@ -83,6 +83,8 @@ fn run(command: Command) -> Result<()> {
         Command::Show { name, json } => read::show(&paths()?, &name, json),
         Command::Agenda { day, json } => read::agenda(&paths()?, day.as_deref(), json),
         Command::Tasks { json } => read::tasks(&paths()?, json),
+        Command::List { tag, json } => read::list(&paths()?, &tag, json),
+        Command::Tick { tag, item, done } => write::tick(paths()?, &tag, &item, done),
         Command::Mentions { name, json } => read::mentions(&paths()?, &name, json),
         Command::Parent { name, under } => write::parent(paths()?, &name, under.as_deref()),
         Command::Forget { id } => write::forget(paths()?, &id),

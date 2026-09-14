@@ -844,3 +844,54 @@ fn a_capture_that_names_a_time_reaches_the_agenda() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The agenda asks about a *local* day, so it must read one.
+///
+/// This is a regression guard for a bug that hid in plain sight for a
+/// milestone: `today()` answered in the system zone while `agenda()` turned
+/// that day into a UTC window. The two agreed for most of the day and stopped
+/// agreeing every evening west of Greenwich — 19:00 in Chicago is already
+/// tomorrow in UTC — so the phone's agenda went empty for the last hours of
+/// each day and filled itself back in overnight.
+///
+/// Asserted by the clock rather than by inspection, because the failure only
+/// existed at certain hours: a test that ran at noon saw nothing wrong, which
+/// is exactly how it survived being written, reviewed and shipped.
+#[test]
+fn the_agenda_reads_the_day_it_was_asked_about() {
+    let root = scratch("agenda-zone");
+    let a = Archive::open(root.clone()).unwrap();
+    let paths = capture_store::paths::StorePaths::under(std::path::Path::new(&root));
+
+    let slug = match a.capture("something happening now".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled"),
+    };
+
+    // Now, in the zone the device is in — which is what somebody capturing
+    // "meeting at 3" means and what `today()` is about to answer with.
+    let zone = jiff::tz::TimeZone::system();
+    let now = jiff::Timestamp::now().as_millisecond();
+    capture_store::promote::correct(
+        &paths,
+        &slug,
+        capture_core::body::Promoted::Event(capture_core::body::EventFields {
+            when: capture_core::body::When::Timed {
+                start_ms: now,
+                end_ms: Some(now + 60 * 60 * 1000),
+                tz: zone.iana_name().unwrap_or("UTC").into(),
+            },
+            location: None,
+            attendees: Vec::new(),
+        }),
+    )
+    .unwrap();
+
+    let today = a.today();
+    let on_today = a.agenda(today.clone()).unwrap();
+    assert!(
+        on_today.iter().any(|e| !e.all_day && !e.due),
+        "something happening right now is on today's agenda, whatever hour this \
+         runs at — today={today}, got {on_today:?}",
+    );
+}

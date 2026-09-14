@@ -31,6 +31,8 @@ fn main() {
             ipc::search,
             ipc::names,
             ipc::mentioning,
+            ipc::list,
+            ipc::tick_item,
             ipc::tagged,
             ipc::wiki_index,
             ipc::set_parent,
