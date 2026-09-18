@@ -63,9 +63,64 @@ fn look(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
             continue;
         }
 
-        notifier::notify("brain", &i.then_do);
-        notifier::mark_fired(paths, &i.id, now.max(0) as u64)?;
+        if notifier::notify("brain", &i.then_do) {
+            notifier::mark_fired(paths, &i.id, now.max(0) as u64)?;
+        }
         tracing::info!(cue = %i.cue_type, "an intent fired");
+    }
+
+    alerts(paths, now)?;
+    Ok(())
+}
+
+/// The moments captures named, rather than the plans somebody wrote.
+///
+/// An intent is a deliberate if-then; this is the ordinary case — `dentist
+/// thursday 2pm` promoted to an event with a time. §3.1 makes the type a
+/// promotion rather than a choice, and an alert that had to be armed
+/// separately would put the second decision back that §2.1 spent the whole
+/// capture gesture avoiding.
+///
+/// Subject to the same budget as everything else (§2.6). The decision belongs
+/// to `notifier::deliver` rather than here, so the desktop and the phone
+/// cannot come to different conclusions about what hour it is safe to speak.
+fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
+    use capture_store::notifier::{Delivery, deliver};
+
+    let zone_name = local_zone();
+    let Some(zone) = capture_time::Zone::new(&zone_name) else {
+        return Ok(());
+    };
+    let hour = capture_time::civil_clock(now, zone).0;
+
+    let generation = capture_store::ops::Ops::open_read(&paths.ops)?.generation()?;
+    let state = capture_store::projection::Store::open_read(
+        &capture_store::projection::generation_path(&paths.state, generation),
+    )?;
+    let ops = capture_store::ops::Ops::open(&paths.ops)?;
+
+    for d in state.due_by(now, &zone_name)? {
+        if ops.alerted(&d.tgt.0, d.occ)? {
+            continue;
+        }
+        // Held, not dropped. Nothing is marked, so it is still due when the
+        // hour comes round.
+        if deliver(hour, d.timed, false) != Delivery::Now {
+            continue;
+        }
+
+        // Late is said rather than hidden. A machine that was off through an
+        // afternoon should say the afternoon happened.
+        let late = now.saturating_sub(d.at) > 5 * 60 * 1000;
+        let said = if late {
+            format!("{} (was due earlier)", d.text)
+        } else {
+            d.text.clone()
+        };
+        if notifier::notify("capture", &said) {
+            ops.mark_alerted(&d.tgt.0, d.occ, now.max(0) as u64)?;
+        }
+        tracing::info!("an alert fired");
     }
 
     Ok(())
@@ -90,6 +145,26 @@ fn current_branch() -> Option<String> {
             return None;
         }
     }
+}
+
+/// The zone this machine is in, by name.
+///
+/// The same reading the command line does. `TZ` where it is set, otherwise
+/// what `/etc/localtime` points at — there is no portable call for this and a
+/// wrong answer here moves quiet hours by the offset, which is the difference
+/// between a notification at 07:00 and one at 02:00.
+fn local_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                p.to_str()
+                    .and_then(|s| s.split("zoneinfo/").nth(1))
+                    .map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "UTC".into())
 }
 
 #[cfg(test)]

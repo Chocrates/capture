@@ -38,9 +38,9 @@ use minicbor::{Decode, Encode};
 
 use crate::{
     body::{
-        AliasBody, CaptureBody, EditBody, MuteBody, MuteScope, OccBody, OccEditBody, OccMoveBody,
-        Outcome, ParentBody, PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody,
-        ReviewBody, SettingBody, TagBody, UntagBody,
+        AliasBody, CaptureBody, EditBody, ItemBody, MuteBody, MuteScope, OccBody, OccEditBody,
+        OccMoveBody, Outcome, ParentBody, PinBody, PromoteBody, RedactBody, RedactCancelBody,
+        ResolveBody, ReviewBody, SettingBody, TagBody, UntagBody,
     },
     envelope::Envelope,
     event::Kind,
@@ -247,6 +247,13 @@ pub struct Note {
     /// schedule moved would be a completion silently lost.
     #[n(21)]
     pub occurrences: BTreeMap<i64, OccState>,
+    /// Which items of this capture's list have been ticked off, by their text.
+    ///
+    /// A map rather than a set, so that un-ticking is expressible. A pure set
+    /// with removal could not survive two devices disagreeing — the same
+    /// argument `occ_undone` is written under (§6).
+    #[n(25)]
+    pub items: BTreeMap<String, bool>,
     /// Independent versions the fold could not order by causality.
     #[n(11)]
     pub divergences: Vec<Divergence>,
@@ -575,6 +582,8 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
             Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
             Kind::OCC_DONE => apply_occ(&mut proj, e, |o| o.done = true),
+            Kind::ITEM_DONE => apply_item(&mut proj, e, true),
+            Kind::ITEM_UNDONE => apply_item(&mut proj, e, false),
             Kind::OCC_UNDONE => apply_occ(&mut proj, e, |o| o.done = false),
             Kind::INTENT => apply_intent(&mut proj, e),
             Kind::ALIAS => apply_alias(&mut proj, &mut names, e),
@@ -720,6 +729,7 @@ fn apply_capture(
             promotion: None,
             review: ReviewState::default(),
             occurrences: BTreeMap::new(),
+            items: BTreeMap::new(),
             muted_until: None,
             redacted_at: None,
             redaction_pending: None,
@@ -1225,6 +1235,32 @@ fn apply_occ(proj: &mut Projection, e: &Envelope, set: impl Fn(&mut OccState)) {
     };
     if let Some(n) = proj.notes.get_mut(&tgt) {
         set(n.occurrences.entry(o.occ).or_default());
+    }
+}
+
+/// Tick one item of a list capture off, or put it back.
+///
+/// The list's twin of [`apply_occ`], and deliberately the same shape. An item
+/// is a projection row expanded from this capture's text; what is recorded
+/// here is a fact about that capture, and nothing new is created.
+///
+/// The item is not checked against the capture's current text. A list edited
+/// to drop an item leaves the tick recorded against a name nothing expands
+/// any more, which is inert — and the alternative, discarding it, would mean
+/// an edit destroyed a record of something that actually happened. Restoring
+/// the item restores the tick, which is the behaviour somebody who edited by
+/// mistake would want.
+fn apply_item(proj: &mut Projection, e: &Envelope, done: bool) {
+    let Some(tgt) = e.header.tgt else { return };
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(i) = minicbor::decode::<ItemBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(n) = proj.notes.get_mut(&tgt) {
+        // Set, not counted: ticking twice is ticking once, and events arrive
+        // in timestamp order so the later word wins.
+        n.items.insert(i.item, done);
     }
 }
 

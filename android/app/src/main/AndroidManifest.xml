@@ -37,6 +37,26 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+      Alarms, for the moments a capture named.
+
+      SCHEDULE_EXACT_ALARM is granted in Settings from Android 13 rather than
+      by a prompt, and is asked for only when something time-critical is first
+      scheduled. Where it is refused the alarm falls back to inexact — "around
+      2pm" rather than 2pm — and the health surface says so, because a cue
+      firing at the wrong time is worse than one admitting it cannot be sure.
+
+      USE_EXACT_ALARM is deliberately *not* requested. It is granted without
+      asking, and is meant for alarm clocks and calendars whose entire purpose
+      is exact timing; claiming it here would be taking by assertion what the
+      other one asks for.
+
+      RECEIVE_BOOT_COMPLETED because alarms do not survive a restart. A phone
+      that rebooted overnight would otherwise stop alerting and give no sign.
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".App"
         android:label="capture"
@@ -73,7 +93,7 @@
         <activity
             android:name=".CaptureActivity"
             android:exported="true"
-            android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar"
+            android:theme="@style/CaptureDialog"
             android:excludeFromRecents="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
@@ -186,6 +206,27 @@
         <receiver
             android:name=".Arrival"
             android:exported="false" />
+
+        <!--
+          The alarm arriving. Exported false: the only sender that matters is
+          the platform, and an exported receiver here would let any application
+          make this phone announce somebody's notes.
+        -->
+        <receiver
+            android:name=".Ring"
+            android:exported="false" />
+
+        <!--
+          A restart. Exported false for the same reason; the boot broadcast is
+          delivered to the package regardless.
+        -->
+        <receiver
+            android:name=".Restarted"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

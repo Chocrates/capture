@@ -65,6 +65,9 @@ pub enum Command {
         tag: String,
         json: bool,
     },
+    Due {
+        json: bool,
+    },
     Tick {
         tag: String,
         item: String,
@@ -506,6 +509,19 @@ where
         // `capture list groceries`. The tag without its sigil, because a
         // leading `#` is a comment to most shells and quoting it is a thing to
         // remember at exactly the wrong moment.
+        // `capture due`. What would fire, and when — without firing it.
+        //
+        // The answer to "why did nothing happen", which is the question this
+        // feature generates more than any other. A surface that could only be
+        // checked by waiting for it is one nobody can debug.
+        "due" => match &args[1..] {
+            [] => Ok(Command::Due { json: false }),
+            [f] if f == "--json" => Ok(Command::Due { json: true }),
+            [extra, ..] => Err(Bad::UnknownFlag {
+                command: "due".into(),
+                flag: extra.clone(),
+            }),
+        },
         "list" => one_name(&args[1..], "list", |tag, json| Command::List {
             tag: tag.trim_start_matches('#').to_string(),
             json,
@@ -1012,6 +1028,7 @@ TIME AND TASKS
   capture agenda [day]           what is due and what occurs, default today
   capture tasks                  open tasks, newest first
   capture list <tag>             a list: its items, and what is left
+  capture due                    what will speak, and when
   capture tick <tag> <item>      tick one off; untick puts it back
   capture mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)

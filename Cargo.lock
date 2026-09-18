@@ -790,8 +790,10 @@ dependencies = [
  "capture-parse",
  "capture-store",
  "capture-time",
+ "ed25519-dalek",
  "jiff",
  "minicbor",
+ "rusqlite",
  "thiserror 2.0.20",
  "uniffi",
 ]
@@ -803,6 +805,7 @@ dependencies = [
  "capture-core",
  "capture-parse",
  "capture-store",
+ "capture-time",
  "eframe",
  "jiff",
  "tracing",

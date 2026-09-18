@@ -676,6 +676,28 @@ pub struct OccBody {
     pub occ: i64,
 }
 
+/// One item of a list, named. Used by done and undone, which need nothing
+/// beyond which item they mean.
+///
+/// Named by **text** rather than by position, which is the whole of the
+/// design. Inserting an item moves every item after it, so a completion bound
+/// to an index would silently move to a different item the first time somebody
+/// edited a list — the same failure `OccBody` avoids by naming an occurrence
+/// with the instant its rule would have produced rather than its index (§3.5).
+///
+/// The cost, stated because it is real: two items on one list reading the same
+/// text cannot be told apart. The surfaces refuse to guess rather than picking
+/// one.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct ItemBody {
+    /// Hiding salt.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub nonce: [u8; 16],
+    /// Which item, by the text written for it.
+    #[n(1)]
+    pub item: String,
+}
+
 /// Where a page sits in the wiki tree.
 ///
 /// # The one hand-maintained structure here

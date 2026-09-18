@@ -80,7 +80,13 @@ mod look {
     /// otherwise ignored.
     pub const FAINT: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x6E);
     /// The sigil characters themselves, the one place colour is spent.
-    pub const SIGIL: Color32 = Color32::from_rgb(0x7C, 0xA8, 0xD8);
+    ///
+    /// The purple the other surfaces wear. §8.10 freezes the *gesture* — the
+    /// chord, the field, the commit key, what it costs — and none of that is
+    /// touched here; what changes is which colour the one coloured thing is,
+    /// so that three windows onto one archive stop looking like three
+    /// applications.
+    pub const SIGIL: Color32 = Color32::from_rgb(0xD0, 0xBC, 0xFF);
     /// The dots between the shapes — separators, not content.
     pub const DIVIDER: Color32 = Color32::from_rgb(0x4A, 0x4A, 0x4A);
 

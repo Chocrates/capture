@@ -8,6 +8,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
@@ -36,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.capture_ffi.Captured
+import uniffi.capture_ffi.Vocabulary
 
 /**
  * Type something and commit it.
@@ -123,9 +127,14 @@ class CaptureActivity : ComponentActivity() {
         }
 
         setContent {
-            MaterialTheme {
+            CaptureTheme {
                 Surface {
                     CaptureField(
+                        // Asked once, at the moment the window is built. The
+                        // vocabulary is constant for the life of a build, so
+                        // re-reading it per frame would be a database call on
+                        // the path §2.1 says must cost nothing.
+                        vocabulary = remember { Store.of(this).vocabulary() },
                         onCommit = { text -> commit(text) },
                         onDismiss = { finish() },
                         onHold = { held() },
@@ -239,6 +248,13 @@ class CaptureActivity : ComponentActivity() {
                 Toast.short(this@CaptureActivity, "Saved. It will be filed when the store is writable.")
             }
             cost(surface, decided)
+
+            // The moment this capture may have just named. Without it, a
+            // thought written at 13:58 for 14:00 would wait for the next time
+            // the application was opened — which is the one thing somebody
+            // capturing a reminder is trying to avoid doing.
+            runCatching { Alarms.rearm(this@CaptureActivity) }
+
             finish()
         }
     }
@@ -246,6 +262,7 @@ class CaptureActivity : ComponentActivity() {
 
 @Composable
 private fun CaptureField(
+    vocabulary: Vocabulary,
     onCommit: (String) -> Unit,
     onDismiss: () -> Unit,
     onHold: () -> Unit,
@@ -278,6 +295,8 @@ private fun CaptureField(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { onCommit(text) }),
         )
+        Hints(vocabulary)
+
         Button(onClick = { onCommit(text) }, modifier = Modifier.fillMaxWidth()) {
             Text("Capture")
         }
@@ -329,4 +348,57 @@ private fun CaptureField(
 
     androidx.compose.runtime.LaunchedEffect(Unit) { focus.requestFocus() }
     androidx.activity.compose.BackHandler { onDismiss() }
+}
+
+/**
+ * What can be written, under the field that writes it.
+ *
+ * The desktop overlay has had this since M1 and the phone never has, which
+ * means the markers §3.1.1 calls "discovered by seeing them" were discoverable
+ * on one device and invisible on the one most captures arrive from.
+ *
+ * A glance, not a lesson: each marker with one example of what follows it, and
+ * a row of shapes the grammar reads. None of it has to be used for a capture
+ * to work, and nothing here is a syntax somebody has to learn — §3.1.1 settles
+ * that the input language is English. Somebody reading `friday 2pm` learns how
+ * to write a date here without being told there is a rule.
+ *
+ * Read from the archive rather than written out in Kotlin. A copy on the
+ * surface would drift from the vocabulary the recognizer actually uses, and
+ * the drift would show as a hint offering something that stopped working.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Hints(vocabulary: Vocabulary) {
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        for (m in vocabulary.markers) {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    m.sigil,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    m.example,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        for (shape in vocabulary.shapes) {
+            Text(
+                shape,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
 }

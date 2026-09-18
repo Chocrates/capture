@@ -504,6 +504,20 @@ pub const BANDS: &[(&str, &str)] = &[
 /// grammar in the module docs.
 pub const SHAPES: &[&str] = &["friday 2pm", "every weekday at 7", "aug 1-14", "in 3 weeks"];
 
+/// The list form, as one example.
+///
+/// Kept out of [`SHAPES`] rather than added to it, because that table is tier
+/// 2 — every word in it is in a vocabulary table, and a test asserts exactly
+/// that so an example can never show somebody a shape the grammar does not
+/// know. A list is tier 1: a sigil and punctuation, with arbitrary words after
+/// it, so it fails that test while being entirely valid.
+///
+/// Shown anyway, because a form nobody can see is a form nobody uses. §3.1.1
+/// makes the sigils "discovered by seeing them", and this is the one that
+/// cannot be discovered from the sigil row alone — `#` there means "file it
+/// under something", which is true and says nothing about what a colon does.
+pub const LIST_SHAPE: &str = "#tag: one, two, three";
+
 /// The people and projects a capture names.
 ///
 /// `@sarah`, `^acme-migration` — the sigils that denote something with a page

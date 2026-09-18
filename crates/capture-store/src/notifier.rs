@@ -104,7 +104,43 @@ const ANDROID: bool = cfg!(target_os = "android");
 /// Best-effort and deliberately not a dependency: a notification that fails is
 /// worth a log line, and a missing notification daemon must not stop the
 /// process that noticed the cue.
-pub fn notify(summary: &str, body: &str) {
+///
+/// **Returns whether it was actually said**, and the return is load-bearing.
+/// A caller that records a delivery which did not happen spends the moment on
+/// a notification nobody could have heard — and because delivery happens once,
+/// the moment is then gone. That failure arrived twice while this was being
+/// built: first on Android, where posting to a blocked channel succeeds
+/// silently, and then here, where `notify-send` does not exist at all and this
+/// function returned nothing to say so.
+#[must_use]
+pub fn notify(summary: &str, body: &str) -> bool {
+    // A way to run the system without it talking.
+    //
+    // Added because alerts now fire from every process startup (§2.6's floor),
+    // which includes every test that opens a session against a store holding
+    // a dated capture — so `make ci` began posting real notifications to
+    // whoever was running it. A suite that interrupts the person running it is
+    // one they stop running.
+    //
+    // An environment variable rather than a setting: it is about this
+    // *process*, not about the archive, and §8.9 keeps machine-made choices
+    // out of the log. Also useful for a machine that should hold an archive
+    // and stay silent — a server, a backup, a second desktop.
+    if std::env::var_os("CAPTURE_SILENT").is_some() {
+        tracing::debug!(summary, "an alert fired; CAPTURE_SILENT is set");
+        // Not said, so not spent. A silent run must not consume the moments it
+        // silently did not announce.
+        return false;
+    }
+
+    // There is no `notify-send` on a phone, and the surface there delivers
+    // through the platform's own notification manager. Saying so rather than
+    // discovering it: this returned "delivered" for every alert on Android,
+    // which marked them spoken for before the surface ever looked.
+    if ANDROID {
+        return false;
+    }
+
     let sent = std::process::Command::new("notify-send")
         .args(["--app-name=capture", summary, body])
         .status()
@@ -116,6 +152,97 @@ pub fn notify(summary: &str, body: &str) {
         // delivered is exactly the thing somebody needs to be able to find out
         // about afterwards.
         tracing::warn!(summary, body, "an intent fired and could not be delivered");
+    }
+    sent
+}
+
+/// The zone this machine is in, by name.
+///
+/// `TZ` where it is set, otherwise what `/etc/localtime` points at. There is
+/// no portable call for this, and a wrong answer moves quiet hours by the
+/// offset — which is the difference between a notification at 07:00 and one
+/// at 02:00.
+pub fn local_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                p.to_str()
+                    .and_then(|s| s.split("zoneinfo/").nth(1))
+                    .map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "UTC".into())
+}
+
+/// When the day goes quiet, and when it comes back. Local hours.
+///
+/// A rule, not a setting. §8.9 forbids writing a default to the log on the
+/// user's behalf, and the whole of this module is built around that: until
+/// somebody chooses quiet hours, these are evaluated locally, written nowhere,
+/// and reported as a default rather than as a choice.
+pub const QUIET_FROM: u32 = 22;
+pub const QUIET_UNTIL: u32 = 7;
+
+/// The three deliveries a day §2.6 chose, in local hours.
+///
+/// `EVIDENCE.md` §2.5: a fourteen-day field experiment found batching into
+/// three daily deliveries made people happier and less stressed, mediated by
+/// improved subjective attention quality — as the *default regime*, not as an
+/// overflow behaviour. The hours are morning, mid-afternoon and evening, all
+/// outside quiet hours by construction.
+pub const BATCHES: [u32; 3] = [9, 14, 19];
+
+/// What to do with something that has come due.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Delivery {
+    /// Say it now. A moment was named and it has arrived.
+    Now,
+    /// Hold it until the given local hour.
+    ///
+    /// Carries the hour rather than an instant because the caller knows what
+    /// day it is and this does not — and because a decision that returned an
+    /// instant would need a clock, which §8.1 keeps out of this crate.
+    At(u32),
+}
+
+/// Decide when something due may actually be said.
+///
+/// # The two rules, and which wins
+///
+/// **Time-critical is immediate.** §2.6 splits immediate from batched with
+/// examples rather than a rule — "an alarm, a meeting starting". The rule here
+/// is that a capture which named a *time of day* meant that time; one that
+/// named only a day did not mean midnight.
+///
+/// **Quiet hours hold everything except an armed moment.** Somebody who set an
+/// alarm for 6am meant 6am, and a system that decided it knew better would be
+/// useless for the one thing an alarm is for. Everything else waits for
+/// morning: §2.6 puts anxiety on the ledger, and a notification at 3am spends
+/// from it at the worst possible rate.
+///
+/// `armed` distinguishes a moment somebody set deliberately from one inferred
+/// by the recognizer. `dentist thursday 2pm` at 2am is almost certainly a
+/// misparse; `capture intent at 02:00` is not.
+pub fn deliver(hour: u32, timed: bool, armed: bool) -> Delivery {
+    // The waking day is the half-open range; quiet is everything else.
+    let quiet = !(QUIET_UNTIL..QUIET_FROM).contains(&hour);
+
+    if quiet && !armed {
+        return Delivery::At(QUIET_UNTIL);
+    }
+    if timed {
+        return Delivery::Now;
+    }
+
+    // Not time-critical: it joins the next delivery. The next one *today* —
+    // an hour that has already passed today would mean "yesterday", and
+    // returning the first batch of tomorrow is the caller's job to work out
+    // from the hour it gets back.
+    match BATCHES.iter().find(|&&b| b > hour) {
+        Some(&b) => Delivery::At(b),
+        None => Delivery::At(BATCHES[0]),
     }
 }
 
@@ -167,6 +294,87 @@ pub fn already_fired(paths: &StorePaths, id: &[u8]) -> Result<bool> {
 pub fn mark_fired(paths: &StorePaths, id: &[u8], now: u64) -> Result<()> {
     let ops = crate::ops::Ops::open(&paths.ops)?;
     ops.mark_intent_fired(id, now)
+}
+
+#[cfg(test)]
+mod budget {
+    use super::*;
+
+    #[test]
+    fn a_named_time_is_immediate() {
+        // "a meeting starting" — §2.6's own example of the immediate case.
+        assert_eq!(deliver(14, true, false), Delivery::Now);
+    }
+
+    #[test]
+    fn a_day_without_a_time_joins_the_next_batch() {
+        // `call the dentist tomorrow` names a day. Delivering it at 00:00
+        // would obey the letter of a due date and miss what was meant.
+        assert_eq!(deliver(10, false, false), Delivery::At(14));
+        assert_eq!(deliver(15, false, false), Delivery::At(19));
+    }
+
+    #[test]
+    fn after_the_last_batch_it_waits_for_the_first() {
+        assert_eq!(deliver(20, false, true), Delivery::At(BATCHES[0]));
+    }
+
+    #[test]
+    fn quiet_hours_hold_everything_unarmed() {
+        for hour in [22, 23, 0, 3, 6] {
+            assert_eq!(
+                deliver(hour, true, false),
+                Delivery::At(QUIET_UNTIL),
+                "a timed alert at {hour}:00 still waits for morning",
+            );
+            assert_eq!(deliver(hour, false, false), Delivery::At(QUIET_UNTIL));
+        }
+    }
+
+    #[test]
+    fn an_armed_moment_overrides_quiet_hours() {
+        // Somebody who set an alarm for 6am meant 6am. A system that decided
+        // it knew better would be useless for the one thing an alarm is for.
+        assert_eq!(deliver(6, true, true), Delivery::Now);
+        assert_eq!(deliver(23, true, true), Delivery::Now);
+    }
+
+    #[test]
+    fn the_boundaries_are_where_they_are_written() {
+        assert_eq!(
+            deliver(21, true, false),
+            Delivery::Now,
+            "21:00 is not quiet"
+        );
+        assert_eq!(deliver(22, true, false), Delivery::At(QUIET_UNTIL));
+        assert_eq!(deliver(7, true, false), Delivery::Now, "07:00 is morning");
+    }
+
+    #[test]
+    fn every_batch_is_outside_quiet_hours() {
+        // Otherwise a held alert would be released into the hours it was held
+        // out of, which is the loop this pair of rules must not contain.
+        for b in BATCHES {
+            assert!(
+                (QUIET_UNTIL..QUIET_FROM).contains(&b),
+                "batch at {b}:00 is in quiet hours"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_is_always_reachable() {
+        // No hour of the day may produce a hold that never comes.
+        for hour in 0..24 {
+            for timed in [true, false] {
+                for armed in [true, false] {
+                    if let Delivery::At(h) = deliver(hour, timed, armed) {
+                        assert!(h < 24, "held until {h}:00, which is not an hour");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

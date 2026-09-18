@@ -17,6 +17,9 @@ path = "src/main.rs"
 capture-core = { path = "../../crates/capture-core", features = ["std"] }
 capture-parse = { path = "../../crates/capture-parse" }
 capture-store = { path = "../../crates/capture-store" }
+# To turn "now" into a local hour, which is what the notification budget's
+# quiet hours and batch windows are stated in (§2.6).
+capture-time = { path = "../../crates/capture-time" }
 eframe = { workspace = true }
 jiff = { workspace = true }
 tracing = { workspace = true }

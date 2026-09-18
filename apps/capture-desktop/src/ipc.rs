@@ -49,6 +49,18 @@ pub struct Note {
     pub redacted: bool,
     pub redacted_ms: Option<u64>,
     pub divergences: u64,
+    /// What this capture is, as the projection reads it.
+    pub kind: String,
+    /// The projection's rendering of the fields. Empty for an ordinary note,
+    /// whose content is its text.
+    ///
+    /// Taken from the projection rather than formatted here. A window that
+    /// composed its own description of the same fields would be a second
+    /// rendering, and it would disagree with the phone's invisibly — each
+    /// correct on its own screen.
+    pub descriptor: String,
+    /// The items this capture names, where it is a list.
+    pub items: Vec<ListLine>,
     /// Which of the four states the row renders as.
     ///
     /// Decided here rather than in the page, so every surface agrees about what
@@ -94,9 +106,45 @@ impl From<NoteRow> for Note {
             redacted: n.redacted_at.is_some(),
             redacted_ms: n.redacted_at,
             divergences: n.divergences,
+            kind: "note".into(),
+            descriptor: String::new(),
+            items: Vec::new(),
             state,
         }
     }
+}
+
+/// A note, completed from the projection it came out of.
+///
+/// `From<NoteRow>` cannot do this — it has no store to ask — so every call
+/// site that has one goes through here instead. One function rather than one
+/// per site, for the reason the descriptor lives in the projection at all: two
+/// readings of one note that can disagree will eventually disagree, and each
+/// will look right on its own screen.
+fn rendered(s: &Store, n: NoteRow) -> Result<Note> {
+    let tgt = n.tgt;
+    let mut out = Note::from(n);
+
+    if let Some(p) = s.promotion_of(&tgt)? {
+        out.kind = p.kind;
+        out.descriptor = p.descriptor;
+    }
+
+    if s.list_tag_of(&tgt)?.is_some() {
+        // This capture's own items, by one indexed query. The tag-wide view
+        // answers the wider question and is a different call — asking it per
+        // row costs a full tag gather per row.
+        out.items = s
+            .items_of(&tgt)?
+            .into_iter()
+            .map(|e| ListLine {
+                text: e.text,
+                done: e.done,
+                ord: e.ord,
+            })
+            .collect();
+    }
+    Ok(out)
 }
 
 /// A link, with enough to render it broken.
@@ -351,7 +399,10 @@ fn wire<T>(r: Result<T>) -> std::result::Result<T, String> {
 pub fn timeline(limit: usize) -> std::result::Result<Vec<Note>, String> {
     wire((|| {
         let s = read_only()?;
-        Ok(s.timeline(limit)?.into_iter().map(Note::from).collect())
+        s.timeline(limit)?
+            .into_iter()
+            .map(|n| rendered(&s, n))
+            .collect()
     })())
 }
 
@@ -449,7 +500,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
         };
 
         Ok(Page {
-            note: Note::from(row),
+            note: rendered(&s, row)?,
             body,
             links,
             backlinks,
@@ -532,10 +583,10 @@ pub fn mentioning(sigil: String, value: String) -> std::result::Result<Vec<Note>
             .next()
             .ok_or_else(|| Error::Usage("a mention needs its sigil".into()))?;
         let s = read_only()?;
-        Ok(s.mentioning(c, &value, now_ms())?
+        s.mentioning(c, &value, now_ms())?
             .into_iter()
-            .map(Note::from)
-            .collect())
+            .map(|n| rendered(&s, n))
+            .collect()
     })())
 }
 
@@ -548,10 +599,10 @@ pub fn mentioning(sigil: String, value: String) -> std::result::Result<Vec<Note>
 pub fn tagged(tag: String) -> std::result::Result<Vec<Note>, String> {
     wire((|| {
         let s = read_only()?;
-        Ok(s.tagged(&tag, now_ms())?
+        s.tagged(&tag, now_ms())?
             .into_iter()
-            .map(Note::from)
-            .collect())
+            .map(|n| rendered(&s, n))
+            .collect()
     })())
 }
 
@@ -1072,10 +1123,10 @@ pub fn ambient(name: String) -> std::result::Result<Vec<(String, String)>, Strin
 pub fn filter_by_context(field: String, value: String) -> std::result::Result<Vec<Note>, String> {
     wire((|| {
         let s = read_only()?;
-        Ok(s.by_context(&field, &value)?
+        s.by_context(&field, &value)?
             .into_iter()
-            .map(Note::from)
-            .collect())
+            .map(|n| rendered(&s, n))
+            .collect()
     })())
 }
 

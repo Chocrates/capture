@@ -757,118 +757,73 @@ pub enum Ticked {
 
 /// Tick an item off a list, or put it back.
 ///
-/// # Why this writes a task rather than a flag
+/// # Why this appends an event and mints nothing
 ///
-/// An expanded item has no identity in the log — it is derived from its list
-/// capture's text and its position in it (§Decisions in the change's design
-/// note). Storing completion against that position would mean editing a list
-/// silently moved the ticks: change `#groceries: milk, eggs` to `#groceries:
-/// oat milk, eggs` and everything after the edit shifts by one.
+/// An item is a projection row expanded from its list capture's text, exactly
+/// as an occurrence is expanded from a recurring rule. Completing one is a
+/// fact *about* that capture, so it is recorded the way completing an
+/// occurrence is: an event naming what it is about, and nothing new in the
+/// archive.
 ///
-/// So completion is not stored against the item at all. Ticking captures the
-/// item as a note of its own, tags it with the list, promotes it to a task and
-/// marks that task done — ordinary events, in the log, with a time on them.
-/// The projection matches the item back to its task by `(tag, text)`.
+/// The first version of this promoted the item to a task instead, which meant
+/// ticking off the shopping created a capture called `milk` that nobody wrote.
+/// A week of it would have filled the timeline with groceries.
 ///
-/// That buys three things at once: completion survives a rebuild because it is
-/// not derived; it survives an *edit* of the list because it was never bound to
-/// a position; and "bought the milk" becomes a fact with a timestamp rather
-/// than a row that vanished, which is most of why a list is worth keeping.
+/// # Why the item is named by its text
 ///
-/// It costs one thing, and the cost is real: two items reading the same text
-/// are indistinguishable, so ticking either is refused rather than guessed at.
-/// `now` is passed in rather than read here. §8.1 keeps clocks outside this
-/// crate: the store folds the same events into the same answer on every
-/// device, and a function that consulted a clock would stop being a function of
-/// its inputs. The only use for it is the mute horizon a list is read against.
+/// Positions shift. Editing `#groceries: milk, eggs` into `#groceries: oat
+/// milk, eggs` moves everything after the edit, and a tick bound to an index
+/// would move with it — silently, onto a different item. Naming by text is the
+/// same choice `OccBody` makes in naming an occurrence by the instant its rule
+/// would have produced rather than by its index (§3.5).
+///
+/// The cost is real and is refused rather than guessed at: two items on one
+/// list reading the same text cannot be told apart.
 pub fn tick(paths: &StorePaths, tag: &str, item: &str, done: bool, now: u64) -> Result<Ticked> {
     let item = item.trim();
 
-    // What the list already knows about this text, read before anything is
-    // written. Both answers below are refusals, and a refusal that had already
-    // captured a note would leave the list holding a note nobody asked for.
-    let (on_list, existing) = {
+    // What the list knows, read before anything is written. Both answers below
+    // are refusals, and a refusal that had already appended an event would
+    // leave a record of something that did not happen.
+    let (on_list, target, already) = {
         let store = reading(paths)?;
         let count = store.list_item_count(tag, item)?;
-        let existing = store
-            .list(tag, now)?
-            .into_iter()
-            .find(|e| e.text == item)
-            .and_then(|e| e.task);
-        (count, existing)
+        let found = store.list(tag, now)?.into_iter().find(|e| e.text == item);
+        (count, found.as_ref().map(|e| e.tgt), found.map(|e| e.done))
     };
 
     if on_list > 1 {
         return Ok(Ticked::Ambiguous(on_list));
     }
-
-    if let Some(task) = existing {
-        // Already a note of its own. Reuse it rather than capturing a second —
-        // ticking twice must leave one task, not a pile of them.
-        let name = match reading(paths)?.note(&task)? {
-            Some(n) => n.slug,
-            None => return Ok(Ticked::NoSuchItem),
-        };
-        if state_of(paths, &name)? == Some(done) {
-            return Ok(Ticked::Already);
-        }
-        as_task_if_needed(paths, &name)?;
-        set_done(paths, &name, done)?;
-        return Ok(Ticked::Done);
-    }
-
-    // Nothing in the log about this item yet.
-    if on_list == 0 {
+    let (Some(tgt), Some(was)) = (target, already) else {
         return Ok(Ticked::NoSuchItem);
-    }
-
-    // Un-ticking something never ticked is not an error and not a write.
-    // There is no promotion to reverse, and capturing a note in order to
-    // immediately mark it open would put a note in the archive to record that
-    // nothing happened.
-    if !done {
+    };
+    if was == done {
         return Ok(Ticked::Already);
     }
 
-    let slug = match crate::session::capture(paths, item)? {
-        crate::session::Committed::Stored(slug) => slug,
-        // Spooled means the store could not be opened, so the tag and the
-        // promotion that follow could not be written either. The item is safe
-        // and will be folded later; what it will not be is ticked.
-        crate::session::Committed::Spooled => return Ok(Ticked::NoSuchItem),
+    let mut s = crate::session::Session::open(paths.clone())?;
+    let kind = if done {
+        capture_core::event::Kind::ITEM_DONE
+    } else {
+        capture_core::event::Kind::ITEM_UNDONE
     };
+    s.append(kind, Some(tgt), None, |nonce| {
+        minicbor::to_vec(capture_core::body::ItemBody {
+            nonce,
+            item: item.to_string(),
+        })
+        .expect("encoding into a Vec is infallible")
+    })?;
 
-    crate::mutate::tag(paths, &slug, tag)?;
-    as_task(paths, &slug, None)?;
-    set_done(paths, &slug, done)?;
     Ok(Ticked::Done)
 }
 
 /// The current generation, read-only. The same three lines `set_done` opens
-/// with, named once because `tick` needs them four times.
+/// with, named once because `tick` needs them twice.
 fn reading(paths: &StorePaths) -> Result<crate::projection::Store> {
     crate::projection::Store::open_read(&crate::projection::generation_path(
         &paths.state,
         crate::ops::Ops::open_read(&paths.ops)?.generation()?,
     ))
-}
-
-/// Whether a note is a task, and its state.
-fn state_of(paths: &StorePaths, name: &str) -> Result<Option<bool>> {
-    let store = reading(paths)?;
-    let Some(note) = store.resolve(name)? else {
-        return Ok(None);
-    };
-    store.task_done(&note)
-}
-
-/// Promote to a task only where it is not one already.
-///
-/// `as_task` would otherwise replace the fields, discarding a due date somebody
-/// had set on an item they later ticked.
-fn as_task_if_needed(paths: &StorePaths, name: &str) -> Result<()> {
-    if state_of(paths, name)?.is_none() {
-        as_task(paths, name, None)?;
-    }
-    Ok(())
 }

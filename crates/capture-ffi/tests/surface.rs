@@ -895,3 +895,300 @@ fn the_agenda_reads_the_day_it_was_asked_about() {
          runs at — today={today}, got {on_today:?}",
     );
 }
+
+/// Two queries, one answer.
+///
+/// The timeline and the note page are separate reads, and the argument for
+/// keeping a promotion's rendering in the projection rather than composing it
+/// per surface is that two readings of one note must not disagree. They would
+/// the first time somebody fixed one call site and forgot the other, and the
+/// disagreement would be invisible — each screen looks correct on its own.
+#[test]
+fn a_note_reads_the_same_through_the_timeline_and_on_its_own() {
+    let root = scratch("one-answer");
+    let a = Archive::open(root.clone()).unwrap();
+
+    for text in [
+        "an ordinary thought",
+        "#groceries: milk, eggs, bread",
+        "call the dentist tomorrow",
+    ] {
+        match a.capture(text.into()).unwrap() {
+            Captured::Stored { .. } => {}
+            Captured::Spooled => panic!("spooled"),
+        }
+    }
+    a.settle().unwrap();
+
+    for row in a.timeline(50).unwrap() {
+        let alone = a.note(row.slug.clone()).unwrap();
+        assert_eq!(row.kind, alone.kind, "kind differs for {}", row.slug);
+        assert_eq!(
+            row.descriptor, alone.descriptor,
+            "descriptor differs for {}",
+            row.slug,
+        );
+        assert_eq!(
+            row.items.iter().map(|i| &i.text).collect::<Vec<_>>(),
+            alone.items.iter().map(|i| &i.text).collect::<Vec<_>>(),
+            "items differ for {}",
+            row.slug,
+        );
+        assert_eq!(
+            row.list_tag, alone.list_tag,
+            "list tag differs for {}",
+            row.slug
+        );
+    }
+}
+
+/// An ordinary note is not dressed up.
+#[test]
+fn a_capture_with_no_promotion_gets_no_invented_rendering() {
+    let root = scratch("no-invention");
+    let a = Archive::open(root.clone()).unwrap();
+
+    match a.capture("an ordinary thought".into()).unwrap() {
+        Captured::Stored { .. } => {}
+        Captured::Spooled => panic!("spooled"),
+    }
+    a.settle().unwrap();
+
+    let row = &a.timeline(10).unwrap()[0];
+    assert_eq!(row.text.as_deref(), Some("an ordinary thought"));
+    assert!(
+        row.descriptor.is_empty(),
+        "a note's content is its text; §3.1.3 forbids adding facts it did not \
+         contain, and \"untitled\" is one: {:?}",
+        row.descriptor,
+    );
+    assert!(row.items.is_empty(), "and it names nothing");
+}
+
+/// A list capture answers its own items, not the tag's.
+#[test]
+fn a_row_shows_its_own_items_and_not_the_tags() {
+    let root = scratch("own-items");
+    let a = Archive::open(root.clone()).unwrap();
+
+    for text in ["#groceries: milk, eggs", "#groceries: bread"] {
+        match a.capture(text.into()).unwrap() {
+            Captured::Stored { .. } => {}
+            Captured::Spooled => panic!("spooled"),
+        }
+    }
+    a.settle().unwrap();
+
+    for row in a.timeline(10).unwrap() {
+        let items: Vec<_> = row.items.iter().map(|i| i.text.as_str()).collect();
+        match row.text.as_deref() {
+            Some("#groceries: milk, eggs") => assert_eq!(items, ["milk", "eggs"]),
+            Some("#groceries: bread") => assert_eq!(items, ["bread"]),
+            other => panic!("unexpected row {other:?}"),
+        }
+    }
+
+    // The tag-wide view still answers the wider question.
+    assert_eq!(a.list("groceries".into()).unwrap().len(), 3);
+}
+
+/// An archive whose projection predates this build rebuilds itself on open.
+///
+/// This was found on a real phone, as a SQL error drawn across the timeline:
+/// `no such column: li.done`. The schema had gained a column, `CREATE TABLE IF
+/// NOT EXISTS` does nothing to a table that already exists — which
+/// `projection.rs` warns about twice — and the version bump that was supposed
+/// to force a rebuild was only acted on by `Session::open`. The phone's
+/// reading path opens the current generation directly and never opens a
+/// session, so a cold launch after an upgrade read the old shape.
+///
+/// Simulated by writing an older schema version into the projection's own
+/// metadata, which is exactly the state an upgrade leaves behind.
+#[test]
+fn a_projection_from_an_older_build_is_rebuilt_before_it_is_read() {
+    let root = scratch("stale-schema");
+
+    let slugs: Vec<String> = {
+        let a = Archive::open(root.clone()).unwrap();
+        ["an ordinary thought", "#groceries: milk, eggs"]
+            .into_iter()
+            .map(|t| match a.capture(t.into()).unwrap() {
+                Captured::Stored { slug } => slug,
+                Captured::Spooled => panic!("spooled"),
+            })
+            .collect()
+    };
+
+    // Age it. The generation on disk is now claiming a shape this build does
+    // not have.
+    {
+        let paths = capture_store::paths::StorePaths::under(std::path::Path::new(&root));
+        let g = capture_store::ops::Ops::open_read(&paths.ops)
+            .unwrap()
+            .generation()
+            .unwrap();
+        let conn =
+            rusqlite::Connection::open(capture_store::projection::generation_path(&paths.state, g))
+                .unwrap();
+        // The column has to actually go. Claiming an older version while the
+        // table still has every column is not the state an upgrade leaves
+        // behind — and a test written that way passes whether or not anything
+        // rebuilds, which is worse than no test.
+        conn.execute("ALTER TABLE list_items DROP COLUMN done", [])
+            .unwrap();
+        conn.execute("UPDATE meta SET v = '6' WHERE k = 'schema'", [])
+            .unwrap();
+    }
+
+    // Opening is the whole test: a read that throws has already failed the
+    // person holding the phone, whatever the next line does.
+    let a = Archive::open(root.clone()).unwrap();
+    let rows = a.timeline(10).expect("the timeline reads after an upgrade");
+    assert_eq!(rows.len(), slugs.len(), "and holds what was captured");
+
+    let list = a.list("groceries".into()).expect("and so does a list");
+    assert_eq!(
+        list.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+        ["milk", "eggs"],
+    );
+}
+
+/// What a timeline read costs now that every row carries its rendering.
+///
+/// Ignored, and run by hand: a timing assertion in CI measures whatever else
+/// the machine was doing. The number is the point, not a threshold — §2.1
+/// makes what capture costs the thing worth knowing, and reading is the other
+/// half of the same budget.
+///
+/// `cargo test -p capture-ffi --test surface -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, not an assertion"]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measuring how long a read takes is what a monotonic clock is for"
+)]
+fn what_a_timeline_read_costs() {
+    let root = scratch("cost");
+    let a = Archive::open(root.clone()).unwrap();
+
+    // A mix, because the cost is per row and differs by what a row holds: a
+    // list row asks the projection for its items and an ordinary note does
+    // not.
+    for i in 0..100 {
+        let text = match i % 4 {
+            0 => format!("#groceries: milk {i}, eggs, bread, coffee"),
+            1 => format!("call the dentist tomorrow about {i}"),
+            2 => format!("standup every weekday at 9 — {i}"),
+            _ => format!("an ordinary thought number {i}"),
+        };
+        match a.capture(text).unwrap() {
+            Captured::Stored { .. } => {}
+            Captured::Spooled => panic!("spooled"),
+        }
+    }
+    a.settle().unwrap();
+
+    // Warm, so this measures the read and not the first open of the database.
+    let _ = a.timeline(100).unwrap();
+
+    let runs = 20;
+    let began = std::time::Instant::now();
+    for _ in 0..runs {
+        let rows = a.timeline(100).unwrap();
+        assert_eq!(rows.len(), 100);
+    }
+    let each = began.elapsed() / runs;
+
+    let rows = a.timeline(100).unwrap();
+    let lists = rows.iter().filter(|r| !r.items.is_empty()).count();
+    let items: usize = rows.iter().map(|r| r.items.len()).sum();
+
+    println!("\n  100 rows, {lists} of them lists holding {items} items: {each:?} per read\n");
+}
+
+/// Retiring a device, and the guards that stop it being a way to lose one.
+///
+/// Reachable from the phone because the phone may be the only device left.
+/// Retiring a lost *phone* from the desktop was always possible; a lost
+/// desktop left the phone holding the archive and unable to close anything,
+/// which is the half of §5.3's remedy that was never reachable from the
+/// surface most likely to survive.
+#[test]
+fn retiring_the_only_device_is_refused() {
+    let root = scratch("retire-alone");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let me = a.device_key().unwrap();
+
+    // A roster with nobody in it can never admit anyone again, and there is no
+    // way back: readmission needs a signature from a member, and there would
+    // be none. So this is refused rather than confirmed.
+    let out = a.retire(me.clone());
+    assert!(
+        out.is_err(),
+        "retiring the only device would strand the archive forever: {out:?}",
+    );
+}
+
+#[test]
+fn a_key_that_names_nobody_is_not_guessed_at() {
+    let root = scratch("retire-absent");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let out = a.retire("ffffffffffff".into());
+    assert!(out.is_err(), "no device matches, so nothing is retired");
+}
+
+/// A device cannot vouch for its own way back in.
+///
+/// §5.3 needs two signatures precisely because any member may retire any
+/// member. One device signing twice is one device's say-so written twice, and
+/// it would reduce the bar back to the single compromised device that caused
+/// the lockout.
+#[test]
+fn a_device_cannot_cosign_for_itself() {
+    let root = scratch("cosign-self");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let request = a.readmission_request().unwrap();
+    let out = a.cosign(request);
+    assert!(out.is_err(), "self-vouching is refused: {out:?}");
+}
+
+#[test]
+fn a_readmission_request_names_this_device() {
+    let root = scratch("request-shape");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let request = a.readmission_request().unwrap();
+    let (key, incarnation) = request.split_once('.').expect("key.incarnation");
+    assert_eq!(key.len(), 64, "a full signing key, hex");
+    assert_eq!(
+        incarnation.len(),
+        32,
+        "and the incarnation it authors under"
+    );
+    assert!(
+        key.starts_with(&a.device_key().unwrap()),
+        "and it is this device: {request}",
+    );
+
+    // Not a secret. It says which device is asking and nothing else, and a
+    // signature over it is useless without the second one from the device it
+    // names.
+    assert!(request.chars().all(|c| c.is_ascii_hexdigit() || c == '.'));
+}
+
+#[test]
+fn nonsense_is_not_a_readmission_request() {
+    let root = scratch("cosign-junk");
+    let a = Archive::open(root.clone()).unwrap();
+
+    for junk in ["", "hello", "zz.zz", "abc", "abcd."] {
+        assert!(
+            a.cosign(junk.into()).is_err(),
+            "{junk:?} should not be read as a request",
+        );
+    }
+}

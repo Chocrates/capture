@@ -15,6 +15,12 @@ CARGO ?= cargo
 # test nobody dares run twice.
 SCRATCH ?= /tmp/capture-scratch-$(USER)
 
+# Alerts fire from every process startup (§2.6's floor), which includes every
+# test that opens a session against a store holding a dated capture. Without
+# this, `make ci` posts real desktop notifications to whoever ran it — and a
+# suite that interrupts the person running it is one they stop running.
+export CAPTURE_SILENT := 1
+
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
         android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired \

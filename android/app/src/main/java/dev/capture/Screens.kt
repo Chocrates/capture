@@ -1,6 +1,8 @@
 package dev.capture
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -55,7 +57,11 @@ import uniffi.capture_ffi.Recording
  * answer to a question that already has one.
  */
 @Composable
-fun Timeline(notes: List<NoteSummary>, onOpen: (String) -> Unit) {
+fun Timeline(
+    notes: List<NoteSummary>,
+    onOpen: (String) -> Unit,
+    onTick: (String, String, Boolean) -> Unit,
+) {
     if (notes.isEmpty()) {
         Empty("Nothing captured yet.")
         return
@@ -74,20 +80,101 @@ fun Timeline(notes: List<NoteSummary>, onOpen: (String) -> Unit) {
                     modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
                 )
             }
-            NoteRow(note, onOpen)
+            NoteRow(note, onOpen, onTick)
         }
     }
 }
 
+/**
+ * How many items of a list a timeline row draws before it says how many are
+ * left.
+ *
+ * A number arrived at by looking rather than reasoned out: uncapped, a
+ * twelve-item shopping list filled most of a phone screen by itself.
+ */
+private const val ITEMS_ON_A_ROW = 5
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun NoteRow(note: NoteSummary, onOpen: (String) -> Unit) {
+private fun NoteRow(
+    note: NoteSummary,
+    onOpen: (String) -> Unit,
+    onTick: (String, String, Boolean) -> Unit,
+) {
     Column(
         Modifier.fillMaxWidth().clickable { onOpen(note.slug) }.padding(16.dp, 8.dp)
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(note.at, style = MaterialTheme.typography.labelSmall)
             Text(note.alias ?: note.slug, style = MaterialTheme.typography.labelSmall)
+            // What the archive made of it, where it made anything. Empty for an
+            // ordinary note, because a note's content is its text and inventing
+            // a label for one would add a fact the capture did not contain.
+            if (note.descriptor.isNotEmpty()) {
+                Text(
+                    note.descriptor,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
+
+        // The items, where this capture names any. Drawn on the row rather than
+        // behind a tap: the syntax is an accelerant for writing, and a reader
+        // left to decode `#groceries: milk, eggs, bread` by eye is doing the
+        // recognizer's job themselves.
+        //
+        // Capped, because the uncapped version was measured against a real
+        // list and a twelve-item shop took 1200 of a Pixel 8 Pro's 2244
+        // pixels — one capture, most of a screen, everything else below the
+        // fold. A timeline is a view of a day; a row that hides the day is a
+        // worse answer than a row that says how much it is not showing.
+        //
+        // Five rather than three: four items is an ordinary short list and
+        // truncating one of those would be noise. The whole list is one tap
+        // away on the note, which is where a list somebody is working through
+        // belongs anyway.
+        for (item in note.items.take(ITEMS_ON_A_ROW)) {
+            Row(
+                Modifier.fillMaxWidth()
+                    // Tap ticks, hold opens.
+                    //
+                    // An item row fills most of a list capture, so tapping one
+                    // was the only thing a thumb could reach — and the note,
+                    // where editing a typo lives, was only reachable by
+                    // hitting the timestamp or the source line underneath. The
+                    // first attempt at opening one ticked the milk off.
+                    //
+                    // The tick keeps the whole row because that is the gesture
+                    // made one-handed in a shop, and shrinking it to the
+                    // checkbox would make the common action the harder one. A
+                    // hold is the standard way to reach the thing behind a row
+                    // and costs the quick gesture nothing.
+                    .combinedClickable(
+                        onClick = { onTick(note.listTag ?: "", item.text, !item.done) },
+                        onLongClick = { onOpen(note.slug) },
+                    )
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = item.done, onCheckedChange = null)
+                Text(
+                    item.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textDecoration = if (item.done) TextDecoration.LineThrough else null,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+        }
+
+        if (note.items.size > ITEMS_ON_A_ROW) {
+            Text(
+                "and ${note.items.size - ITEMS_ON_A_ROW} more",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+            )
+        }
+
         Text(
             // Absence is meaningful and is not an empty string. A withheld note
             // says which of the two states it is in, because one of them can
@@ -97,7 +184,15 @@ private fun NoteRow(note: NoteSummary, onOpen: (String) -> Unit) {
                 note.redactionQueued -> "(queued for destruction — can still be cancelled)"
                 else -> "(no readable text)"
             },
-            style = MaterialTheme.typography.bodyLarge,
+            // Secondary once there is a rendering above it, and the whole row
+            // when there is not. §3.1.4 keeps it on screen either way: the text
+            // saying "every day at 7" beside fields saying weekdays is the
+            // disagreement a reader has to be able to catch.
+            style = if (note.items.isEmpty() && note.descriptor.isEmpty()) {
+                MaterialTheme.typography.bodyLarge
+            } else {
+                MaterialTheme.typography.bodySmall
+            },
         )
     }
     HorizontalDivider()
@@ -117,6 +212,18 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
         ) {
             Text(note.alias ?: note.slug, style = MaterialTheme.typography.titleMedium)
             Text("${note.day} ${note.at}", style = MaterialTheme.typography.labelSmall)
+            // What the archive made of it. §3.1.4 wants this beside the text
+            // rather than instead of it: the text saying "every day at 7"
+            // against fields saying weekdays is a disagreement only a reader
+            // can settle, and only if both are on screen.
+            if (note.descriptor.isNotEmpty()) {
+                Text(
+                    note.descriptor,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
             Text(
                 note.text ?: when {
                     note.redacted -> "Destroyed. The content is gone."
@@ -125,13 +232,32 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 },
                 style = MaterialTheme.typography.bodyLarge,
             )
-            // The way into a list, and deliberately the only one. A list is a
-            // query over a tag (§3.7), so it is reached from the tag rather
-            // than from a tab of its own — and the tab row is already one tab
-            // past what this phone's width holds.
+            // The items this capture names, drawn here rather than behind a
+            // tap. The button that used to stand in this place existed because
+            // the row could not render itself; a row that can does not need
+            // one.
+            for (item in note.items) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clickable { model.tick(note.listTag ?: "", item.text, !item.done) }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = item.done, onCheckedChange = null)
+                    Text(
+                        item.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        textDecoration = if (item.done) TextDecoration.LineThrough else null,
+                        modifier = Modifier.padding(start = 12.dp),
+                    )
+                }
+            }
+
+            // The tag-wide view still answers the wider question — everything
+            // under this tag, across every capture that named some.
             note.listTag?.let { tag ->
                 TextButton({ model.go(Screen.ListOf(tag)) }) {
-                    Text("Open the #$tag list")
+                    Text("Everything on #$tag")
                 }
             }
             if (note.mutedUntilMs != null) {
@@ -198,7 +324,12 @@ private fun Listen(recording: Recording, model: Model) {
 }
 
 @Composable
-fun Search(hits: List<NoteSummary>, onQuery: (String) -> Unit, onOpen: (String) -> Unit) {
+fun Search(
+    hits: List<NoteSummary>,
+    onQuery: (String) -> Unit,
+    onOpen: (String) -> Unit,
+    onTick: (String, String, Boolean) -> Unit,
+) {
     var query by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize()) {
         TextField(
@@ -208,7 +339,7 @@ fun Search(hits: List<NoteSummary>, onQuery: (String) -> Unit, onOpen: (String) 
             singleLine = true,
         )
         if (query.isNotBlank() && hits.isEmpty()) Empty("Nothing matches.")
-        LazyColumn { items(hits) { NoteRow(it, onOpen) } }
+        LazyColumn { items(hits) { NoteRow(it, onOpen, onTick) } }
     }
 }
 

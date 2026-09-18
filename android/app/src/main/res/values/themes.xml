@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The capture window's own chrome.
+
+  Compose draws what is inside the dialog; this is the frame around it, and it
+  comes from the manifest rather than from the composition. Left as
+  `Theme.Material.Light.Dialog` the frame stayed white at night however dark
+  the contents were — a white border around a dark sheet, which reads as a
+  rendering fault rather than a theme.
+
+  Two files rather than a DayNight parent: the framework has no
+  `DayNight.Dialog`, and a resource qualifier is how Android has always
+  answered this question.
+-->
+<resources>
+    <style name="CaptureDialog" parent="@android:style/Theme.Material.Light.Dialog.NoActionBar" />
+</resources>

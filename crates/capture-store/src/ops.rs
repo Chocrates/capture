@@ -509,6 +509,22 @@ impl Ops {
         self.set(&intent_key(id), &at.to_string())
     }
 
+    /// Whether a moment has already been delivered.
+    ///
+    /// Local state on the same terms as a fired intent (§2.5.2): which device
+    /// buzzed, and when, is operational chatter rather than a fact about the
+    /// archive. It also means two devices each deliver their own without
+    /// arguing — and that an archive restored elsewhere does not replay a
+    /// year of notifications.
+    pub fn alerted(&self, tgt: &[u8], occ: Option<i64>) -> Result<bool> {
+        Ok(self.get(&alert_key(tgt, occ))?.is_some())
+    }
+
+    /// Remember that one was delivered.
+    pub fn mark_alerted(&self, tgt: &[u8], occ: Option<i64>, at: u64) -> Result<()> {
+        self.set(&alert_key(tgt, occ), &at.to_string())
+    }
+
     /// Add one overlay-appearance measurement.
     ///
     /// Read-modify-write rather than an accumulating table: a histogram is a
@@ -937,6 +953,20 @@ impl Ops {
             .conn
             .query_row("SELECT COUNT(*) FROM rejected", [], |r| r.get::<_, i64>(0))?
             as u64)
+    }
+}
+
+/// The local-state key recording that one *moment* has been delivered.
+///
+/// Keyed by the note and the occurrence together, not by the note alone. An
+/// occurrence at 9am on Tuesday and the same series at 9am on Wednesday are
+/// two moments of one note, and a key that could not tell them apart would
+/// deliver one of them and swallow the rest of the week.
+fn alert_key(tgt: &[u8], occ: Option<i64>) -> String {
+    let hex: String = tgt.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    match occ {
+        Some(o) => format!("alerted.{hex}.{o}"),
+        None => format!("alerted.{hex}"),
     }
 }
 

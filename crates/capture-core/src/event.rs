@@ -95,6 +95,17 @@ impl Kind {
     pub const OCC_DONE: Kind = Kind(22);
     /// Un-completing a mistaken tick. Not a pure union, deliberately.
     pub const OCC_UNDONE: Kind = Kind(23);
+    /// Completion of one item of a list capture (§3.6).
+    ///
+    /// The list's twin of `OCC_DONE`, and for the same reason: an item is a
+    /// projection row expanded from a capture, not a thing in the log, so
+    /// completing one is a fact *about* that capture rather than a new
+    /// capture. Minting a note per completed item would fill the timeline
+    /// with entries nobody wrote.
+    pub const ITEM_DONE: Kind = Kind(28);
+    /// Un-completing a mistaken tick. Not a pure union, deliberately — the
+    /// same argument as `OCC_UNDONE`.
+    pub const ITEM_UNDONE: Kind = Kind(29);
     /// Puts one note under another in the wiki, or back at the top.
     ///
     /// The one place this design files something by hand. §3.7 argues at
@@ -163,7 +174,7 @@ impl Kind {
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=27).contains(&self.0)
+        (1..=29).contains(&self.0)
     }
 }
 
@@ -243,6 +254,8 @@ mod m2_kinds {
             Kind::OCC_EDIT,
             Kind::OCC_CANCEL,
             Kind::OCC_DONE,
+            Kind::ITEM_DONE,
+            Kind::ITEM_UNDONE,
             Kind::OCC_UNDONE,
             Kind::PARENT,
         ] {
@@ -267,6 +280,8 @@ mod m2_kinds {
         assert_eq!(Kind::ROSTER_KEY.0, 25);
         assert_eq!(Kind::DEVICE_RETIRE.0, 26);
         assert_eq!(Kind::DEVICE_READMIT.0, 27);
+        assert_eq!(Kind::ITEM_DONE.0, 28);
+        assert_eq!(Kind::ITEM_UNDONE.0, 29);
     }
 
     #[test]
@@ -274,7 +289,7 @@ mod m2_kinds {
         // The boundary has to keep working after it moves. An event written by
         // a build that knows one more kind than this one must be held rather
         // than discarded or misread as something it knows.
-        assert!(!Kind(28).is_known());
+        assert!(!Kind(30).is_known());
         assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }

@@ -1083,6 +1083,108 @@ fn backlink_json(b: &Backlink) -> String {
     format!("{{\"slug\":{},\"as\":{}}}", quote(&b.slug), quote(&b.name))
 }
 
+/// What has come due, and what it will do about it.
+///
+/// Reading, not firing. The whole point of having this separately from the
+/// thing that delivers is that "why did nothing happen" has an answer which
+/// does not require waiting for the thing to happen again.
+pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
+    use capture_store::notifier::{Delivery, deliver};
+
+    // Open a session first, which sweeps.
+    //
+    // §3.1 puts parsing after the commit so the capture gesture never waits
+    // for the recognizer — which means a capture is not promoted until
+    // *something* opens a session afterwards, and a read does not. So a fresh
+    // `dentist thursday 2pm` was not yet an event, was therefore not yet
+    // alertable, and this command reported nothing due.
+    //
+    // That is the exact failure this command exists to diagnose, so reporting
+    // it would have been the tool participating in the bug. The firing path
+    // does not need this — it runs inside the due-work drain, which is itself
+    // on the far side of a session open — but a person asking "why did nothing
+    // happen" is asking before any of that.
+    let swept = capture_store::session::Session::open(paths.clone());
+    drop(swept);
+
+    let store = open(paths)?;
+    let now = now_ms();
+    let zone = local_zone();
+
+    // A week ahead, not just what has already arrived.
+    //
+    // The firing path asks `due_by(now)` — what has come due. This one is the
+    // answer to "why did nothing happen", and somebody asking that needs to
+    // see the thing that has *not* fired yet in order to tell "it is not
+    // scheduled" from "it is scheduled and the time has not come". Showing
+    // only the overdue would answer the question with silence, which is what
+    // they were already looking at.
+    const AHEAD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+    let rows = store.due_by(now + AHEAD_MS, &zone)?;
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|d| {
+                format!(
+                    "{{\"at\":{},\"timed\":{},\"text\":{}}}",
+                    d.at,
+                    d.timed,
+                    quote(&d.text)
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        say!("Nothing due.");
+        say!();
+        say!("A capture speaks when it names a time — \"dentist thursday 2pm\".");
+        say!("One with no time never becomes overdue.");
+        return Ok(());
+    }
+
+    let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
+    let hour = hour_of(now, &zone);
+
+    for d in &rows {
+        // Said rather than implied. A moment already delivered still shows,
+        // because "it fired and you missed it" and "it never fired" are
+        // different answers to the same question and only one of them is a
+        // bug.
+        let state = if ops.alerted(&d.tgt.0, d.occ)? {
+            "delivered".into()
+        } else if d.at > now {
+            "waiting".into()
+        } else {
+            match deliver(hour, d.timed, false) {
+                Delivery::Now => "now".into(),
+                Delivery::At(h) => format!("held to {h:02}:00"),
+            }
+        };
+        let z = capture_time::Zone::new(&zone).unwrap_or_else(utc);
+        let when = capture_time::local_of(d.at, z).format("%a %H:%M");
+        say!("  {:<13} {:<10} {}", state, when.to_string(), d.text);
+    }
+
+    let overdue = rows.iter().filter(|d| d.at <= now).count();
+    say!();
+    match overdue {
+        0 => say!("{} coming, none due yet.", rows.len()),
+        n if n == rows.len() => say!("{n} due."),
+        n => say!("{n} due, {} more coming.", rows.len() - n),
+    }
+    Ok(())
+}
+
+/// The local hour, for the delivery decision.
+fn hour_of(now: i64, zone: &str) -> u32 {
+    let z = capture_time::Zone::new(zone).unwrap_or_else(utc);
+    capture_time::civil_clock(now, z).0
+}
+
 /// A list: its items in written order, then the tasks carrying its tag.
 ///
 /// §3.7 makes a collection a saved query rather than a folder, and this prints

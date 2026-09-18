@@ -10,7 +10,15 @@
   --line: #2b2f38;
   --text: #d8dae0;
   --dim: #868c99;
-  --accent: #7aa2f7;
+  /* The purple the phone wears, at the weight a dark ground needs.
+   *
+   * One accent across the surfaces: two windows onto one archive that
+   * disagreed about their own colour would look like two applications. The
+   * light variant below is the same hue at the weight a light ground needs —
+   * #d0bcff on white is unreadable, and #6750a4 on #16181d is nearly
+   * invisible, so it is one colour chosen twice rather than one value used
+   * twice. */
+  --accent: #d0bcff;
   --warn: #e0af68;
   --danger: #f7768e;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -20,7 +28,7 @@
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fbfbfd; --panel: #fff; --line: #e2e4ea;
-    --text: #1c1e24; --dim: #666c78; --accent: #2c5fd8;
+    --text: #1c1e24; --dim: #666c78; --accent: #6750a4;
     --warn: #a06000; --danger: #b3223b;
   }
 }

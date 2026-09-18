@@ -205,6 +205,25 @@ impl Session {
             Err(e) => tracing::warn!(%e, "due work could not be processed"),
         }
 
+        // Moments a capture named, on the same floor as the deadlines above.
+        //
+        // §2.4.1 rates a missed nudge as the failure that matters, and a
+        // scheduler of its own would be a second thing that can be silently
+        // not running — producing exactly the failure the single queue exists
+        // to prevent: alerts that never arrive while every surface reports
+        // them scheduled.
+        //
+        // Deliberately after the sweep above, which is what turns a capture
+        // into the promotion that carries a time. Before it, a thing captured
+        // moments ago would not yet be alertable and this would find nothing.
+        if catch_up {
+            match s.deliver_alerts() {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(n, "alerts delivered at startup"),
+                Err(e) => tracing::warn!(%e, "alerts could not be delivered"),
+            }
+        }
+
         // Startup is one of the two moments the store is known to be writable.
         // Anything the spool is holding goes in now, before whatever this
         // process was actually opened to do.
@@ -366,6 +385,66 @@ impl Session {
 
         self.state = Store::open(&projection::generation_path(&self.paths.state, next))?;
         Ok(next)
+    }
+
+    /// Say whatever has come due and may be said now.
+    ///
+    /// Returns how many were delivered. Subject to the budget of §2.6 —
+    /// anything held for quiet hours or a batch is left undelivered and stays
+    /// due, so the next startup or tick finds it again.
+    ///
+    /// The clock is read here rather than passed in, which is the one place
+    /// this crate does so and is why it lives on `Session` rather than in a
+    /// module of pure functions. Delivering is not folding: it is an effect on
+    /// the world at the moment it happens, and the moment is the input.
+    pub fn deliver_alerts(&mut self) -> Result<usize> {
+        #[allow(
+            clippy::disallowed_methods,
+            clippy::disallowed_types,
+            reason = "delivering is an effect at a moment; the moment is its input"
+        )]
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let zone_name = crate::notifier::local_zone();
+        let Some(zone) = capture_time::Zone::new(&zone_name) else {
+            return Ok(0);
+        };
+        let hour = capture_time::civil_clock(now, zone).0;
+
+        let due = self.state.due_by(now, &zone_name)?;
+        let ops = crate::ops::Ops::open(&self.paths.ops)?;
+        let mut said = 0;
+
+        for d in due {
+            if ops.alerted(&d.tgt.0, d.occ)? {
+                continue;
+            }
+            if crate::notifier::deliver(hour, d.timed, false) != crate::notifier::Delivery::Now {
+                continue;
+            }
+
+            // Late is said rather than hidden. A machine switched off through
+            // an afternoon should say the afternoon happened rather than
+            // presenting a moment from three hours ago as if it were now.
+            let late = now.saturating_sub(d.at) > 5 * 60 * 1000;
+            let text = if late {
+                format!("{} (was due earlier)", d.text)
+            } else {
+                d.text.clone()
+            };
+            // Marked only if it was actually said. See `notify`: a delivery
+            // recorded but not made spends the moment, and delivery happens
+            // once.
+            if crate::notifier::notify("capture", &text) {
+                ops.mark_alerted(&d.tgt.0, d.occ, now.max(0) as u64)?;
+                said += 1;
+            }
+        }
+
+        Ok(said)
     }
 
     pub fn drain_due(&mut self) -> Result<crate::due::Drained> {

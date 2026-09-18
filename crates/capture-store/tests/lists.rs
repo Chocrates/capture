@@ -139,7 +139,10 @@ fn ticking_an_item_records_what_happened() {
         .find(|e| e.text == "milk")
         .expect("milk is on the list");
     assert!(milk.done, "milk is bought");
-    assert!(milk.task.is_some(), "and there is an event saying so");
+    assert!(
+        milk.task.is_none(),
+        "an item is never a task — completion is an event about the list capture",
+    );
 
     let eggs = list
         .iter()
@@ -373,4 +376,69 @@ fn a_tick_survives_an_edit_that_moves_the_item() {
         !list.iter().find(|e| e.text == "bread").unwrap().done,
         "and did not land on whatever took its old place",
     );
+}
+
+/// The reason completion stopped minting notes.
+#[test]
+fn ticking_mints_nothing() {
+    let scratch = Scratch::new("mints-nothing");
+    let paths = scratch.paths();
+
+    capture(&paths, "#groceries: milk, eggs, bread");
+    settle(&paths);
+
+    for item in ["milk", "eggs", "bread"] {
+        promote::tick(&paths, "groceries", item, true, now()).unwrap();
+    }
+    settle(&paths);
+
+    let store =
+        capture_store::projection::Store::open_read(&capture_store::projection::generation_path(
+            &paths.state,
+            capture_store::ops::Ops::open_read(&paths.ops)
+                .unwrap()
+                .generation()
+                .unwrap(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.note_count().unwrap(),
+        1,
+        "the whole shopping done, and the timeline still holds one capture — \
+         the first version of this left a note called `milk` that nobody wrote",
+    );
+
+    let list = read(&paths, "groceries");
+    assert_eq!(list.len(), 3, "and the list still has its three items");
+    assert!(list.iter().all(|e| e.done), "all of them done");
+}
+
+/// A tick outlives an edit that drops its item, and comes back with it.
+#[test]
+fn an_edit_that_drops_an_item_does_not_destroy_its_tick() {
+    let scratch = Scratch::new("drop-restore");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "#groceries: milk, eggs");
+    settle(&paths);
+    promote::tick(&paths, "groceries", "eggs", true, now()).unwrap();
+    settle(&paths);
+
+    capture_store::mutate::edit(&paths, &slug, "#groceries: milk").unwrap();
+    settle(&paths);
+    let list = read(&paths, "groceries");
+    assert_eq!(list.len(), 1, "eggs are off the list");
+
+    // Put it back. The completion was never destroyed — an edit is not a
+    // reason to forget something that actually happened.
+    capture_store::mutate::edit(&paths, &slug, "#groceries: milk, eggs").unwrap();
+    settle(&paths);
+
+    let list = read(&paths, "groceries");
+    let eggs = list
+        .iter()
+        .find(|e| e.text == "eggs")
+        .expect("eggs are back");
+    assert!(eggs.done, "and so is the tick they had");
 }

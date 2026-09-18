@@ -1,9 +1,17 @@
 package dev.capture
 
 import android.Manifest
+import android.app.AlarmManager
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,6 +53,12 @@ class MainActivity : ComponentActivity() {
         // from the result: "while using the app" comes back as a grant.
         model.located(Places.watching(this))
         Places.rearm(this)
+
+        // The next moment a capture named. Re-armed on every launch for the
+        // same reason as the fences above: an alarm does not survive a reboot,
+        // and one that silently stopped existing looks exactly like a system
+        // with nothing to say.
+        Alarms.rearm(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,8 +76,14 @@ class MainActivity : ComponentActivity() {
         // about: nothing is watching, and the plan still looks fine.
         Places.rearm(this)
 
+        // The next moment a capture named. Re-armed on every launch for the
+        // same reason as the fences above: an alarm does not survive a reboot,
+        // and one that silently stopped existing looks exactly like a system
+        // with nothing to say.
+        Alarms.rearm(this)
+
         setContent {
-            MaterialTheme {
+            CaptureTheme {
                 Surface(Modifier.fillMaxSize()) {
                     App(model, onAskLocation = {
                         askLocation.launch(
@@ -89,12 +109,131 @@ class MainActivity : ComponentActivity() {
         // than remembered from when it was granted.
         model.located(Places.watching(this))
         model.go(model.screen)
+
+        // After settling, because settling is what promotes a capture into the
+        // thing that carries a time. Arming before it would schedule for an
+        // archive that had not yet read what it holds.
+        Alarms.rearm(this)
+
+        // Asked once there is something to say, and not before.
+        //
+        // The permission was declared from the start and requested only
+        // alongside location, which meant an archive full of dated captures
+        // could not speak unless somebody had also set up a place cue. The
+        // alarm fired, the notification was posted, and the platform dropped
+        // it — `importance=NONE`, no error anywhere.
+        //
+        // Asked here rather than at first launch because §2.4.1's argument
+        // holds: a permission requested before anything has explained why is
+        // the one most often refused permanently. By the time something is
+        // scheduled, what it is for is whatever the person just wrote down.
+        askToSpeakIfNeeded()
+        askForExactAlarmsIfNeeded()
+
+        // A notification tapped, rather than the app opened.
+        intent?.getStringExtra(OPEN_NOTE)?.let { slug ->
+            intent.removeExtra(OPEN_NOTE)
+            model.go(Screen.Note(slug))
+        }
+    }
+
+    /**
+     * Ask for permission to speak, where there is something to say.
+     *
+     * Silent when nothing is scheduled: an archive with no dated captures has
+     * no reason to want this, and asking anyway is how the request gets
+     * refused before it means anything.
+     */
+    private fun askToSpeakIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted || asked) return
+
+        val pending = runCatching { model.hasAlerts() }.getOrDefault(false)
+        if (!pending) return
+
+        asked = true
+        askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /**
+     * The trip to Settings for exact alarms, offered once.
+     *
+     * `SCHEDULE_EXACT_ALARM` is not a prompt — from Android 13 it is a switch
+     * in Settings, and an application can only ask to be taken there. So this
+     * is an offer rather than a request, made once per launch and only where
+     * something time-critical is actually scheduled.
+     *
+     * Refusing is a real answer and costs nothing catastrophic: the alarm
+     * falls back to inexact, the health surface says the times are
+     * approximate, and nothing pretends otherwise.
+     */
+    private fun askForExactAlarmsIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (offeredExact) return
+
+        val manager = getSystemService(AlarmManager::class.java) ?: return
+        if (manager.canScheduleExactAlarms()) return
+
+        // Only where it would make a difference. An archive whose only dated
+        // things are due *dates* is batched anyway, and being sent to Settings
+        // to enable a precision nothing would use is a worse experience than
+        // the imprecision.
+        val wantsExact = runCatching { model.hasTimedAlerts() }.getOrDefault(false)
+        if (!wantsExact) return
+
+        offeredExact = true
+        Toast.short(this, "Allow alarms & reminders so times arrive exactly.")
+        runCatching {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                    .setData(Uri.fromParts("package", packageName, null)),
+            )
+        }
+    }
+
+    private var offeredExact = false
+
+    /**
+     * Asked at most once per launch.
+     *
+     * A refusal is an answer. Re-asking on every resume would turn a decision
+     * into a nag, and the platform stops delivering the prompt after the
+     * second refusal anyway — so the only thing repeating achieves is spending
+     * the two chances that exist.
+     */
+    private var asked = false
+
+    private val askNotifications = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            Toast.short(this, "Without notifications, nothing can be said when a time arrives.")
+        }
+    }
+
+    companion object {
+        /** Which note a notification was about. */
+        const val OPEN_NOTE = "dev.capture.open_note"
     }
 }
 
 @Composable
 private fun App(model: Model, onAskLocation: () -> Unit) {
     val context = LocalContext.current
+
+    // Back goes back, rather than out.
+    //
+    // Enabled only while there is somewhere to return to: at the bottom of the
+    // stack the gesture belongs to the platform, and an application that
+    // swallowed it there is one you cannot leave. This is also why it is not
+    // simply `model.back()` unconditionally — a handler that always consumes
+    // the gesture traps the person on the first screen.
+    BackHandler(enabled = model.canGoBack) { model.back() }
+
     Scaffold(bottomBar = { Bar(model) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             // Said out loud rather than left as a blank list. A screen that is
@@ -105,8 +244,17 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
             }
 
             when (val screen = model.screen) {
-                is Screen.Timeline -> Timeline(model.timeline) { model.go(Screen.Note(it)) }
-                is Screen.Search -> Search(model.hits, model::search) { model.go(Screen.Note(it)) }
+                is Screen.Timeline -> Timeline(
+                    notes = model.timeline,
+                    onOpen = { model.go(Screen.Note(it)) },
+                    onTick = model::tick,
+                )
+                is Screen.Search -> Search(
+                    hits = model.hits,
+                    onQuery = model::search,
+                    onOpen = { model.go(Screen.Note(it)) },
+                    onTick = model::tick,
+                )
                 is Screen.Agenda -> Agenda(screen.day, model.agenda)
                 is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
                 is Screen.Health -> Health(

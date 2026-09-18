@@ -44,6 +44,11 @@ use crate::{Result, db};
 /// changed since it was last read. Without it an edit never reparsed, and the
 /// fields went stale while the text moved.
 ///
+/// Version 7 adds `list_items.done`, filled from the `item_done` events that
+/// replaced the note-minting first version of ticking. Every existing
+/// projection has to be rebuilt for it: the completions are in the log and
+/// were never in this table.
+///
 /// Version 6 adds `list_items`, the expansion of a list capture. Every
 /// existing note has to be re-read for it: a capture written before the form
 /// existed becomes a list on this rebuild, which is what an additive
@@ -53,7 +58,7 @@ use crate::{Result, db};
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 6;
+pub const PROJECTION_SCHEMA: u32 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -375,6 +380,10 @@ CREATE TABLE IF NOT EXISTS list_items (
   ord  INTEGER NOT NULL,
   tag  TEXT NOT NULL,
   item TEXT NOT NULL,
+  -- Filled from the folded note's items, exactly as an occurrence's `done` is
+  -- filled from its exceptions. Completion is a fact in the log; this column
+  -- is the derived copy a surface reads.
+  done INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (tgt, ord)
 ) STRICT;
 
@@ -480,6 +489,26 @@ const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias,
      EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0),
      (SELECT p.parent FROM parents p WHERE p.tgt = n.tgt)";
 
+/// What may never produce an alert.
+///
+/// Named once rather than written into each of the three queries that need it.
+/// `NOTE_COLUMNS` above carries the same lesson in its own comment: a
+/// hand-written copy of this was present in two call sites and absent from the
+/// rest, and every query using the copy could read a note somebody had already
+/// asked to destroy.
+///
+/// Muting wins (§2.6) — it is the escape for a dated capture that was a record
+/// rather than a reminder. A note with no readable text has nothing to say. A
+/// destroyed one must not have its content read back out of a notification,
+/// and neither must one merely *queued* for destruction: §1.1 withholds the
+/// content the moment the destruction is ordered, not when it is carried out.
+const ALERTABLE: &str = "n.text IS NOT NULL
+       AND n.redacted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM redact_queue q
+                       WHERE q.tgt = n.tgt AND q.cancelled = 0)
+       AND (n.muted_until IS NULL
+            OR (n.muted_until != 0 AND n.muted_until <= ?1))";
+
 /// What every review tier excludes, and why.
 ///
 /// Muting always wins (§2.6): anything you do not want resurfaced stops being
@@ -548,6 +577,40 @@ pub struct PromotionRow {
 /// absence: a note with no readable text is not the same thing as a note that
 /// was redacted, and rendering either as a blank row loses the distinction the
 /// reader most needs.
+/// A moment a capture named, and what to say when it arrives.
+///
+/// Derived rather than stored. An `alert` event per dated capture would make
+/// the log's size a function of how many things have dates, and would turn
+/// correcting a time into a second event that has to find and supersede the
+/// first. Computed, a corrected time simply produces a different answer next
+/// time this is asked — which is what §3.1.3's additive promotion already
+/// guarantees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Due {
+    /// The note whose moment this is.
+    pub tgt: EventId,
+    /// When it comes due, as an instant.
+    pub at: i64,
+    /// Which moment of that note, for a series. `None` for a one-off — an
+    /// occurrence at 9am Tuesday and the same series at 9am Wednesday are
+    /// different moments of one note, and delivery keyed by note alone would
+    /// deliver one of them.
+    pub occ: Option<i64>,
+    /// What to say. The capture's own text (§3.1.3 — nothing is summarised,
+    /// and nothing is added that the capture did not contain).
+    pub text: String,
+    /// Whether the capture named a time of day rather than only a day.
+    ///
+    /// §2.6 splits immediate delivery from batched and gives examples rather
+    /// than a rule; this is the rule. `dentist thursday 2pm` named 2pm, so 2pm
+    /// is when it matters. `call the dentist tomorrow` named a day, and
+    /// delivering it at 00:00 would obey the letter of a due date while
+    /// missing what was meant. It is the instant-versus-floating-date
+    /// distinction the time model already draws (§3.2), asked a different
+    /// question.
+    pub timed: bool,
+}
+
 /// One line of a list: an expanded item, or a task carrying its tag.
 ///
 /// The two are deliberately the same shape. To whoever is reading a list they
@@ -1566,6 +1629,126 @@ impl Store {
         Ok(out)
     }
 
+    /// Every moment this archive names that has come due, oldest first.
+    ///
+    /// Asking does not deliver. Three surfaces and the tests all ask this, and
+    /// one that fired as a side effect could not be asked twice — nor could
+    /// `capture due` exist, which is the answer to "why did nothing happen".
+    ///
+    /// # What is deliberately not here
+    ///
+    /// Muted notes, completed tasks and occurrences, cancelled occurrences,
+    /// and notes whose content is withheld or destroyed. Each is already a
+    /// fact in the projection, so none of them needs an alert cancelled —
+    /// they simply stop being returned. A task with no due date is absent for
+    /// the same reason it is never overdue: §3.6 refuses the manufactured
+    /// backlog, and a thing with no date has no moment to arrive.
+    pub fn due_by(&self, now: i64, zone: &str) -> Result<Vec<Due>> {
+        let mut out = Vec::new();
+
+        // Events, which named an instant.
+        let mut st = self.conn.prepare(&format!(
+            "SELECT p.tgt, p.start_ms, n.text
+               FROM promotions p JOIN notes n ON n.tgt = p.tgt
+              WHERE p.kind = 'event' AND p.start_ms IS NOT NULL AND p.start_ms <= ?1
+                AND COALESCE(p.done, 0) = 0
+                AND {ALERTABLE}",
+        ))?;
+        for r in st.query_map(params![now], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (tgt, at, text) = r?;
+            if let Some(tgt) = id_from(tgt) {
+                out.push(Due {
+                    tgt,
+                    at,
+                    occ: None,
+                    text,
+                    timed: true,
+                });
+            }
+        }
+
+        // Occurrences of a series. Each is its own moment; a cancelled or
+        // completed one is not.
+        let mut st = self.conn.prepare(&format!(
+            "SELECT o.tgt, o.occ, o.start_ms, n.text
+               FROM occurrences o JOIN notes n ON n.tgt = o.tgt
+              WHERE o.start_ms <= ?1
+                AND o.cancelled = 0 AND o.done = 0
+                AND {ALERTABLE}",
+        ))?;
+        for r in st.query_map(params![now], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })? {
+            let (tgt, occ, at, text) = r?;
+            if let Some(tgt) = id_from(tgt) {
+                out.push(Due {
+                    tgt,
+                    at,
+                    occ: Some(occ),
+                    text,
+                    timed: true,
+                });
+            }
+        }
+
+        // Tasks, which named a day rather than an instant. The moment is the
+        // start of that day in the reader's zone — a floating date has no
+        // instant of its own (§3.2), and this is where one is chosen. Not
+        // time-critical: delivering at 00:00 would be obeying the letter of a
+        // due date and missing what somebody meant by "tomorrow".
+        let mut st = self.conn.prepare(&format!(
+            "SELECT p.tgt, p.due, n.text
+               FROM promotions p JOIN notes n ON n.tgt = p.tgt
+              WHERE p.kind = 'task' AND p.due IS NOT NULL
+                AND COALESCE(p.done, 0) = 0
+                AND {ALERTABLE}",
+        ))?;
+        for r in st.query_map(params![now], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (tgt, day, text) = r?;
+            let Some(tgt) = id_from(tgt) else { continue };
+            let Some(date) = capture_time::FloatingDate::parse(&day) else {
+                continue;
+            };
+            let Some(zone) = capture_time::Zone::new(zone) else {
+                continue;
+            };
+            let Some(at) = capture_time::at_local(date, 0, 0, zone) else {
+                continue;
+            };
+            if at <= now {
+                out.push(Due {
+                    tgt,
+                    at,
+                    occ: None,
+                    text,
+                    timed: false,
+                });
+            }
+        }
+
+        // Oldest first: a backlog delivered in the order it accumulated reads
+        // as a day that happened, rather than as a pile.
+        out.sort_by_key(|d| (d.at, d.tgt.0, d.occ));
+        Ok(out)
+    }
+
     /// A list: the items expanded under a tag, then the tasks carrying it.
     ///
     /// §3.7 makes a collection a saved query rather than a folder, and this is
@@ -1590,7 +1773,7 @@ impl Store {
         // the cheap way to stop something resurfacing, and a surface that kept
         // showing it would defeat that.
         let mut st = self.conn.prepare(
-            "SELECT li.tgt, li.ord, li.item
+            "SELECT li.tgt, li.ord, li.item, li.done
                FROM list_items li JOIN notes n ON n.tgt = li.tgt
               WHERE li.tag = ?1
                 AND (n.muted_until IS NULL
@@ -1602,18 +1785,21 @@ impl Store {
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         })?;
 
         let mut items = Vec::new();
         for r in rows {
-            let (tgt, ord, text) = r?;
+            let (tgt, ord, text, done) = r?;
             let Some(tgt) = id_from(tgt) else { continue };
             items.push(ListEntry {
                 tgt,
                 ord: Some(ord as u32),
                 text,
-                done: false,
+                // Read back from the fold, which read it from the log. An item
+                // is never a task, so there is nothing to match against.
+                done: done != 0,
                 task: None,
             });
         }
@@ -1628,28 +1814,27 @@ impl Store {
             };
             let done = self.task_done(&note.tgt)?;
 
-            // Matched back to its item by text, which is the whole of the
-            // identity scheme: completion is a fact in the log, and binding it
-            // to an item's position would move the tick when a list is edited.
-            match items.iter_mut().find(|i| i.text == text) {
-                Some(item) => {
-                    item.done = done.unwrap_or(false);
-                    item.task = Some(note.tgt);
-                }
-                // Only a task joins the list. A tag gathers every kind of
-                // note — `#standup at 9:30` carries one and is not something
-                // anybody ticks off — and drawing those with an empty box
-                // claims they are actionable when nothing in the log says so.
-                // The tag page (`capture mentions`) is where everything
-                // carrying a tag belongs; a list is the actionable half.
-                None if done.is_some() => loose.push(ListEntry {
+            // Only a task joins the list. A tag gathers every kind of note —
+            // `#standup at 9:30` carries one and is not something anybody
+            // ticks off — and drawing those with an empty box claims they are
+            // actionable when nothing in the log says so. The tag page
+            // (`capture mentions`) holds everything carrying a tag; a list is
+            // the actionable half.
+            //
+            // No longer matched against the expanded items by text. That match
+            // existed because ticking used to mint a task per item, and an
+            // item and its own minted task would otherwise have appeared as
+            // two rows. Nothing is minted now, so a task carrying this tag is
+            // a task somebody captured — a separate thing that belongs on the
+            // list beside the items, not a duplicate of one.
+            if done.is_some() {
+                loose.push(ListEntry {
                     tgt: note.tgt,
                     ord: None,
                     text: text.to_string(),
                     done: done.unwrap_or(false),
                     task: Some(note.tgt),
-                }),
-                None => {}
+                });
             }
         }
 
@@ -1689,6 +1874,39 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )
             .optional()?)
+    }
+
+    /// The items one capture names, with their completion.
+    ///
+    /// Narrower than [`Store::list`] on purpose. A row drawing itself wants
+    /// its own items; `list` answers the tag-wide question, which means
+    /// gathering every capture under the tag *and* every task carrying it.
+    /// Called once per row that is a list, that is a full tag query per row —
+    /// measured at 66ms for a hundred rows, which is a scroll somebody can
+    /// feel.
+    pub fn items_of(&self, tgt: &EventId) -> Result<Vec<ListEntry>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT ord, item, done FROM list_items WHERE tgt = ?1 ORDER BY ord ASC")?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (ord, text, done) = r?;
+            out.push(ListEntry {
+                tgt: *tgt,
+                ord: Some(ord as u32),
+                text,
+                done: done != 0,
+                task: None,
+            });
+        }
+        Ok(out)
     }
 
     /// How many items on a list carry this exact text.
@@ -2781,10 +2999,15 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
             if let Some(list) = capture_parse::list_of(text) {
                 for (ord, item) in list.items.iter().enumerate() {
+                    // A tick recorded against an item this capture no longer
+                    // names is simply not found here, which is the inert
+                    // outcome `apply_item` describes: an edit does not destroy
+                    // the record, and restoring the item restores the tick.
+                    let done = n.items.get(item).copied().unwrap_or(false);
                     tx.execute(
-                        "INSERT OR REPLACE INTO list_items (tgt, ord, tag, item)
-                         VALUES (?1,?2,?3,?4)",
-                        params![t, ord as i64, list.tag, item],
+                        "INSERT OR REPLACE INTO list_items (tgt, ord, tag, item, done)
+                         VALUES (?1,?2,?3,?4,?5)",
+                        params![t, ord as i64, list.tag, item, done as i64],
                     )?;
                 }
             }

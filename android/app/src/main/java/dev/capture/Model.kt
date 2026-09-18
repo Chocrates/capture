@@ -1,6 +1,7 @@
 package dev.capture
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -65,6 +66,9 @@ class Model(private val archive: Archive) : ViewModel() {
         private set
     var hits by mutableStateOf<List<NoteSummary>>(emptyList())
         private set
+
+    /** What produced [hits], so the same question can be asked again. */
+    private var asked: String = ""
     var agenda by mutableStateOf<List<AgendaEntry>>(emptyList())
         private set
     var pages by mutableStateOf<List<Named>>(emptyList())
@@ -131,12 +135,18 @@ class Model(private val archive: Archive) : ViewModel() {
     /**
      * Tick an item off a list, or put it back.
      *
+     * One call for every surface a list can be drawn on — the list screen, a
+     * timeline row, a search hit. There is one meaning of completion and one
+     * place that decides it; what differs is only which surface is now holding
+     * a stale copy, and that is answered by looking at which one is showing.
+     *
      * Reloads rather than editing the row in place. The archive decides what a
      * list holds — an item may have been ticked on another device since this
      * screen drew — and a phone that patched its own copy would be a second
      * opinion about what is still to buy.
      */
     fun tick(tag: String, item: String, done: Boolean) {
+        if (tag.isEmpty()) return
         load {
             when (val outcome = archive.tick(tag, item, done)) {
                 is Ticked.Ambiguous -> trouble =
@@ -148,11 +158,63 @@ class Model(private val archive: Archive) : ViewModel() {
                 // through a shop.
                 else -> trouble = null
             }
-            list = archive.list(tag)
+            reread()
+            if (screen is Screen.Search) hits = archive.search(asked, 50u)
         }
     }
 
+    /**
+     * Where this session has been, oldest first.
+     *
+     * A list rather than a single previous screen, because the gesture is
+     * expected to walk back the whole way — timeline, note, list, back, back,
+     * back. Keeping one step meant the second press left the application
+     * entirely, from somewhere that plainly had a history.
+     *
+     * Not persisted. A back stack is about the session in front of you, and
+     * restoring one across a process death would offer to return somewhere the
+     * person had already left.
+     */
+    private val history = mutableStateListOf<Screen>()
+
+    /** Whether there is anywhere to go back to. */
+    val canGoBack: Boolean
+        get() = history.isNotEmpty()
+
+    /**
+     * Back, to wherever this came from.
+     *
+     * Returns false where there is nowhere left, which is the caller's signal
+     * to let the platform have the gesture — at the bottom of the stack, back
+     * means leave, and an application that swallowed it there would be one you
+     * could not get out of.
+     */
+    fun back(): Boolean {
+        val previous = history.removeLastOrNull() ?: return false
+        show(previous)
+        return true
+    }
+
     fun go(to: Screen) {
+        // Consecutive duplicates are not history. Tapping the tab you are
+        // already on is not a move, and recording it would make the first back
+        // press appear to do nothing.
+        if (to != screen) {
+            history.add(screen)
+        }
+        show(to)
+    }
+
+    /**
+     * Draw a screen and load what it needs, without touching the history.
+     *
+     * Separate from [go] so that going back re-reads the archive rather than
+     * restoring what was on screen when you left. The archive may have changed
+     * underneath — a sync landed, another device ticked something off — and a
+     * back gesture that showed a remembered copy would be presenting stale
+     * state as current.
+     */
+    private fun show(to: Screen) {
         screen = to
         when (to) {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
@@ -189,6 +251,7 @@ class Model(private val archive: Archive) : ViewModel() {
             hits = emptyList()
             return
         }
+        asked = query
         load { hits = archive.search(query, 50u) }
     }
 
@@ -338,8 +401,56 @@ class Model(private val archive: Archive) : ViewModel() {
     /** Where this device can be reached, for the other one to dial. */
     fun addresses(): List<String> = archive.addresses()
 
-    /** Settle whatever has come due. Called when the app comes forward. */
-    fun settle() = load { archive.settle() }
+    /**
+     * Settle whatever has come due, then re-read what is on screen.
+     *
+     * The re-read is the part that was missing, and the gap was visible: a
+     * capture is committed without parsing it (§3.1 — the gesture must never
+     * wait for the recognizer), so what reads it is the *next* session, which
+     * is this one. `onResume` fired this and the screen's own read as two
+     * coroutines, and the read usually won — so a capture made a moment ago
+     * drew as plain text, and stayed that way until somebody navigated
+     * somewhere and back.
+     *
+     * Nothing failed, and that is what made it hard to see: the note was
+     * promoted the whole time and the surface was showing an answer from
+     * before it happened.
+     */
+    /**
+     * Whether anything is scheduled to speak.
+     *
+     * Asked before requesting permission to speak: an archive with no dated
+     * captures has no reason to want it, and asking anyway spends a request
+     * that is then refused before it meant anything.
+     */
+    /** Whether anything scheduled named a time of day rather than just a day. */
+    fun hasTimedAlerts(): Boolean {
+        val month = 30L * 24 * 60 * 60 * 1000
+        return runCatching { archive.due(month).any { it.timed } }.getOrDefault(false)
+    }
+
+    fun hasAlerts(): Boolean {
+        val month = 30L * 24 * 60 * 60 * 1000
+        return runCatching { archive.due(month).isNotEmpty() }.getOrDefault(false)
+    }
+
+    fun settle() = load {
+        archive.settle()
+        reread()
+    }
+
+    /** Re-read the current screen from the archive. */
+    private suspend fun reread() {
+        when (val here = screen) {
+            is Screen.Timeline -> timeline = archive.timeline(100u)
+            is Screen.Agenda -> agenda = archive.agenda(here.day)
+            is Screen.ListOf -> list = archive.list(here.tag)
+            is Screen.Wiki -> pages = archive.named()
+            is Screen.Note -> note = archive.note(here.name)
+            is Screen.Plans -> plans = archive.intents()
+            else -> {}
+        }
+    }
 
     /**
      * Re-read whatever is on screen.

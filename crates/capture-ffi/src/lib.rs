@@ -74,6 +74,25 @@ impl From<capture_store::Error> for CaptureError {
 
 type Result<T> = std::result::Result<T, CaptureError>;
 
+/// A moment that has come due, and when it may be said.
+#[derive(Debug, uniffi::Record)]
+pub struct Alert {
+    /// The note, so tapping the notification can open it.
+    pub slug: String,
+    /// What to say: the capture's own text (§3.1.3).
+    pub text: String,
+    /// When it came due.
+    pub at_ms: i64,
+    /// Which moment of that note, for a series. Absent for a one-off.
+    pub occ: Option<i64>,
+    /// Whether the capture named a time of day rather than only a day. §2.6
+    /// delivers this one immediately and batches the rest.
+    pub timed: bool,
+    /// Whether this moment was already delivered. A surface showing what is
+    /// coming needs it; a surface about to deliver checks it.
+    pub delivered: bool,
+}
+
 /// One line of a list: an item written into a list capture, or a task that
 /// carries the list's tag.
 ///
@@ -107,6 +126,34 @@ pub enum Ticked {
     Ambiguous { count: u32 },
     /// Nothing on this list reads like that.
     NoSuchItem,
+}
+
+/// One marker a capture can carry, as the field shows it.
+#[derive(Debug, uniffi::Record)]
+pub struct Marker {
+    /// The character that opens it.
+    pub sigil: String,
+    /// What a person would write after it.
+    pub example: String,
+    /// What it does.
+    pub means: String,
+}
+
+/// What can be written in a capture, for showing under the field.
+///
+/// A glance, not a lesson. §3.1.1 settles that the input language is English
+/// and that the markers are discovered by seeing them — which requires that
+/// they are somewhere to be seen, and on a phone they never have been.
+///
+/// Read from the vocabulary rather than written out here. A second copy on the
+/// surface would drift from the one the recognizer uses, and the drift would
+/// show up as a hint offering something that no longer works.
+#[derive(Debug, uniffi::Record)]
+pub struct Vocabulary {
+    /// The sigils, each with an example of what follows it.
+    pub markers: Vec<Marker>,
+    /// Shapes the grammar reads, as examples rather than rules.
+    pub shapes: Vec<String>,
 }
 
 /// One note, as a list shows it.
@@ -145,6 +192,26 @@ pub struct NoteSummary {
     /// cancel — collapsing them into one flag would hide the only one of the
     /// two they can do anything about.
     pub redaction_queued: bool,
+    /// What this capture is, as the projection reads it: `note`, `task`,
+    /// `event` or `series`. A capture carrying no promotion answers `note`.
+    pub kind: String,
+    /// The projection's one-line rendering of the fields — "done · due
+    /// 2026-09-20", "Thu 14:00", "every weekday at 9".
+    ///
+    /// Empty for an ordinary note, deliberately: its content is its text, and
+    /// a descriptor invented for one would add a fact the capture did not
+    /// contain (§3.1.3). A surface draws the text alone when this is empty.
+    ///
+    /// Supplied here rather than composed by each surface. Two surfaces
+    /// formatting the same fields would be two renderings that can disagree,
+    /// and each would look correct on its own screen.
+    pub descriptor: String,
+    /// The items this capture names, where it is a list. Empty otherwise.
+    ///
+    /// On the summary rather than fetched per row: a timeline of a hundred
+    /// rows would otherwise make a hundred calls across this boundary to
+    /// discover that ninety-eight of them are not lists.
+    pub items: Vec<ListLine>,
     /// The tag this note's text opens a list under, where it does.
     ///
     /// Decided here rather than on the surface. The phone drawing a "open the
@@ -438,6 +505,33 @@ impl Archive {
             identity.advance(&paths, fresh.roster_key.header.seq, wall, counter)?;
         } else {
             capture_store::store::open(&paths)?;
+
+            // A projection whose shape predates this build.
+            //
+            // §8.8 makes the projection derived and nothing in it
+            // authoritative, which is what allows the migration strategy to be
+            // "throw it away and compute it again". `Session::open` already
+            // does this — but the phone's reading path does not open a
+            // session, it opens the current generation directly, so a cold
+            // launch after an upgrade read the *old* shape and failed with a
+            // missing column before anything had a chance to notice.
+            //
+            // Here rather than in `read`, which runs per query: this costs a
+            // full fold and fires once per upgrade.
+            let stale = capture_store::ops::Ops::open_read(&paths.ops)
+                .and_then(|ops| ops.generation())
+                .and_then(|g| {
+                    capture_store::projection::Store::open_read(
+                        &capture_store::projection::generation_path(&paths.state, g),
+                    )
+                })
+                .and_then(|store| store.is_stale())
+                .unwrap_or(false);
+
+            if stale {
+                let mut s = capture_store::session::Session::open(paths.clone())?;
+                s.rebuild_projection()?;
+            }
         }
 
         Ok(Archive {
@@ -481,18 +575,154 @@ impl Archive {
         }
     }
 
+    /// What can be written in a capture.
+    ///
+    /// Constant for the life of a build, so a surface may read it once and
+    /// keep it. It is a call rather than a constant so that the vocabulary has
+    /// exactly one definition — growing it is an edit in `capture-parse` with
+    /// tests attached (§3.1.5), and a hardcoded copy on a surface would be a
+    /// second place to forget.
+    pub fn vocabulary(&self) -> Vocabulary {
+        Vocabulary {
+            markers: capture_parse::SIGILS
+                .iter()
+                .map(|s| Marker {
+                    sigil: s.sigil.to_string(),
+                    example: s.example.to_string(),
+                    means: s.means.to_string(),
+                })
+                .collect(),
+            shapes: core::iter::once(capture_parse::LIST_SHAPE.to_string())
+                .chain(capture_parse::SHAPES.iter().map(|s| s.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Record whether this device can schedule an exact alarm.
+    ///
+    /// Local state rather than a `setting` event: it is a fact about this
+    /// phone's permissions, not a decision about the archive, and syncing it
+    /// would tell the desktop something untrue about itself (§2.5.2).
+    pub fn set_alerts_inexact(&self, inexact: bool) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        ops.set("alerts.inexact", if inexact { "1" } else { "0" })?;
+        Ok(())
+    }
+
+    fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(capture_store::ops::Ops::open_read(&self.paths.ops)?.get(key)?)
+    }
+
+    /// What has come due by a moment, oldest first.
+    ///
+    /// Operation-shaped: the caller says when, and gets back what may be said
+    /// and how soon. It does not deliver — asking twice answers twice, which
+    /// is what lets a surface show what is coming without announcing it.
+    ///
+    /// `within_ms` looks ahead. Zero is "what has arrived", which is what the
+    /// alarm receiver asks; a week is what a screen showing the schedule asks.
+    pub fn due(&self, within_ms: i64) -> Result<Vec<Alert>> {
+        // Sweeping first, because §3.1 puts parsing after the commit: a
+        // capture made a moment ago is not yet a promotion, and a promotion is
+        // what carries the time. Without this the alarm that fires two minutes
+        // after a capture would find nothing due and be right.
+        {
+            let _w = self.write_lock()?;
+            let _ = capture_store::session::Session::open(self.paths.clone())?;
+        }
+
+        let store = self.read()?;
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        let now = self.now_ms() as i64;
+
+        store
+            .due_by(now + within_ms, &self.zone_name())?
+            .into_iter()
+            .map(|d| {
+                Ok(Alert {
+                    slug: store.slug_of(&d.tgt)?.unwrap_or_default(),
+                    text: d.text,
+                    at_ms: d.at,
+                    occ: d.occ,
+                    timed: d.timed,
+                    delivered: ops.alerted(&d.tgt.0, d.occ)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Remember that a moment was delivered, so it is not said twice.
+    ///
+    /// Local state rather than the log (§2.5.2): which device buzzed and when
+    /// is operational chatter, and an archive restored on a new machine must
+    /// not replay a year of notifications.
+    pub fn delivered(&self, slug: String, occ: Option<i64>) -> Result<()> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&slug)?
+            .ok_or(CaptureError::NotFound { name: slug })?;
+        capture_store::ops::Ops::open(&self.paths.ops)?.mark_alerted(&tgt.0, occ, self.now_ms())?;
+        Ok(())
+    }
+
+    /// Whether something due now may be said now, or must wait — and until
+    /// which local hour.
+    ///
+    /// The budget of §2.6, answered here rather than on the surface. A phone
+    /// deciding its own quiet hours would be a second implementation of a rule
+    /// that has to agree with the desktop's, and the two would drift the first
+    /// time either changed.
+    ///
+    /// Returns the instant to wait until, or `None` to say it now.
+    ///
+    /// An instant rather than the hour `deliver` works in. That function is
+    /// pure and stays that way — §8.1 keeps clocks out of `capture-store`, and
+    /// an hour is all a rule needs. Turning "07:00" into a moment needs to know
+    /// what day it is and which zone, and this binding is the edge where both
+    /// are known.
+    ///
+    /// It also keeps the arithmetic out of the surface. A phone working out
+    /// what instant 07:00 tomorrow is would be doing date arithmetic in
+    /// Kotlin, which `make android-decides` refuses — and rightly: it is the
+    /// same calculation the core already does, differing at the edges nobody
+    /// looks at until a clock goes back.
+    pub fn hold_until(&self, timed: bool, armed: bool) -> Result<Option<i64>> {
+        let zone = capture_time::Zone::new(&self.zone_name())
+            .or_else(|| capture_time::Zone::new("UTC"))
+            .ok_or_else(|| CaptureError::Refused {
+                reason: "no usable timezone".into(),
+            })?;
+
+        let now = self.now_ms() as i64;
+        let hour = capture_time::civil_clock(now, zone).0;
+
+        let until = match capture_store::notifier::deliver(hour, timed, armed) {
+            capture_store::notifier::Delivery::Now => return Ok(None),
+            capture_store::notifier::Delivery::At(h) => h,
+        };
+
+        // Today if that hour is still ahead, tomorrow otherwise. Equal counts
+        // as past: it is already that hour, and the decision to hold was made
+        // knowing so.
+        let today = capture_time::civil_date(now, zone);
+        let date = if until > hour {
+            today
+        } else {
+            capture_time::add_days(now, zone, 1).ok_or_else(|| CaptureError::Refused {
+                reason: "tomorrow could not be worked out".into(),
+            })?
+        };
+
+        Ok(capture_time::at_local(date, until, 0, zone))
+    }
+
     /// The most recent notes, newest first.
     pub fn timeline(&self, limit: u32) -> Result<Vec<NoteSummary>> {
         let store = self.read()?;
         store
             .timeline(limit as usize)?
             .into_iter()
-            .map(|n| {
-                let tag = store.list_tag_of(&n.tgt)?;
-                let mut s = summarise(n);
-                s.list_tag = tag;
-                Ok(s)
-            })
+            .map(|n| read_as(&store, n))
             .collect()
     }
 
@@ -502,15 +732,8 @@ impl Archive {
         let tgt = store
             .resolve(&name)?
             .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
-        let tag = store.list_tag_of(&tgt)?;
-        store
-            .note(&tgt)?
-            .map(|n| {
-                let mut s = summarise(n);
-                s.list_tag = tag;
-                s
-            })
-            .ok_or(CaptureError::NotFound { name })
+        let row = store.note(&tgt)?.ok_or(CaptureError::NotFound { name })?;
+        read_as(&store, row)
     }
 
     /// Full-text search.
@@ -685,6 +908,26 @@ impl Archive {
             out.push(Condition {
                 tier: "attention".into(),
                 text: format!("{n} event(s) failed authentication ({reason})"),
+            });
+        }
+
+        // Whether this device can say a thing at the moment it names.
+        //
+        // The surface reports it here rather than the archive discovering it:
+        // `SCHEDULE_EXACT_ALARM` is an Android fact, and a core that tried to
+        // ask about it would be a core that knows what Android is.
+        //
+        // Said out loud rather than degraded quietly. An alert firing at some
+        // point in the following half hour is a different product from one
+        // firing at 2pm, and somebody relying on the second while receiving
+        // the first has no way to find that out.
+        if self.setting("alerts.inexact")?.as_deref() == Some("1") {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: "alerts fire approximately — this device has not been allowed exact \
+                       alarms, so a time may be up to an hour late. Settings › Apps › \
+                       capture › Alarms & reminders"
+                    .into(),
             });
         }
 
@@ -908,6 +1151,171 @@ impl Archive {
     pub fn set_done(&self, name: String, done: bool) -> Result<()> {
         let _w = self.write_lock()?;
         Ok(capture_store::promote::set_done(&self.paths, &name, done)?)
+    }
+
+    /// Stop accepting what a device writes from here on.
+    ///
+    /// The remedy for a device that was lost or stolen. It retires the *key*,
+    /// not an origin: retiring an origin would let the device mint a fresh
+    /// incarnation on its next restart and walk straight back in.
+    ///
+    /// Nothing is deleted. A retired device's past events were legitimately
+    /// authored and stay valid — discarding them would mean losing real notes,
+    /// which is a worse outcome than the access this closes.
+    ///
+    /// Here because the phone may be the only device left. Retiring a lost
+    /// phone from the desktop was always possible; a lost *desktop* left the
+    /// phone holding the archive and unable to close anything, which is the
+    /// half of §5.3's remedy that was never reachable.
+    ///
+    /// The key is matched by prefix, as it is shown in `peers`. An ambiguous
+    /// prefix is refused rather than resolved — retiring the wrong device is
+    /// undone only by the two-signature readmission below.
+    pub fn retire(&self, key: String) -> Result<String> {
+        let _w = self.write_lock()?;
+
+        let identity = capture_store::identity::Identity::load(&self.paths)?;
+        let log = capture_store::log::Log::open_read(&self.paths.events)?;
+        let roster = capture_core::roster::build(&log.all()?);
+        drop(log);
+
+        let wanted = key.to_ascii_lowercase();
+        let matches: Vec<[u8; 32]> = roster
+            .keys
+            .iter()
+            .copied()
+            .filter(|k| short_key(k).starts_with(&wanted))
+            .collect();
+
+        let subject = match matches.as_slice() {
+            [] => {
+                return Err(CaptureError::NotFound {
+                    name: format!("no device in the roster matches {key}"),
+                });
+            }
+            [one] => *one,
+            many => {
+                return Err(CaptureError::Refused {
+                    reason: format!("{} devices start with {key} — give more of it", many.len()),
+                });
+            }
+        };
+
+        // A roster with nobody in it can never admit anyone again, and there
+        // is no way back from that: readmission needs a signature from a
+        // member, and there would be none.
+        if roster.keys.len() == 1 {
+            return Err(CaptureError::Refused {
+                reason: "this is the only device in the roster, and a roster with nobody in \
+                         it can never admit anyone again"
+                    .into(),
+            });
+        }
+
+        let _ = identity;
+        let mut s = capture_store::session::Session::open(self.paths.clone())?;
+        s.retire(&subject, None)?;
+        Ok(short_key(&subject))
+    }
+
+    /// What this device needs another to vouch for, to get back in.
+    ///
+    /// Shown on the device that has been locked out. It is not a secret: it
+    /// names which device is asking and nothing else, and a signature over it
+    /// is useless without the second one from the device it names.
+    pub fn readmission_request(&self) -> Result<String> {
+        let identity = capture_store::identity::Identity::load(&self.paths)?;
+        Ok(format!(
+            "{}.{}",
+            hexed(&identity.public().to_bytes()),
+            hexed(&identity.incarnation().0),
+        ))
+    }
+
+    /// Vouch for another device's re-admission.
+    ///
+    /// Run on a device that still works, with the request the locked-out one
+    /// showed. §5.3 needs two signatures because any member may retire any
+    /// member: one compromised device can retire every other, after which
+    /// `device_add` cannot help — it needs a signature from a current member
+    /// and there are none left.
+    ///
+    /// Where this device is still a member it writes the re-admission itself
+    /// rather than handing back a signature to carry. That is not a
+    /// convenience: a retired device cannot open a session, so a re-admission
+    /// it authored has no way to reach the devices refusing it, and the remedy
+    /// cannot travel through the refusal it exists to undo.
+    pub fn cosign(&self, request: String) -> Result<String> {
+        let _w = self.write_lock()?;
+        let identity = capture_store::identity::Identity::load(&self.paths)?;
+
+        let (key, incarnation) = request
+            .split_once('.')
+            .ok_or_else(|| CaptureError::Refused {
+                reason: "that is not a re-admission request".into(),
+            })?;
+        let (Some(key), Some(incarnation)) = (unhexed(key), unhexed(incarnation)) else {
+            return Err(CaptureError::Refused {
+                reason: "that is not a re-admission request".into(),
+            });
+        };
+        let (Ok(key), Ok(incarnation)) = (
+            <[u8; 32]>::try_from(key.as_slice()),
+            <[u8; 16]>::try_from(incarnation.as_slice()),
+        ) else {
+            return Err(CaptureError::Refused {
+                reason: "that is not a re-admission request".into(),
+            });
+        };
+
+        if key == identity.public().to_bytes() {
+            return Err(CaptureError::Refused {
+                reason: "a device cannot vouch for itself — that is one device's say-so \
+                         written twice"
+                    .into(),
+            });
+        }
+
+        // A fixed nonce, so the two devices do not have to agree one first.
+        // The digest is domain-separated and says only which device is meant,
+        // so a second copy of the signature re-admits the same device, which
+        // is what it already says.
+        let nonce = [0u8; 16];
+        let digest = capture_core::body::readmit_digest(&key, &incarnation, &nonce);
+        let sig = ed25519_dalek::Signer::sign(identity.signing(), &digest);
+
+        let log = capture_store::log::Log::open_read(&self.paths.events)?;
+        let mut roster = capture_core::roster::build(&log.all()?);
+        roster.honour_self(&identity.public().to_bytes());
+        drop(log);
+
+        if roster.keys.contains(&identity.public().to_bytes()) {
+            let subject = capture_store::session::Admitted {
+                pubkey: key,
+                incarnation,
+                // Not known here and not needed: an origin claim or a
+                // pairing publishes it, and this device already holds one for
+                // a peer it had admitted before. Zero would be a claim, so the
+                // roster's own record is left to stand.
+                noise: [0u8; 32],
+            };
+            let mut s = capture_store::session::Session::open(self.paths.clone())?;
+            s.readmit_with(
+                &subject,
+                &identity.public().to_bytes(),
+                &sig.to_bytes(),
+                nonce,
+            )?;
+            return Ok(String::new());
+        }
+
+        // Not a member either. All this device can do is hand back a
+        // signature for somebody to carry.
+        Ok(format!(
+            "{}.{}",
+            hexed(&sig.to_bytes()),
+            hexed(&identity.public().to_bytes()),
+        ))
     }
 
     /// Run one sync round, for at most this many seconds.
@@ -1569,6 +1977,64 @@ fn when(ms: u64) -> String {
     format!("{day} {at}")
 }
 
+/// A summary, completed from the projection it was read out of.
+///
+/// One function rather than one per call site. The timeline and the note page
+/// are separate queries, and the whole argument for keeping the rendering in
+/// the projection is that two readings of one note cannot disagree — which
+/// they would the first time somebody fixed one call site and not the other.
+fn read_as(
+    store: &capture_store::projection::Store,
+    n: capture_store::projection::NoteRow,
+) -> Result<NoteSummary> {
+    let tgt = n.tgt;
+    let tag = store.list_tag_of(&tgt)?;
+    let mut s = summarise(n);
+
+    if let Some(p) = store.promotion_of(&tgt)? {
+        s.kind = p.kind;
+        s.descriptor = p.descriptor;
+    }
+
+    // Only a list has items, and asking for them costs a query — so it is
+    // asked only where the fold already said there is a list to ask about.
+    if tag.is_some() {
+        // This capture's own items, by one indexed query. Asking `list` and
+        // filtering would gather the whole tag — every capture under it and
+        // every task carrying it — once per row, which measured at 66ms for a
+        // hundred rows.
+        s.items = store
+            .items_of(&tgt)?
+            .into_iter()
+            .map(|e| ListLine {
+                text: e.text,
+                done: e.done,
+                ord: e.ord,
+            })
+            .collect();
+    }
+    s.list_tag = tag;
+    Ok(s)
+}
+
+/// A key as the surfaces show it — six bytes rather than thirty-two.
+fn short_key(k: &[u8; 32]) -> String {
+    k[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hexed(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhexed(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect()
+}
+
 fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
     let (day, at) = rendered(n.created.0 as i64, n.tz.as_deref());
     NoteSummary {
@@ -1586,5 +2052,8 @@ fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
         // rather than guessed at: a summary that re-parsed the text would be a
         // second implementation of the list form.
         list_tag: None,
+        kind: "note".into(),
+        descriptor: String::new(),
+        items: Vec::new(),
     }
 }

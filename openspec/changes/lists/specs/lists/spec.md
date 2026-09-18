@@ -82,29 +82,48 @@ duplicated by appearing in more than one list.
 - **WHEN** two captures each name items under the tag `groceries`
 - **THEN** reading that list returns the items of both
 
-### Requirement: Completing an item promotes it to a task and marks it done
+### Requirement: Completing an item is an event naming it, and mints nothing
 
-Completing a list item SHALL promote that item to a task and mark that task done.
-The item SHALL NOT be removed from the projection and the list capture SHALL NOT
-be rewritten. Reopening SHALL mark the same task open again.
+Completing a list item SHALL append an event naming the item's list capture and
+the item's text, and SHALL NOT create a note, a task, or any other capture. The
+list capture SHALL NOT be rewritten and the item SHALL remain expanded from it.
+
+Reopening SHALL append the reversing event. Completion SHALL survive a
+projection rebuild, because it is a fact in the log rather than derived state.
+
+This mirrors how one instance of a recurring series is completed (§3.6): an
+occurrence is a projection row named by an event, and completing it creates no
+note. A list item is the same shape and SHALL be treated the same way. Minting
+a note per completed item would put captures in the timeline that nobody made
+— a week of shopping would seed it with "milk", "eggs" and "bread".
 
 #### Scenario: Ticking an item records what happened
 - **WHEN** the item `milk` is completed
-- **THEN** a task exists for that item carrying the tag of its list
-- **AND** that task is done
+- **THEN** an event naming that item is appended
+- **AND** the item is marked done
 - **AND** the list capture's text is unchanged
+
+#### Scenario: Nothing is minted
+- **WHEN** an item is completed
+- **THEN** no new note exists
+- **AND** the timeline holds only what was captured
 
 #### Scenario: A completed item is still on the list
 - **WHEN** an item has been completed
 - **AND** its list is read
 - **THEN** the item is returned, marked done
 
+#### Scenario: Completion survives a rebuild
+- **WHEN** an item has been completed
+- **AND** the projection is rebuilt
+- **THEN** the item is still marked done
+
 #### Scenario: Reopening is the same path backwards
 - **WHEN** a completed item is reopened
-- **THEN** its task is open
-- **AND** no second task exists for that item
+- **THEN** the item is open
+- **AND** no note was created or destroyed doing it
 
 #### Scenario: Completing twice is completing once
 - **WHEN** an item already completed is completed again
-- **THEN** one task exists for that item
-- **AND** it is done
+- **THEN** the item is done
+- **AND** nothing further is recorded

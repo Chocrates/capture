@@ -18,6 +18,13 @@ name = "capture_ffi"
 capture-store = { path = "../capture-store", features = ["mdns"] }
 capture-core = { path = "../capture-core", features = ["std"] }
 capture-time = { path = "../capture-time" }
+# The vocabulary, for showing under the capture field. §3.1.1 makes the markers
+# discovered by seeing them, which requires that a surface can ask what they
+# are — and asking is better than a copy, which drifts.
+capture-parse = { path = "../capture-parse" }
+# To sign a re-admission. §5.3 needs two signatures to undo a lockout, and one
+# of them may have to come from the phone — it can be the only device left.
+ed25519-dalek = { workspace = true, features = ["std"] }
 # To read one field out of an event body the projection does not keep.
 minicbor = { workspace = true }
 uniffi = { workspace = true, features = ["cli"] }
@@ -25,7 +32,11 @@ thiserror = { workspace = true }
 jiff = { workspace = true }
 
 [dev-dependencies]
-capture-parse = { path = "../capture-parse" }
+# To age a projection on purpose. A test that an upgrade rebuilds before it
+# reads has to be able to write an older schema version into the generation's
+# own metadata — which is the state an upgrade leaves behind, and is not
+# reachable through any interface the surfaces have.
+rusqlite = { workspace = true }
 # To read the log directly. A test that pairing wrote no `setting` has to look
 # at the events, not at the surface — the surface is what would be wrong.
 capture-store = { path = "../capture-store", features = ["mdns"] }
