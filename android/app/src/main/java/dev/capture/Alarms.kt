@@ -34,6 +34,14 @@ object Alarms {
 
     const val CHANNEL = "alerts"
 
+    /**
+     * How many can arrive separately before they arrive together.
+     *
+     * Three is a morning. Ten is a wall, and a wall gets swiped rather than
+     * read — which loses every one of them, including the one that mattered.
+     */
+    private const val TOGETHER = 3
+
     /** How far ahead to look for the next moment. */
     private const val HORIZON_MS = 30L * 24 * 60 * 60 * 1000
 
@@ -113,26 +121,52 @@ object Alarms {
         val archive = Store.of(context)
         val due = runCatching { archive.due(0) }.getOrNull().orEmpty()
 
-        for (alert in due) {
-            if (alert.delivered) continue
+        // Whether this device can speak at all, recorded every time it tries.
+        //
+        // The platform's way of refusing a notification is to accept it and
+        // drop it, so this is the only moment the answer is known — and
+        // without recording it, an archive full of scheduled moments would sit
+        // silent with nothing anywhere saying why.
+        val manager = context.getSystemService(NotificationManager::class.java)
+        runCatching {
+            archive.setAlertsSilenced(manager?.areNotificationsEnabled() != true)
+        }
 
-            // Held rather than said: quiet hours, or a batch it belongs to.
-            // Nothing is marked delivered, so it is still due when the hour
-            // comes round.
-            if (runCatching { archive.holdUntil(alert.timed, false) }.getOrNull() != null) {
-                continue
-            }
+        val now = System.currentTimeMillis()
+        val sayable = due.filter { alert ->
+            !alert.delivered &&
+                // Held rather than said: quiet hours, or a batch it belongs
+                // to. Nothing is marked delivered, so it is still due when
+                // the hour comes round.
+                runCatching {
+                    archive.holdUntil(alert.timed, false, now - alert.atMs)
+                }.getOrNull() == null
+        }
 
-            // Marked delivered only if it actually was.
+        // Marked delivered only if it actually was.
+        //
+        // Posting to a blocked channel succeeds and does nothing: the platform
+        // drops it and reports no error. Marking it anyway meant the archive
+        // recorded "said" for something nobody could have heard — and because
+        // delivery happens once, the moment was then gone for good.
+        if (sayable.size > TOGETHER) {
+            // One notification, not nine.
             //
-            // Posting to a blocked channel succeeds and does nothing: the
-            // platform drops it and reports no error. Marking it anyway meant
-            // the archive recorded "said" for something nobody could have
-            // heard — and because delivery happens once, the moment was then
-            // gone for good. A missed alert that still knows it is due can be
-            // delivered late; one that believes it already spoke cannot.
-            if (say(context, alert)) {
-                runCatching { archive.delivered(alert.slug, alert.occ) }
+            // A phone left alone overnight comes back holding a day of
+            // moments, and posting each of them is a wall somebody clears by
+            // swiping rather than by reading — which loses every one of them,
+            // including the one that mattered. That is §2.6's own argument
+            // arrived at from the other direction.
+            if (summarise(context, sayable)) {
+                for (alert in sayable) {
+                    runCatching { archive.delivered(alert.slug, alert.occ) }
+                }
+            }
+        } else {
+            for (alert in sayable) {
+                if (say(context, alert)) {
+                    runCatching { archive.delivered(alert.slug, alert.occ) }
+                }
             }
         }
 
@@ -158,7 +192,10 @@ object Alarms {
     private fun scheduleHoldRelease(context: Context, due: List<Alert>) {
         val archive = Store.of(context)
         val at = due.filter { !it.delivered }
-            .mapNotNull { runCatching { archive.holdUntil(it.timed, false) }.getOrNull() }
+            .mapNotNull {
+                val lateBy = System.currentTimeMillis() - it.atMs
+                runCatching { archive.holdUntil(it.timed, false, lateBy) }.getOrNull()
+            }
             .minOrNull() ?: return
 
         val manager = context.getSystemService(AlarmManager::class.java) ?: return
@@ -174,6 +211,45 @@ object Alarms {
                 ),
             )
         }
+    }
+
+    /**
+     * Post one line for all of them.
+     *
+     * Returns whether it could be said, on the same terms as [say].
+     */
+    private fun summarise(context: Context, alerts: List<Alert>): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        if (!manager.areNotificationsEnabled()) return false
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL, "Alerts", NotificationManager.IMPORTANCE_HIGH),
+        )
+
+        val open = PendingIntent.getActivity(
+            context,
+            "summary".hashCode(),
+            Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        // The texts themselves, not a count. "9 things were due" says nothing
+        // anybody can act on; the first few lines say whether to open it.
+        val style = NotificationCompat.InboxStyle()
+        for (a in alerts.take(5)) style.addLine(a.text)
+        if (alerts.size > 5) style.setSummaryText("and ${alerts.size - 5} more")
+
+        manager.notify(
+            "summary".hashCode(),
+            NotificationCompat.Builder(context, CHANNEL)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("${alerts.size} things were due")
+                .setContentText(alerts.first().text)
+                .setStyle(style)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build(),
+        )
+        return true
     }
 
     /**

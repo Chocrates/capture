@@ -1087,7 +1087,7 @@ fn backlink_json(b: &Backlink) -> String {
 /// thing that delivers is that "why did nothing happen" has an answer which
 /// does not require waiting for the thing to happen again.
 pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
-    use capture_store::notifier::{Delivery, deliver};
+    use capture_store::notifier::{Delivery, deliver_late};
 
     // Open a session first, which sweeps.
     //
@@ -1157,7 +1157,7 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
         } else if d.at > now {
             "waiting".into()
         } else {
-            match deliver(hour, d.timed, false) {
+            match deliver_late(hour, d.timed, false, now.saturating_sub(d.at)) {
                 Delivery::Now => "now".into(),
                 Delivery::At(h) => format!("held to {h:02}:00"),
             }

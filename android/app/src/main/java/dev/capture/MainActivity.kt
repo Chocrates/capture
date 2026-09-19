@@ -137,8 +137,22 @@ class MainActivity : ComponentActivity() {
         // holds: a permission requested before anything has explained why is
         // the one most often refused permanently. By the time something is
         // scheduled, what it is for is whatever the person just wrote down.
-        askToSpeakIfNeeded()
-        askForExactAlarmsIfNeeded()
+        // One at a time, and permission to speak first.
+        //
+        // These were called back to back, and the second broke the first:
+        // launching the Settings activity for exact alarms takes the
+        // application out of the foreground, which dismisses the notification
+        // permission dialog before anybody can answer it. The result was a
+        // phone that had been sent to Settings to make its alerts *precise*
+        // while still not being allowed to make any.
+        //
+        // Notifications are required for an alert to exist at all; exact
+        // alarms only decide whether it lands on its moment or within a
+        // window. Asking for the optional one in a way that destroys the
+        // required one is backwards.
+        if (!askToSpeakIfNeeded()) {
+            askForExactAlarmsIfNeeded()
+        }
 
         // A notification tapped, rather than the app opened.
         intent?.getStringExtra(OPEN_NOTE)?.let { slug ->
@@ -154,19 +168,20 @@ class MainActivity : ComponentActivity() {
      * no reason to want this, and asking anyway is how the request gets
      * refused before it means anything.
      */
-    private fun askToSpeakIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    private fun askToSpeakIfNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
         val granted = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
-        if (granted || asked) return
+        if (granted || asked) return false
 
         val pending = runCatching { model.hasAlerts() }.getOrDefault(false)
-        if (!pending) return
+        if (!pending) return false
 
         asked = true
         askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        return true
     }
 
     /**
@@ -184,6 +199,17 @@ class MainActivity : ComponentActivity() {
     private fun askForExactAlarmsIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         if (offeredExact) return
+
+        // Only once there is permission to speak at all. Being sent to
+        // Settings to make silent alerts punctual is not a useful trip.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
 
         val manager = getSystemService(AlarmManager::class.java) ?: return
         if (manager.canScheduleExactAlarms()) return

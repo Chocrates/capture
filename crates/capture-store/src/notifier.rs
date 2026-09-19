@@ -229,13 +229,38 @@ pub enum Delivery {
 /// by the recognizer. `dentist thursday 2pm` at 2am is almost certainly a
 /// misparse; `capture intent at 02:00` is not.
 pub fn deliver(hour: u32, timed: bool, armed: bool) -> Delivery {
+    deliver_late(hour, timed, armed, 0)
+}
+
+/// How long after its moment a timed alert is still worth saying immediately.
+///
+/// Past this it is not an alarm any more, it is a note about something that
+/// already happened — "your 9am meeting" delivered at 4pm — and it joins a
+/// batch like anything else.
+///
+/// Found by leaving a store alone and asking what was due: seven captures that
+/// each named 09:00 all came back `Now`, because each was individually
+/// time-critical. They would have arrived as seven notifications the moment
+/// somebody opened the phone. §2.6's batching is what should have caught that
+/// and did not, because "named a time" was being read as "matters right now"
+/// long after the time had gone.
+pub const STILL_PROMPT_MS: i64 = 30 * 60 * 1000;
+
+/// The same decision, told how late the moment is.
+///
+/// `late_by` is milliseconds since the moment passed; zero or negative means
+/// it is arriving on time.
+pub fn deliver_late(hour: u32, timed: bool, armed: bool, late_by: i64) -> Delivery {
     // The waking day is the half-open range; quiet is everything else.
     let quiet = !(QUIET_UNTIL..QUIET_FROM).contains(&hour);
 
     if quiet && !armed {
         return Delivery::At(QUIET_UNTIL);
     }
-    if timed {
+    // Armed is unconditional. Somebody who set an alarm meant it, and one
+    // arriving late is a reason to say so now rather than to hold it until the
+    // afternoon — the lateness is the news.
+    if armed || (timed && late_by < STILL_PROMPT_MS) {
         return Delivery::Now;
     }
 
@@ -369,7 +394,11 @@ mod budget {
 
     #[test]
     fn after_the_last_batch_it_waits_for_the_first() {
-        assert_eq!(deliver(20, false, true), Delivery::At(BATCHES[0]));
+        // Not armed. This was written with `armed = true` to get past quiet
+        // hours, which 20:00 is not — and it started failing the moment armed
+        // became unconditional, correctly: something somebody set a moment for
+        // does not wait for tomorrow morning.
+        assert_eq!(deliver(20, false, false), Delivery::At(BATCHES[0]));
     }
 
     #[test]
@@ -381,6 +410,52 @@ mod budget {
                 "a timed alert at {hour}:00 still waits for morning",
             );
             assert_eq!(deliver(hour, false, false), Delivery::At(QUIET_UNTIL));
+        }
+    }
+
+    #[test]
+    fn a_moment_long_past_is_no_longer_urgent() {
+        // Seven captures each naming 09:00, found overdue at once, all came
+        // back `Now` — seven notifications the moment somebody opened the
+        // phone. Being late is what makes them not urgent; each is still
+        // individually "timed".
+        let late = STILL_PROMPT_MS + 1;
+        assert_eq!(deliver_late(10, true, false, late), Delivery::At(14));
+    }
+
+    #[test]
+    fn a_moment_just_passed_is_still_urgent() {
+        // The common case, and the one this must not break: an alarm fires a
+        // few seconds late because a phone took a moment to wake.
+        assert_eq!(deliver_late(10, true, false, 5_000), Delivery::Now);
+        assert_eq!(
+            deliver_late(10, true, false, STILL_PROMPT_MS - 1),
+            Delivery::Now
+        );
+    }
+
+    #[test]
+    fn an_armed_alarm_is_urgent_however_late_it_is() {
+        // Somebody who set an alarm meant it. Arriving late is a reason to say
+        // so, not a reason to wait until the afternoon.
+        assert_eq!(
+            deliver_late(10, true, true, 10 * STILL_PROMPT_MS),
+            Delivery::Now
+        );
+    }
+
+    #[test]
+    fn the_old_signature_still_means_on_time() {
+        for hour in 0..24 {
+            for timed in [true, false] {
+                for armed in [true, false] {
+                    assert_eq!(
+                        deliver(hour, timed, armed),
+                        deliver_late(hour, timed, armed, 0),
+                        "deliver is deliver_late with nothing late about it",
+                    );
+                }
+            }
         }
     }
 

@@ -422,14 +422,21 @@ impl Session {
             if ops.alerted(&d.tgt.0, d.occ)? {
                 continue;
             }
-            if crate::notifier::deliver(hour, d.timed, false) != crate::notifier::Delivery::Now {
+            // How late it is decides whether it is still urgent. A moment
+            // long past is a note about something that happened, not an
+            // alarm, and seven of those arriving at once is what the backlog
+            // case looked like before this was passed in.
+            let late_by = now.saturating_sub(d.at);
+            if crate::notifier::deliver_late(hour, d.timed, false, late_by)
+                != crate::notifier::Delivery::Now
+            {
                 continue;
             }
 
             // Late is said rather than hidden. A machine switched off through
             // an afternoon should say the afternoon happened rather than
             // presenting a moment from three hours ago as if it were now.
-            let late = now.saturating_sub(d.at) > 5 * 60 * 1000;
+            let late = late_by > 5 * 60 * 1000;
             let text = if late {
                 format!("{} (was due earlier)", d.text)
             } else {

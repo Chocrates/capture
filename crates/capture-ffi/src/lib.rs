@@ -597,6 +597,17 @@ impl Archive {
     /// Local state rather than a `setting` event: it is a fact about this
     /// phone's permissions, not a decision about the archive, and syncing it
     /// would tell the desktop something untrue about itself (§2.5.2).
+    /// Record whether this device is allowed to show notifications at all.
+    ///
+    /// Told by the surface, because it is an Android fact. Reported on the
+    /// health surface rather than only attempted, since the platform's way of
+    /// refusing is to do nothing.
+    pub fn set_alerts_silenced(&self, silenced: bool) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        ops.set("alerts.silenced", if silenced { "1" } else { "0" })?;
+        Ok(())
+    }
+
     pub fn set_alerts_inexact(&self, inexact: bool) -> Result<()> {
         let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
         ops.set("alerts.inexact", if inexact { "1" } else { "0" })?;
@@ -680,7 +691,7 @@ impl Archive {
     /// Kotlin, which `make android-decides` refuses — and rightly: it is the
     /// same calculation the core already does, differing at the edges nobody
     /// looks at until a clock goes back.
-    pub fn hold_until(&self, timed: bool, armed: bool) -> Result<Option<i64>> {
+    pub fn hold_until(&self, timed: bool, armed: bool, late_by_ms: i64) -> Result<Option<i64>> {
         let zone = capture_time::Zone::new(&self.zone_name())
             .or_else(|| capture_time::Zone::new("UTC"))
             .ok_or_else(|| CaptureError::Refused {
@@ -690,7 +701,7 @@ impl Archive {
         let now = self.now_ms() as i64;
         let hour = capture_time::civil_clock(now, zone).0;
 
-        let until = match capture_store::notifier::deliver(hour, timed, armed) {
+        let until = match capture_store::notifier::deliver_late(hour, timed, armed, late_by_ms) {
             capture_store::notifier::Delivery::Now => return Ok(None),
             capture_store::notifier::Delivery::At(h) => h,
         };
@@ -912,6 +923,22 @@ impl Archive {
         // point in the following half hour is a different product from one
         // firing at 2pm, and somebody relying on the second while receiving
         // the first has no way to find that out.
+        // The one that makes every other alert moot.
+        //
+        // Android stops showing the permission prompt after it has been
+        // dismissed twice, and `launch()` then does nothing at all — no
+        // dialog, no callback, no error. An application that only asked
+        // through the prompt would be permanently unable to speak and
+        // permanently unable to say so.
+        if self.setting("alerts.silenced")?.as_deref() == Some("1") {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: "this device cannot show notifications, so nothing will be said when a \
+                       time arrives. Settings › Apps › capture › Notifications"
+                    .into(),
+            });
+        }
+
         if self.setting("alerts.inexact")?.as_deref() == Some("1") {
             out.push(Condition {
                 tier: "attention".into(),

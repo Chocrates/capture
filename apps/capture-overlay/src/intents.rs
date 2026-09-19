@@ -82,7 +82,7 @@ fn look(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
 /// to `notifier::deliver` rather than here, so the desktop and the phone
 /// cannot come to different conclusions about what hour it is safe to speak.
 fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
-    use capture_store::notifier::{Delivery, deliver};
+    use capture_store::notifier::{Delivery, deliver_late};
 
     let zone_name = local_zone();
     let Some(zone) = capture_time::Zone::new(&zone_name) else {
@@ -99,13 +99,14 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
         }
         // Held, not dropped. Nothing is marked, so it is still due when the
         // hour comes round.
-        if deliver(hour, d.timed, false) != Delivery::Now {
+        let late_by = now.saturating_sub(d.at);
+        if deliver_late(hour, d.timed, false, late_by) != Delivery::Now {
             continue;
         }
 
         // Late is said rather than hidden. A machine that was off through an
         // afternoon should say the afternoon happened.
-        let late = now.saturating_sub(d.at) > 5 * 60 * 1000;
+        let late = late_by > 5 * 60 * 1000;
         let said = if late {
             format!("{} (was due earlier)", d.text)
         } else {
