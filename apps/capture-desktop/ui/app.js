@@ -515,6 +515,14 @@ function noteRow(note, onOpen) {
     head.append(s);
   }
   if (note.pinned) head.append(el("span", "state", "pinned"));
+  // What the archive made of it, where it made anything.
+  //
+  // The phone has drawn this since the projection change; this window took the
+  // same three fields across the IPC boundary and dropped them on the floor,
+  // so a task, an event and a series all rendered as the line somebody typed.
+  // §3.1 makes the type a promotion rather than a choice, and a surface that
+  // never shows the promotion is one where that distinction does not exist.
+  if (note.descriptor) head.append(el("span", "descriptor", note.descriptor));
   for (const t of note.tags) {
     const b = el("button", "tag", `#${t}`);
     b.addEventListener("click", (e) => {
@@ -541,6 +549,26 @@ function noteRow(note, onOpen) {
           ? "(content withheld — queued for destruction)"
           : "(no readable text)";
   }
+  // The items, where this capture names any.
+  //
+  // Drawn on the row rather than behind a click, for the reason the phone
+  // draws them: the sigil syntax is an accelerant for *writing*, and a reader
+  // left to decode `#groceries: milk, eggs, bread` by eye is doing the
+  // recognizer's job by hand.
+  //
+  // Not tickable here. Completing an item is a write, and this row is a button
+  // that opens the note — nesting a second control inside it would make one
+  // gesture ambiguous. The note page is where a list is worked through.
+  if (note.items && note.items.length) {
+    const list = el("ul", "items");
+    for (const item of note.items) {
+      const li = el("li", item.done ? "item done" : "item");
+      li.textContent = item.text;
+      list.append(li);
+    }
+    row.append(list);
+  }
+
   row.append(body);
   return row;
 }

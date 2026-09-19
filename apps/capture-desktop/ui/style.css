@@ -330,6 +330,34 @@ nav .hist:not(:disabled):hover { color: var(--text); }
   color: var(--dim, #8a8f98);
 }
 .promotion .descriptor { color: var(--fg, #d8dee9); }
+
+/* What a capture turned out to be, on a timeline row.
+ *
+ * The accent, because it is the one thing on the row that is not what somebody
+ * typed — and small, because §3.1.4 keeps the captured text primary: the
+ * descriptor exists so a disagreement between the two is visible, not so it
+ * replaces the text. */
+.note .descriptor {
+  color: var(--accent);
+  font-size: .8em;
+  margin-left: .5rem;
+}
+
+/* A list's items, on the row that names them. */
+.note .items {
+  margin: .25rem 0 .25rem 1.1rem;
+  padding: 0;
+  list-style: none;
+}
+.note .item::before {
+  content: "☐ ";
+  color: var(--dim);
+}
+.note .item.done::before { content: "☑ "; }
+.note .item.done {
+  color: var(--dim);
+  text-decoration: line-through;
+}
 .promotion .pinned-by-hand,
 .promotion .confidence {
   font-size: 0.7rem;
