@@ -240,9 +240,5 @@ pub fn decode_value(s: &str) -> Option<[u8; 8]> {
     if s.len() != ADVERTISED * 2 {
         return None;
     }
-    let mut out = [0u8; ADVERTISED];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    capture_core::id::unhex_array::<ADVERTISED>(s)
 }

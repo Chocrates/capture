@@ -86,15 +86,7 @@ fn daily(paths: &StorePaths, text: &str, carries_forward: bool) -> capture_core:
 }
 
 fn store(paths: &StorePaths) -> capture_store::projection::Store {
-    let generation = capture_store::ops::Ops::open_read(&paths.ops)
-        .unwrap()
-        .generation()
-        .unwrap();
-    capture_store::projection::Store::open_read(&capture_store::projection::generation_path(
-        &paths.state,
-        generation,
-    ))
-    .unwrap()
+    capture_store::projection::current(paths).unwrap()
 }
 
 #[test]

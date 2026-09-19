@@ -139,14 +139,7 @@ impl Waker {
 /// error. An overlay that refused to open because a preference was unavailable
 /// would have traded a legible window for no window.
 fn text_scale(paths: &StorePaths) -> f32 {
-    let store = capture_store::ops::Ops::open_read(&paths.ops)
-        .and_then(|ops| ops.generation())
-        .and_then(|g| {
-            capture_store::projection::Store::open_read(
-                &capture_store::projection::generation_path(&paths.state, g),
-            )
-        })
-        .ok();
+    let store = capture_store::projection::current(paths).ok();
 
     capture_store::settings::number(store.as_ref(), "capture.text_scale")
 }

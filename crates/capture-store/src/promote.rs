@@ -346,10 +346,7 @@ fn alloc_string(d: capture_time::FloatingDate) -> String {
 /// is the ordinary case rather than the exotic one.
 pub fn set_done(paths: &StorePaths, name: &str, done: bool) -> Result<()> {
     let current = {
-        let store = crate::projection::Store::open_read(&crate::projection::generation_path(
-            &paths.state,
-            crate::ops::Ops::open_read(&paths.ops)?.generation()?,
-        ))?;
+        let store = crate::projection::current(paths)?;
         let tgt = store
             .resolve(name)?
             .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
@@ -383,10 +380,7 @@ pub fn set_done(paths: &StorePaths, name: &str, done: bool) -> Result<()> {
 /// either one's presentation.
 pub fn carries_forward(paths: &StorePaths, name: &str) -> Result<()> {
     let current = {
-        let store = crate::projection::Store::open_read(&crate::projection::generation_path(
-            &paths.state,
-            crate::ops::Ops::open_read(&paths.ops)?.generation()?,
-        ))?;
+        let store = crate::projection::current(paths)?;
         let tgt = store
             .resolve(name)?
             .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
@@ -819,11 +813,10 @@ pub fn tick(paths: &StorePaths, tag: &str, item: &str, done: bool, now: u64) -> 
     Ok(Ticked::Done)
 }
 
-/// The current generation, read-only. The same three lines `set_done` opens
-/// with, named once because `tick` needs them twice.
+/// The current generation, read-only.
+///
+/// Delegates now: the four lines this used to hold were the same four lines
+/// fourteen other places held, and they encode a rule rather than a path.
 fn reading(paths: &StorePaths) -> Result<crate::projection::Store> {
-    crate::projection::Store::open_read(&crate::projection::generation_path(
-        &paths.state,
-        crate::ops::Ops::open_read(&paths.ops)?.generation()?,
-    ))
+    crate::projection::current(paths)
 }

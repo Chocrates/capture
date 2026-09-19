@@ -16,6 +16,15 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -24,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
@@ -334,48 +344,76 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
 private fun Bar(model: Model) {
     val here = model.screen
     NavigationBar {
-        NavigationBarItem(
-            selected = here is Screen.Timeline || here is Screen.Note,
-            onClick = { model.go(Screen.Timeline) },
-            icon = {},
-            label = { Text("Timeline") },
-        )
-        NavigationBarItem(
-            selected = here is Screen.Agenda,
-            onClick = { model.go(Screen.Agenda(model.today())) },
-            icon = {},
-            label = { Text("Agenda") },
-        )
-        NavigationBarItem(
-            selected = here is Screen.Wiki,
-            onClick = { model.go(Screen.Wiki) },
-            icon = {},
-            label = { Text("Pages") },
-        )
-        NavigationBarItem(
-            selected = here is Screen.Search,
-            onClick = { model.go(Screen.Search) },
-            icon = {},
-            label = { Text("Search") },
-        )
-        NavigationBarItem(
-            selected = here is Screen.Plans,
-            onClick = { model.go(Screen.Plans) },
-            icon = {},
-            label = { Text("Plans") },
-        )
-        NavigationBarItem(
-            selected = here is Screen.Review,
-            onClick = { model.go(Screen.Review) },
-            icon = {},
-            label = { Text("Review") },
-        )
-        NavigationBarItem(
-            // Pairing lives behind Health, which is where the devices are.
-            selected = here is Screen.Health || here is Screen.Pairing,
-            onClick = { model.go(Screen.Health) },
-            icon = {},
-            label = { Text("Health") },
-        )
+        for (tab in TABS) {
+            NavigationBarItem(
+                selected = tab.selected(here),
+                onClick = { model.go(tab.go(model)) },
+                icon = { Icon(tab.icon, contentDescription = null) },
+                label = { Text(tab.label) },
+            )
+        }
     }
 }
+
+/**
+ * One destination in the bar.
+ *
+ * A table rather than seven hand-written items, because seven of anything
+ * written out by hand is seven places to forget one — the previous version had
+ * the selection rule for each spelled out separately, and `Note` counting as
+ * `Timeline` was in exactly one of them.
+ */
+private class Tab(
+    val label: String,
+    val icon: ImageVector,
+    val selected: (Screen) -> Boolean,
+    val go: (Model) -> Screen,
+)
+
+/**
+ * The seven, and why they have icons now.
+ *
+ * Material's `NavigationBar` is specified for three to five destinations.
+ * There are seven, and they were drawn with `icon = {}` — so each label had
+ * a seventh of the width to itself, which on a Pixel 8 Pro is 144dp. "Timeline"
+ * wrapped mid-word to "Timelin / e" and "Health" was clipped at the right edge.
+ *
+ * An icon is not decoration here: it is what makes the label stop competing
+ * for horizontal space, because the item lays them out vertically. The labels
+ * stay, because an icon alone is a thing you have to learn and §3.1.1's whole
+ * argument about the capture syntax — discovered by seeing it — applies at
+ * least as much to navigation.
+ *
+ * Seven is still over Material's guidance, and the honest fix is fewer
+ * destinations. That is a change to how the application is navigated rather
+ * than to how it is drawn, and it wants somebody's opinion after a week of
+ * use rather than mine now.
+ */
+private val TABS = listOf(
+    Tab(
+        // "Timeline" rather than "Notes" everywhere else, and "Notes" here.
+        //
+        // Icons fixed six of the seven labels; this one still wrapped to
+        // "Timelin / e", because the selected tab is drawn with a pill behind
+        // it that takes width the others do not need — so the longest label is
+        // also the one with least room, exactly when it is being looked at.
+        "Notes",
+        Icons.AutoMirrored.Filled.List,
+        // A note opened from the timeline is still the timeline. The bar
+        // should not appear to have moved because a row was tapped.
+        { it is Screen.Timeline || it is Screen.Note },
+        { Screen.Timeline },
+    ),
+    Tab("Agenda", Icons.Filled.DateRange, { it is Screen.Agenda }, { Screen.Agenda(it.today()) }),
+    Tab("Pages", Icons.Filled.Menu, { it is Screen.Wiki }, { Screen.Wiki }),
+    Tab("Search", Icons.Filled.Search, { it is Screen.Search }, { Screen.Search }),
+    Tab("Plans", Icons.Filled.Place, { it is Screen.Plans }, { Screen.Plans }),
+    Tab("Review", Icons.Filled.Refresh, { it is Screen.Review }, { Screen.Review }),
+    Tab(
+        "Health",
+        Icons.Filled.Favorite,
+        // Pairing lives behind Health, which is where the devices are.
+        { it is Screen.Health || it is Screen.Pairing },
+        { Screen.Health },
+    ),
+)

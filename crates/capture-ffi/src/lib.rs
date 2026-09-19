@@ -518,13 +518,7 @@ impl Archive {
             //
             // Here rather than in `read`, which runs per query: this costs a
             // full fold and fires once per upgrade.
-            let stale = capture_store::ops::Ops::open_read(&paths.ops)
-                .and_then(|ops| ops.generation())
-                .and_then(|g| {
-                    capture_store::projection::Store::open_read(
-                        &capture_store::projection::generation_path(&paths.state, g),
-                    )
-                })
+            let stale = capture_store::projection::current(&paths)
                 .and_then(|store| store.is_stale())
                 .unwrap_or(false);
 
@@ -768,10 +762,7 @@ impl Archive {
     /// window. Two callers deriving it separately is how `today()` and
     /// `agenda()` came to disagree about what day it was.
     fn zone_name(&self) -> String {
-        jiff::tz::TimeZone::system()
-            .iana_name()
-            .unwrap_or("UTC")
-            .to_string()
+        capture_store::notifier::local_zone()
     }
 
     pub fn today(&self) -> String {
@@ -1254,7 +1245,7 @@ impl Archive {
             .ok_or_else(|| CaptureError::Refused {
                 reason: "that is not a re-admission request".into(),
             })?;
-        let (Some(key), Some(incarnation)) = (unhexed(key), unhexed(incarnation)) else {
+        let (Some(key), Some(incarnation)) = (unhex(key), unhex(incarnation)) else {
             return Err(CaptureError::Refused {
                 reason: "that is not a re-admission request".into(),
             });
@@ -1828,10 +1819,7 @@ impl Archive {
     /// against another device's screen when pairing.
     pub fn device_key(&self) -> Result<String> {
         let identity = capture_store::Identity::load(&self.paths)?;
-        Ok(identity.public().to_bytes()[..6]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+        Ok(capture_core::id::short_key(&identity.public().to_bytes()))
     }
 }
 
@@ -1868,10 +1856,7 @@ impl Archive {
     }
 
     fn read(&self) -> Result<capture_store::projection::Store> {
-        let generation = capture_store::ops::Ops::open_read(&self.paths.ops)?.generation()?;
-        Ok(capture_store::projection::Store::open_read(
-            &capture_store::projection::generation_path(&self.paths.state, generation),
-        )?)
+        Ok(capture_store::projection::current(&self.paths)?)
     }
 }
 
@@ -1938,7 +1923,7 @@ impl Offer {
 
         let now = || jiff::Timestamp::now().as_millisecond().max(0) as u64;
         let joined = offering.admit_one(&self.paths, now(), now)?;
-        Ok(joined[..6].iter().map(|b| format!("{b:02x}")).collect())
+        Ok(capture_core::id::short_key(&joined))
     }
 }
 
@@ -1958,16 +1943,11 @@ fn hex(raw: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) || s.is_empty() {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    capture_core::id::unhex(s)
 }
 
 fn named(key: &[u8; 32]) -> String {
-    key[..6].iter().map(|b| format!("{b:02x}")).collect()
+    capture_core::id::short_key(key)
 }
 
 /// A moment, in this device's zone.
@@ -2017,22 +1997,17 @@ fn read_as(
     Ok(s)
 }
 
-/// A key as the surfaces show it — six bytes rather than thirty-two.
+/// A key as the surfaces show it.
+///
+/// Delegates, because how much of a key a person is shown is one decision
+/// (`capture_core::id::SHOWN_KEY_BYTES`) and this file used to make it three
+/// times on its own.
 fn short_key(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
+    capture_core::id::short_key(k)
 }
 
 fn hexed(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn unhexed(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    capture_core::id::hexed(b)
 }
 
 fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {

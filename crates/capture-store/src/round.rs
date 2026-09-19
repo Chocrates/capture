@@ -359,14 +359,7 @@ fn from_log(paths: &StorePaths, peer: &[u8; 32]) -> Result<Option<[u8; 32]>> {
 }
 
 pub fn parse_dev(hex: &str) -> Option<capture_core::Dev> {
-    let mut out = [0u8; 32];
-    if hex.len() != 64 {
-        return None;
-    }
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(capture_core::Dev(out))
+    capture_core::id::unhex_array::<32>(hex).map(capture_core::Dev)
 }
 
 /// Whatever can be said about which network this is.
@@ -448,10 +441,6 @@ pub fn local_addresses() -> Vec<std::net::IpAddr> {
 #[cfg(feature = "mdns")]
 fn jitter(key: &[u8; 32]) -> u64 {
     u64::from_be_bytes(key[..8].try_into().expect("32 bytes has 8"))
-}
-
-pub fn short(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One bounded round, for a caller that is about to be killed.
@@ -538,4 +527,8 @@ pub struct Report {
     /// The last thing that went wrong, if anything did. Not a failure of the
     /// round: a peer that refused is one peer.
     pub trouble: Option<String>,
+}
+
+fn short(k: &[u8; 32]) -> String {
+    capture_core::id::short_key(k)
 }

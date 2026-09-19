@@ -22,7 +22,7 @@ SCRATCH ?= /tmp/capture-scratch-$(USER)
 export CAPTURE_SILENT := 1
 
 .DEFAULT_GOAL := help
-.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity deny \
+.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity duplicated deny \
         android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired \
         build release install install-chord scratch demo smoke tasks clean distclean
 
@@ -49,7 +49,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired deny
+ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired duplicated deny
 	@echo
 	@echo 'ci: all gates passed'
 	@echo '     (not included: `make android` — it needs an SDK, an NDK and a'
@@ -254,6 +254,20 @@ unwired:
 	@python3 tools/unwired.py
 
 # ---------------------------------------------------------------- purity ----
+
+## duplicated: fail when the same function body is written twice
+#
+# The other half of `unwired`. That one refuses a decision nothing uses; this
+# refuses a decision made twice — which is how `local_zone` came to exist five
+# times, under three names, in two different implementations that disagreed
+# about `$TZ`.
+#
+# Bodies rather than names, deliberately: `tag` and `redact` and `pin` exist
+# three times each on purpose, once per layer, and a check that fired on the
+# layering is a check somebody turns off.
+duplicated:
+	@echo '--- no decision is made twice'
+	@python3 tools/duplicated.py
 
 ## purity: the three-layer boundary — no_std, dependency tree, clock probe
 #

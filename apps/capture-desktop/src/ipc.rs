@@ -351,11 +351,6 @@ pub struct Peer {
 /// report that cries wolf is one nobody believes the time it means something.
 const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// Enough of a key for a person to compare against another device's screen.
-fn short_key(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// A duration in the roughest terms that are still true.
 fn approx(ms: u64) -> String {
     let days = ms / (24 * 60 * 60 * 1000);
@@ -385,8 +380,7 @@ fn paths() -> Result<StorePaths> {
 /// Open the projection without taking the writer lock.
 fn read_only() -> Result<Store> {
     let p = paths()?;
-    let generation = Ops::open_read(&p.ops)?.generation()?;
-    Store::open_read(&projection::generation_path(&p.state, generation))
+    projection::current(&p)
 }
 
 fn wire<T>(r: Result<T>) -> std::result::Result<T, String> {
@@ -1520,6 +1514,11 @@ pub fn tick() -> std::result::Result<usize, String> {
 
 fn now_ms() -> u64 {
     jiff::Timestamp::now().as_millisecond().max(0) as u64
+}
+
+/// Enough of a key for a person to compare against another device's screen.
+fn short_key(k: &[u8; 32]) -> String {
+    capture_core::id::short_key(k)
 }
 
 #[cfg(test)]

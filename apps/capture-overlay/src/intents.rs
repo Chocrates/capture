@@ -32,10 +32,7 @@ pub fn check(paths: &StorePaths, now: i64) {
 }
 
 fn look(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
-    let generation = capture_store::ops::Ops::open_read(&paths.ops)?.generation()?;
-    let state = capture_store::projection::Store::open_read(
-        &capture_store::projection::generation_path(&paths.state, generation),
-    )?;
+    let state = capture_store::projection::current(paths)?;
 
     let branch = current_branch();
 
@@ -93,10 +90,7 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
     };
     let hour = capture_time::civil_clock(now, zone).0;
 
-    let generation = capture_store::ops::Ops::open_read(&paths.ops)?.generation()?;
-    let state = capture_store::projection::Store::open_read(
-        &capture_store::projection::generation_path(&paths.state, generation),
-    )?;
+    let state = capture_store::projection::current(paths)?;
     let ops = capture_store::ops::Ops::open(&paths.ops)?;
 
     for d in state.due_by(now, &zone_name)? {
@@ -149,22 +143,16 @@ fn current_branch() -> Option<String> {
 
 /// The zone this machine is in, by name.
 ///
-/// The same reading the command line does. `TZ` where it is set, otherwise
-/// what `/etc/localtime` points at — there is no portable call for this and a
-/// wrong answer here moves quiet hours by the offset, which is the difference
-/// between a notification at 07:00 and one at 02:00.
+/// One definition, in `capture-store`'s notifier, because the only reason
+/// anything here reads a zone is to work out what hour it is for the rules in
+/// §2.6 — and a wrong answer moves quiet hours by the UTC offset, which is the
+/// difference between a notification at 07:00 and one at 02:00.
+///
+/// There were four copies. The one in the overlay was made by reading the one
+/// twelve lines away in this file, which is the mechanism rather than the
+/// accident.
 fn local_zone() -> String {
-    std::env::var("TZ")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
-                p.to_str()
-                    .and_then(|s| s.split("zoneinfo/").nth(1))
-                    .map(String::from)
-            })
-        })
-        .unwrap_or_else(|| "UTC".into())
+    capture_store::notifier::local_zone()
 }
 
 #[cfg(test)]

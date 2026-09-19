@@ -39,6 +39,16 @@ fun Pairing(state: PairingState, onOffer: () -> Unit, onJoin: (String, String) -
     ) {
         when (state) {
             is PairingState.Idle -> Idle(onOffer, onJoin)
+            is PairingState.Trying -> {
+                Text("Reaching the other device…", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "If this does not finish: the other device needs `capture pair` " +
+                        "running, both have to be on the same network, and a VPN on " +
+                        "this phone will route the other one into a tunnel it cannot " +
+                        "come back from.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             is PairingState.Showing -> Showing(state)
             is PairingState.Joined -> Text("Paired with ${state.key}. It will receive the archive on the next sync.")
             is PairingState.Failed -> {
@@ -121,6 +131,24 @@ private fun Showing(state: PairingState.Showing) {
 /** Where a pairing has got to. */
 sealed interface PairingState {
     data object Idle : PairingState
+
+    /**
+     * Dialling the other device.
+     *
+     * Missing until it cost an hour. Joining opens a socket and runs a
+     * handshake over it, and against an unreachable address that blocks until
+     * the platform gives up — which on a phone with a VPN routing the LAN into
+     * a tunnel is a long time. The screen stayed on `Idle` throughout: no
+     * spinner, no message, nothing. Pressing Join did nothing, over and over,
+     * while the thing it started was working perfectly on an address that
+     * could not answer.
+     *
+     * §7.3 is about exactly this shape — something that fails invisibly is
+     * worse than something that fails, because the person is left debugging
+     * their own typing.
+     */
+    data object Trying : PairingState
+
     data class Showing(val code: String, val address: String?) : PairingState
     data class Joined(val key: String) : PairingState
     data class Failed(val why: String) : PairingState

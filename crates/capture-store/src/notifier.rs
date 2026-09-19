@@ -156,24 +156,27 @@ pub fn notify(summary: &str, body: &str) -> bool {
     sent
 }
 
-/// The zone this machine is in, by name.
+/// The IANA zone this machine is set to, or `UTC` if it cannot be determined.
 ///
-/// `TZ` where it is set, otherwise what `/etc/localtime` points at. There is
-/// no portable call for this, and a wrong answer moves quiet hours by the
-/// offset — which is the difference between a notification at 07:00 and one
-/// at 02:00.
+/// Asked of the library rather than parsed out of `/etc/localtime`, which is
+/// what four copies of this used to do — including this one, until a guard
+/// that compares function bodies found a *fifth* implementation living under
+/// two other names and doing it properly.
+///
+/// Parsing the symlink was never right. It gets `$TZ` wrong in the forms that
+/// are not zone names (`EST5EDT`, an absolute path, a POSIX offset string), it
+/// gets nothing at all on a machine where `/etc/localtime` is a copy rather
+/// than a link, and it was reimplemented each time somebody needed it because
+/// there was no obvious owner.
+///
+/// Falling back rather than failing: a wrong zone moves quiet hours by the
+/// offset, which is bad; refusing to answer stops the notification budget
+/// working at all, which is worse.
 pub fn local_zone() -> String {
-    std::env::var("TZ")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
-                p.to_str()
-                    .and_then(|s| s.split("zoneinfo/").nth(1))
-                    .map(String::from)
-            })
-        })
-        .unwrap_or_else(|| "UTC".into())
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .unwrap_or("UTC")
+        .to_string()
 }
 
 /// When the day goes quiet, and when it comes back. Local hours.
@@ -294,6 +297,56 @@ pub fn already_fired(paths: &StorePaths, id: &[u8]) -> Result<bool> {
 pub fn mark_fired(paths: &StorePaths, id: &[u8], now: u64) -> Result<()> {
     let ops = crate::ops::Ops::open(&paths.ops)?;
     ops.mark_intent_fired(id, now)
+}
+
+#[cfg(test)]
+mod zone {
+    use super::*;
+
+    #[test]
+    fn it_answers_something_that_is_actually_a_zone() {
+        // The only property worth asserting, and the one that matters: every
+        // caller feeds this straight into `Zone::new`, and a name that fails
+        // to parse there means quiet hours and batch windows silently fall
+        // back to UTC — which on this machine is a five-hour error.
+        let z = local_zone();
+        assert!(capture_time::Zone::new(&z).is_some(), "not a zone: {z:?}",);
+    }
+
+    #[test]
+    fn it_is_the_same_answer_every_time() {
+        // Two callers a moment apart must not disagree. `today()` and
+        // `agenda()` deriving the zone separately is how they came to
+        // disagree about what day it was.
+        assert_eq!(local_zone(), local_zone());
+    }
+
+    /// `$TZ` set after the process starts does not take effect.
+    ///
+    /// Not a defect to fix here, but a fact worth writing down: `jiff` reads
+    /// the system zone once and caches it, so a long-running process — the
+    /// overlay, the daemon — keeps the zone it started with. Somebody who
+    /// travels and changes their system zone gets quiet hours in the old one
+    /// until the process restarts.
+    ///
+    /// The previous implementation parsed `/etc/localtime` on every call and
+    /// so did pick it up, which reads like an advantage and was not: it also
+    /// mishandled every `$TZ` form that is not an IANA name, and it was
+    /// reimplemented five times because nothing owned it.
+    #[test]
+    fn the_zone_is_read_once_per_process() {
+        let before = local_zone();
+        // SAFETY-adjacent: restored immediately, and nothing else in this
+        // test binary reads TZ.
+        unsafe { std::env::set_var("TZ", "Europe/Berlin") };
+        let after = local_zone();
+        unsafe { std::env::remove_var("TZ") };
+
+        assert_eq!(
+            before, after,
+            "the system zone is cached; this test exists to record that",
+        );
+    }
 }
 
 #[cfg(test)]

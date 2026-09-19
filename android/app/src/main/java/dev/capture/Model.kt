@@ -332,6 +332,10 @@ class Model(private val archive: Archive) : ViewModel() {
     /** Type a code shown on another device. */
     fun joinPairing(addr: String, code: String) {
         viewModelScope.launch {
+            // Said before the socket opens, not after. Everything below blocks,
+            // and a screen that only changes when it finishes is a screen that
+            // looks broken for as long as it takes to fail.
+            pairing = PairingState.Trying
             pairing = try {
                 // Named by key, as every other surface names a device. The
                 // address is where it was a moment ago.

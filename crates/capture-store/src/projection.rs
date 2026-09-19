@@ -3067,6 +3067,28 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
     Ok(())
 }
 
+/// The current generation, open for reading.
+///
+/// Written out by hand at fourteen call sites before this, as
+///
+/// ```ignore
+/// Store::open_read(&generation_path(&paths.state, Ops::open_read(&paths.ops)?.generation()?))
+/// ```
+///
+/// It is not merely long. It encodes a rule — **the current generation is
+/// whatever `ops` says it is** — and a call site that opened a path it had
+/// worked out some other way would read an archive that is real, internally
+/// consistent, and out of date. That is the hardest kind of wrong to notice,
+/// because nothing about it looks broken.
+///
+/// Callers that want a *specific* generation still say so: `rebuild` writes
+/// one and the crash tests read the one from before a failure, and neither
+/// should go through here.
+pub fn current(paths: &crate::StorePaths) -> Result<Store> {
+    let generation = crate::ops::Ops::open_read(&paths.ops)?.generation()?;
+    Store::open_read(&generation_path(&paths.state, generation))
+}
+
 /// Path for a given projection generation.
 pub fn generation_path(base: &Path, generation: u64) -> PathBuf {
     let dir = base.parent().unwrap_or(Path::new("."));

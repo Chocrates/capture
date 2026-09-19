@@ -372,17 +372,13 @@ fn parse_at(s: &str) -> Option<i64> {
     capture_time::at_local(d, h.parse().ok()?, m.parse().ok()?, local_zone())
 }
 
+/// The zone this machine is in.
+///
+/// One definition, in `capture-store`'s notifier. This copy was the only one
+/// of four that validated `$TZ` before trusting it, and that reading is the
+/// one that survived — see `capture_store::notifier::local_zone`.
 fn local_zone() -> capture_time::Zone {
-    std::env::var("TZ")
-        .ok()
-        .and_then(|t| capture_time::Zone::new(&t))
-        .or_else(|| {
-            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
-                p.to_str()
-                    .and_then(|s| s.split("zoneinfo/").nth(1))
-                    .and_then(capture_time::Zone::new)
-            })
-        })
+    capture_time::Zone::new(&capture_store::notifier::local_zone())
         .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"))
 }
 
@@ -642,10 +638,7 @@ pub fn split_series(paths: StorePaths, name: &str, from: &str, rule_text: &str) 
 
 /// This machine's zone, by name.
 fn zone_here() -> String {
-    jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string()
+    capture_store::notifier::local_zone()
 }
 
 fn day_of(ms: i64) -> String {

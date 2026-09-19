@@ -933,16 +933,13 @@ fn now_ms() -> u64 {
     jiff::Timestamp::now().as_millisecond().max(0) as u64
 }
 
-/// The IANA zone this machine is set to, or `UTC` if it cannot be determined.
+/// The zone this machine is set to.
 ///
-/// Falling back rather than failing: a capture must not be refused because the
-/// system has no zone configured. A wrong zone misfiles a note by a day at
-/// worst; a refused capture loses it.
+/// One definition, in `notifier`, because the notification budget is the other
+/// thing that needs it and a capture misfiled by a day and a notification at
+/// 02:00 should not be able to disagree about what zone this is.
 fn local_zone() -> String {
-    jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string()
+    crate::notifier::local_zone()
 }
 
 pub(crate) fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {

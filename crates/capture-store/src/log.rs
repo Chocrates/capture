@@ -617,6 +617,12 @@ fn dev_key(d: &Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Hex to bytes, skipping whatever does not decode.
+///
+/// Deliberately not `capture_core::id::unhex`, which refuses the whole string
+/// if any of it is not hex. This reads a checkpoint written by an older build
+/// and wants whatever is legible; a stricter reading would discard a recovery
+/// hint over one bad character.
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)

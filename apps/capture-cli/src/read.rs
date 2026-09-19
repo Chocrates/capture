@@ -33,7 +33,6 @@
 
 use capture_store::{
     Error, Result, StorePaths,
-    ops::Ops,
     projection::{self, Backlink, LinkRow, NoteRow, Store},
     store,
 };
@@ -43,8 +42,7 @@ pub fn open(paths: &StorePaths) -> Result<Store> {
     if !store::exists(paths) {
         return Err(Error::StoreMissing(paths.root.clone()));
     }
-    let generation = Ops::open_read(&paths.ops)?.generation()?;
-    Store::open_read(&projection::generation_path(&paths.state, generation))
+    projection::current(paths)
 }
 
 // ----------------------------------------------------------------- agenda ---
@@ -630,18 +628,18 @@ fn utc() -> capture_time::Zone {
     capture_time::Zone::new("UTC").expect("UTC is always present")
 }
 
+/// The zone this machine is in, by name.
+///
+/// One definition, in `capture-store`'s notifier, because the only reason
+/// anything here reads a zone is to work out what hour it is for the rules in
+/// §2.6 — and a wrong answer moves quiet hours by the UTC offset, which is the
+/// difference between a notification at 07:00 and one at 02:00.
+///
+/// There were four copies. The one in the overlay was made by reading the one
+/// twelve lines away in this file, which is the mechanism rather than the
+/// accident.
 fn local_zone() -> String {
-    std::env::var("TZ")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
-                p.to_str()
-                    .and_then(|s| s.split("zoneinfo/").nth(1))
-                    .map(String::from)
-            })
-        })
-        .unwrap_or_else(|| "UTC".into())
+    capture_store::notifier::local_zone()
 }
 
 pub(crate) fn now_ms() -> i64 {

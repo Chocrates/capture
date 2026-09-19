@@ -56,11 +56,7 @@ pub fn parse(name: &str) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
     }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    capture_core::id::unhex_array::<32>(hex)
 }
 
 /// Where one blob lives.

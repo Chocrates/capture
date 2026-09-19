@@ -230,16 +230,17 @@ fn subject_blob(identity: &Identity) -> String {
 }
 
 fn hexed(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    capture_core::id::hexed(b)
 }
 
+/// Lowercase hex back to bytes.
+///
+/// The strict reading: an empty string is refused rather than decoding to zero
+/// bytes. This copy used to accept it while the one in `capture-ffi` did not,
+/// and the two sat either side of §5.3's two-signature readmission — see
+/// `capture_core::id::unhex` for why the refusal is the right half.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    capture_core::id::unhex(s)
 }
 
 /// Vouch for another device's re-admission.
@@ -388,10 +389,10 @@ pub fn readmit(paths: StorePaths, cosign: Option<&str>, by: Option<&str>) -> Res
     Ok(())
 }
 
-fn short(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn now() -> u64 {
     jiff::Timestamp::now().as_millisecond().max(0) as u64
+}
+
+fn short(k: &[u8; 32]) -> String {
+    capture_core::id::short_key(k)
 }

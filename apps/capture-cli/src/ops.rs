@@ -714,13 +714,13 @@ fn ms(v: u64) -> String {
     }
 }
 
-/// Enough of a key for a person to compare against what another device shows.
+/// Enough of a key for a person to compare against another device's screen.
 ///
-/// Not the whole thing: thirty-two bytes of hex is not something anyone reads,
-/// and a prefix nobody checks is worse than a prefix short enough that they
-/// do.
+/// The length is `capture_core::id::SHOWN_KEY_BYTES`, decided once. Seven
+/// surfaces used to decide it separately, which is a disagreement waiting to
+/// happen at the moment somebody is comparing two screens.
 fn short_key(k: &[u8; 32]) -> String {
-    k[..6].iter().map(|b| format!("{b:02x}")).collect()
+    capture_core::id::short_key(k)
 }
 
 #[cfg(test)]

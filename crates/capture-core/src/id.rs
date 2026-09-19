@@ -36,6 +36,79 @@ impl Dev {
     }
 }
 
+/// How much of a signing key a person is shown.
+///
+/// Six bytes — twelve hex characters — and the number is here rather than in
+/// each surface because it is the thing somebody compares when deciding
+/// whether a device in the roster is the one they lost. Two screens showing
+/// different amounts of the same key is a disagreement at exactly the moment
+/// somebody is trying to tell devices apart.
+///
+/// It was written out seven times before this: in `round.rs`, twice in the
+/// command line, once in the desktop window, and three times in the FFI.
+pub const SHOWN_KEY_BYTES: usize = 6;
+
+/// A signing key as the surfaces show it.
+///
+/// A prefix nobody reads is worse than one short enough that they do, which is
+/// the whole argument for showing part of a key rather than all of it.
+pub fn short_key(key: &[u8]) -> alloc::string::String {
+    hexed(&key[..SHOWN_KEY_BYTES.min(key.len())])
+}
+
+/// Bytes as lowercase hex.
+pub fn hexed(bytes: &[u8]) -> alloc::string::String {
+    use alloc::string::String;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        use core::fmt::Write;
+        // Infallible into a String, and the alternative — `format!` per byte
+        // and collect — allocates once per byte.
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// Lowercase hex back to bytes, or nothing.
+///
+/// **An empty string is not zero bytes, it is not hex.** The two copies this
+/// replaces disagreed on exactly that: one returned `None`, the other returned
+/// an empty vector. They sat either side of §5.3's two-signature readmission —
+/// the one path whose validity does not descend from current roster
+/// membership — and a re-admission request that decoded to nothing would have
+/// been carried forward as a key of length zero rather than refused.
+///
+/// The stricter reading wins, because the looser one is only ever right by
+/// accident: every caller here is decoding something a person pasted, and an
+/// empty paste is a mistake rather than a value.
+pub fn unhex(s: &str) -> Option<alloc::vec::Vec<u8>> {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect()
+}
+
+/// Lowercase hex into a fixed-size array, or nothing.
+///
+/// The same fact as [`unhex`] with the length known in advance, which is how
+/// four more call sites spelled it: a blob name into 32 bytes, an advertised
+/// pseudonym into 8, a device id, a head. Each wrote its own loop, and each
+/// had to remember to check the length first — the one place that forgot would
+/// silently accept a short string and fill the rest with whatever `get`
+/// returned, which is `None`, which is a refusal, which is fine. The point is
+/// that it is fine *by accident* four times over.
+pub fn unhex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Event identity: `blake3(canonical header)`, where the header carries a
 /// [`BodyHash`] rather than the body itself.
 ///
@@ -102,5 +175,70 @@ mod tests {
         let a = BodyHash::of(b"hello");
         let b = BodyHash::of(b"hellp");
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod hex_and_keys {
+    use super::*;
+
+    #[test]
+    fn hex_round_trips() {
+        for bytes in [
+            &[][..],
+            &[0x00][..],
+            &[0xde, 0xad, 0xbe, 0xef][..],
+            &[0xff; 32][..],
+        ] {
+            let text = hexed(bytes);
+            assert_eq!(text.len(), bytes.len() * 2);
+            assert_eq!(text, text.to_lowercase(), "hex is lowercase");
+            if !bytes.is_empty() {
+                assert_eq!(unhex(&text).as_deref(), Some(bytes));
+            }
+        }
+    }
+
+    /// The case the two copies disagreed on.
+    ///
+    /// One returned `None`, the other an empty vector — and they were used
+    /// either side of §5.3's two-signature readmission, where a request
+    /// decoding to nothing would have become a zero-length key rather than a
+    /// refusal. Pinned here so a later merge cannot quietly pick the other
+    /// behaviour back up.
+    #[test]
+    fn an_empty_string_is_not_zero_bytes() {
+        assert_eq!(unhex(""), None);
+    }
+
+    #[test]
+    fn what_is_not_hex_is_refused() {
+        for s in ["a", "abc", "zz", "de ad", "0xdead", "DEADBEEG"] {
+            assert_eq!(unhex(s), None, "{s:?} should not decode");
+        }
+    }
+
+    #[test]
+    fn uppercase_decodes_because_somebody_will_paste_it() {
+        assert_eq!(unhex("DEADBEEF"), Some(alloc::vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn a_shown_key_is_always_the_same_length() {
+        // Seven surfaces used to decide this independently. A key compared
+        // against another key on a different screen has to be the same shape
+        // on both, because comparing them is the entire point.
+        let key = [0xab; 32];
+        assert_eq!(short_key(&key).len(), SHOWN_KEY_BYTES * 2);
+        assert_eq!(short_key(&key), "ab".repeat(SHOWN_KEY_BYTES));
+    }
+
+    #[test]
+    fn a_short_key_does_not_panic_on_a_short_input() {
+        // Every caller passes 32 bytes; nothing enforces it, and a slice panic
+        // inside a display path would take down a surface for a cosmetic
+        // reason.
+        assert_eq!(short_key(&[0x01, 0x02]), "0102");
+        assert_eq!(short_key(&[]), "");
     }
 }
