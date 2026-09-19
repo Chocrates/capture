@@ -111,12 +111,39 @@ android-app: android-kotlin
 	@echo '--- android: building the app'
 	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleDebug
 
-## android-instrumented: run the binding's tests on a device, through Kotlin
+## android-instrumented: run the binding's tests on an emulator
 #
 # The Rust suite proves the store is right. This proves the *binding* is: the
 # generator, JNA, the ABI and the packaging are all untested by the Rust suite
 # and are exactly where a binding goes wrong.
+#
+# # Emulators only, and the refusal below is not caution
+#
+# `connectedDebugAndroidTest` uninstalls the application when it finishes —
+# including when it is interrupted. On Android an uninstall takes the app's
+# private storage with it, and `allowBackup` is off by design (§1: a restored
+# archive would give two devices one origin). So running this against a phone
+# somebody is actually using destroys the archive on it, silently, as a normal
+# part of testing.
+#
+# That happened here, to a phone holding captures that had never been paired
+# to anything. The target was written for an emulator and nothing said so.
 android-instrumented: android-kotlin
+	@set -e; . ./tools/android-env.sh; \
+	 serial=$${ANDROID_SERIAL:-$$("$$ANDROID_HOME/platform-tools/adb" devices | awk 'NR==2{print $$1}')}; \
+	 case "$$serial" in \
+	   emulator-*) ;; \
+	   *) echo 'refusing: this uninstalls the application, and an uninstall'; \
+	      echo 'destroys the archive on the device (app-private storage,'; \
+	      echo 'allowBackup off). It is for an emulator.'; \
+	      echo; \
+	      echo "  device:  $$serial"; \
+	      echo '  start one: $$ANDROID_HOME/emulator/emulator -avd <name> &'; \
+	      echo; \
+	      echo 'To run it anyway on this device, and lose what it holds:'; \
+	      echo '  make android-instrumented I_KNOW_THIS_WIPES_THE_DEVICE=1'; \
+	      [ -n "$(I_KNOW_THIS_WIPES_THE_DEVICE)" ] || exit 1 ;; \
+	 esac
 	@echo '--- android: instrumented tests'
 	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet connectedDebugAndroidTest
 

@@ -27,6 +27,28 @@ set -eu
 . "$(dirname "$0")/android-env.sh"
 ADB="$ANDROID_HOME/platform-tools/adb"
 
+# Emulators only.
+#
+# This drives `connectedDebugAndroidTest`, which uninstalls the application
+# when it finishes — and on Android an uninstall takes the app's private
+# storage with it. `allowBackup` is off by design (§1), so there is no copy.
+# Run against a phone somebody uses, this destroys the archive on it as a
+# normal part of passing.
+#
+# That happened, to a phone holding captures that had never been paired to
+# anything. Nothing said the target was for an emulator; now it does.
+SERIAL="${ANDROID_SERIAL:-$("$ADB" devices | awk 'NR==2{print $1}')}"
+case "$SERIAL" in
+    emulator-*) ;;
+    *)
+        echo "refusing: this uninstalls the application, which destroys the"
+        echo "archive on the device. It is for an emulator."
+        echo
+        echo "  device: $SERIAL"
+        exit 1
+        ;;
+esac
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DESK=$(mktemp -d)
 CAPTURE="$ROOT/target/debug/capture"

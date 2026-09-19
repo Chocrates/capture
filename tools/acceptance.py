@@ -28,6 +28,38 @@ import ui
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = "dev.capture"
+
+
+def emulator_only():
+    """Refuse to run against a phone somebody is using.
+
+    This clears the application's data as its first step, and on Android that
+    is the archive — app-private storage, with `allowBackup` off by design
+    (§1, so a restore cannot give two devices one origin). There is no copy to
+    put back.
+
+    Run against a real device this destroys what it holds as a normal part of
+    passing, which is exactly what happened: a phone with captures on it that
+    had never been paired to anything. The script was written for an emulator
+    and nothing in it said so.
+    """
+    serial = os.environ.get("ANDROID_SERIAL") or ""
+    if not serial:
+        out = subprocess.run(
+            [os.path.join(os.environ.get("ANDROID_HOME", ""), "platform-tools", "adb"), "devices"],
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        serial = out[1].split()[0] if len(out) > 1 and out[1].strip() else ""
+
+    if serial.startswith("emulator-"):
+        return
+
+    print("refusing: this clears the application's data, which destroys the")
+    print("archive on the device. It is for an emulator.")
+    print()
+    print(f"  device: {serial or 'none found'}")
+    sys.exit(1)
 CAPTURE = os.path.join(ROOT, "target", "debug", "capture")
 SYNCD = os.path.join(ROOT, "target", "debug", "capture-syncd")
 # What the emulator maps this machine's loopback to.
@@ -73,6 +105,8 @@ def main():
         if not os.path.exists(binary):
             print(f"build first: cargo build -p capture-cli -p capture-syncd")
             sys.exit(1)
+
+    emulator_only()
 
     step("a phone with nothing on it")
     ui.adb("shell", "pm", "clear", APP)
