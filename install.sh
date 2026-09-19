@@ -16,13 +16,20 @@
 # `--with-chord` opts into the two that can be done for you: starting at login,
 # and binding the chord. The shell snippet still has to be pasted, because
 # appending to somebody's rc file is editing a file they maintain by hand.
+#
+# `--with-export` installs a systemd user timer that exports daily. Also opt-in,
+# for the same reason — but argued for harder than the others, because §1.2 is
+# explicit that replication is not backup and the failure it covers is the one
+# nothing else does.
 
 set -eu
 
 WITH_CHORD=0
+WITH_EXPORT=0
 for arg in "$@"; do
     case "$arg" in
         --with-chord) WITH_CHORD=1 ;;
+        --with-export) WITH_EXPORT=1 ;;
         *) printf 'unknown option: %s\n' "$arg" >&2; exit 1 ;;
     esac
 done
@@ -152,6 +159,69 @@ say ""
 say "  Not started from login by default. It opens a listening socket, and that"
 say "  is a thing to switch on deliberately rather than to inherit from having"
 say "  run an installer."
+
+step "Keeping a copy"
+say "  Pairing a second device is not a backup. §1.2 is explicit about it:"
+say "  replication covers a device dying and nothing else. A bad event, a"
+say "  mistaken redaction, a projection gone wrong — every replica copies"
+say "  those faithfully and immediately. Gossip makes corruption travel"
+say "  faster, not slower. And two devices in one bag is one accident."
+say ""
+say "      capture export                 everything appended since the last run"
+say "      capture restore <dir>          rebuild from those files"
+say ""
+say "  Export is incremental and takes no lock, so it is safe on a timer and"
+say "  safe while you are capturing. It writes nothing when nothing is new."
+
+if [ "$WITH_EXPORT" = 1 ]; then
+    UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$UNITS"
+
+    # A timer rather than a cron line: it survives the machine being off.
+    # `Persistent=true` runs the export on the next boot if the moment passed
+    # while the machine was asleep, which is the ordinary case for a laptop and
+    # exactly when somebody would otherwise silently stop having backups.
+    cat > "$UNITS/capture-export.service" <<UNIT
+[Unit]
+Description=Export the capture archive
+
+[Service]
+Type=oneshot
+Environment=CAPTURE_HOME=$CAPTURE_HOME
+ExecStart=$BIN/capture export
+UNIT
+
+    cat > "$UNITS/capture-export.timer" <<UNIT
+[Unit]
+Description=Export the capture archive daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now capture-export.timer 2>/dev/null || true
+
+    say ""
+    say "  Installed a daily timer:"
+    say "      systemctl --user status capture-export.timer"
+    say "      systemctl --user disable --now capture-export.timer   to stop"
+    say ""
+    say "  It writes into $CAPTURE_HOME/export. That directory is still on this"
+    say "  one machine, which covers a mistake but not a fire — copy it"
+    say "  somewhere else with whatever you already use for that."
+else
+    say ""
+    say "  Nothing runs this for you. To have it run daily:"
+    say ""
+    say "      ./install.sh --with-export"
+    say ""
+    say "  Or add it to whatever already takes backups on this machine."
+fi
 
 step "Ready"
 say "  capture + your first note"

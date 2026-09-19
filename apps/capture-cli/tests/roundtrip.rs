@@ -248,3 +248,55 @@ fn restoring_from_somewhere_with_no_exports_says_so() {
     let (code, said) = a.raw(&["restore", "/nonexistent/place"]);
     assert_eq!(code, 2, "a missing export directory is 'not found': {said}");
 }
+
+/// A restore brings back what the archive *meant*, not only what it held.
+///
+/// Everything below `notes` is derived: a list's items are expanded from the
+/// capture's text, a promotion is read from it, an alert's moment comes from
+/// the promotion. None of it is in the export, because none of it is in the
+/// log — the export carries events and the projection is rebuilt from them.
+///
+/// So this asserts the rebuild, not the copy. If it ever fails, the restore
+/// will look successful — the right number of notes, the right text — and the
+/// lists will be gone, which is the shape of failure somebody discovers in a
+/// shop rather than at a terminal.
+///
+/// Written after an uninstall took a phone's archive with it. The machinery
+/// was all there and tested; what nobody had checked was whether what came
+/// back was still usable rather than merely present.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_restore_brings_back_the_structure_too() {
+    let a = Store::fresh("structured");
+    a.ok(&["+", "#groceries: milk, eggs, bread"]);
+    a.ok(&["+", "dentist thursday 2pm"]);
+    a.ok(&["+", "call the dentist tomorrow"]);
+    a.ok(&["tick", "groceries", "milk"]);
+    a.ok(&["export"]);
+
+    let b = Store::rolled_back_from(&a, "structured-back");
+    b.ok(&["restore", a.export_dir().to_str().unwrap()]);
+
+    // The list is a list again, and the tick came with it — the tick is an
+    // event, so it is in the export; the *items* are not, and have to be
+    // re-expanded from the capture's text.
+    let list = b.ok(&["list", "groceries"]);
+    assert!(list.contains("milk"), "the items were re-expanded: {list}");
+    assert!(list.contains("eggs"));
+    assert!(list.contains("bread"));
+    assert!(
+        list.contains("[x] milk"),
+        "and what was ticked is still ticked: {list}",
+    );
+
+    // The promotions were re-read, so the things that speak still speak.
+    let due = b.ok(&["due"]);
+    assert!(
+        due.contains("dentist thursday 2pm"),
+        "an event still has its moment after a restore: {due}",
+    );
+    assert!(
+        due.contains("call the dentist tomorrow"),
+        "and so does a task with a due date: {due}",
+    );
+}

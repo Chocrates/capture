@@ -1079,6 +1079,14 @@ OPERATING
   capture verify            check every id, signature, body hash and chain
   capture export            write everything appended since the last export
   capture restore <dir>     rebuild from exported events
+
+  Pairing a second device is not a backup. It covers that device dying and
+  nothing else: a bad event, a mistaken redaction or a broken projection is
+  replicated everywhere within seconds, by design. Export is the only thing
+  that covers those, and two devices in one bag is one accident.
+
+  Export is incremental and takes no lock, so it is safe on a timer and safe
+  while you are capturing. `install.sh --with-export` sets up a daily one.
   capture unflag <name>     clear a credential flag so the note is exported again
   capture pair              show a code, and admit whoever types it
   capture pair CODE --at ADDR
