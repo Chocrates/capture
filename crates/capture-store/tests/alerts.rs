@@ -67,7 +67,7 @@ fn reading(paths: &StorePaths) -> capture_store::projection::Store {
 }
 
 fn due(paths: &StorePaths, at: i64) -> Vec<capture_store::projection::Due> {
-    reading(paths).due_by(at, "UTC").unwrap()
+    reading(paths).due_by(at, at, "UTC").unwrap()
 }
 
 /// An event at a named instant.
@@ -86,6 +86,111 @@ fn at(paths: &StorePaths, slug: &str, start: i64) {
         }),
     )
     .unwrap();
+}
+
+/// Tick one occurrence off, the way the agenda does.
+fn tick(paths: &StorePaths, slug: &str, occ: i64) {
+    let mut s = Session::open(paths.clone()).unwrap();
+    let tgt = s.state.resolve(slug).unwrap().unwrap();
+    s.append(
+        capture_core::event::Kind::OCC_DONE,
+        Some(tgt),
+        None,
+        |nonce| {
+            let mut b = Vec::new();
+            minicbor::encode(&capture_core::body::OccBody { nonce, occ }, &mut b).unwrap();
+            b
+        },
+    )
+    .unwrap();
+}
+
+/// Move one occurrence, the way the agenda does.
+fn move_occurrence(paths: &StorePaths, slug: &str, occ: i64, to: i64) {
+    let mut s = Session::open(paths.clone()).unwrap();
+    let tgt = s.state.resolve(slug).unwrap().unwrap();
+    s.append(
+        capture_core::event::Kind::OCC_MOVE,
+        Some(tgt),
+        None,
+        |nonce| {
+            let mut b = Vec::new();
+            minicbor::encode(
+                &capture_core::body::OccMoveBody {
+                    nonce,
+                    occ,
+                    start_ms: to,
+                    end_ms: None,
+                },
+                &mut b,
+            )
+            .unwrap();
+            b
+        },
+    )
+    .unwrap();
+}
+
+/// A one-off event that was ticked off does not announce itself.
+///
+/// `promotions.done` is only ever set for a task, so the events branch of
+/// `due_by` carried a `done` filter that was always true. Completing a one-off
+/// event is not recorded there at all — a tick writes an occurrence exception
+/// against the promotion's own start, which suppressed the occurrence row and
+/// left the promotion row due.
+///
+/// So the workshop ticked off this morning announced itself this afternoon.
+#[test]
+fn a_ticked_one_off_event_is_silent() {
+    let scratch = Scratch::new("ticked-event");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "the workshop");
+    let start = now() - HOUR;
+    at(&paths, &slug, start);
+    settle(&paths);
+    assert_eq!(due(&paths, now()).len(), 1, "due before anybody ticks it");
+
+    tick(&paths, &slug, start);
+    settle(&paths);
+
+    let rows = due(&paths, now());
+    assert!(
+        rows.is_empty(),
+        "a one-off event ticked off is not still an announcement: {rows:?}"
+    );
+}
+
+/// Moving a one-off event announces it once, at the time it now starts.
+///
+/// It produced two rows: the promotion at the instant the event no longer
+/// starts, and the occurrence at the instant it now does. Two alert keys, two
+/// notifications, one event — and the first of them for a time that had been
+/// deliberately changed, which is the opposite of what moving it meant.
+#[test]
+fn a_moved_one_off_event_announces_once_at_its_new_time() {
+    let scratch = Scratch::new("moved-event");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "the dentist");
+    let start = now() - 2 * HOUR;
+    at(&paths, &slug, start);
+    settle(&paths);
+
+    let moved_to = start + HOUR;
+    move_occurrence(&paths, &slug, start, moved_to);
+    settle(&paths);
+
+    let rows = due(&paths, now());
+    assert_eq!(
+        rows.len(),
+        1,
+        "one event is one announcement, however it was rescheduled: {rows:?}"
+    );
+    assert_eq!(
+        rows[0].at, moved_to,
+        "and at the time it now starts, not the one it was moved away from"
+    );
 }
 
 #[test]
@@ -285,20 +390,62 @@ fn delivery_is_remembered_per_moment_not_per_note() {
     let tgt = reading(&paths).resolve(&slug).unwrap().unwrap();
     let ops = capture_store::ops::Ops::open(&paths.ops).unwrap();
 
-    ops.mark_alerted(&tgt.0, Some(1), 0).unwrap();
+    ops.mark_alerted(&tgt.0, Some(1), 1, 0).unwrap();
     assert!(
-        ops.alerted(&tgt.0, Some(1)).unwrap(),
+        ops.alerted(&tgt.0, Some(1), 1).unwrap(),
         "that moment is spoken for"
     );
     assert!(
-        !ops.alerted(&tgt.0, Some(2)).unwrap(),
+        !ops.alerted(&tgt.0, Some(2), 2).unwrap(),
         "and the next one is not — a key that could not tell two occurrences \
          apart would deliver one and swallow the rest of the week",
     );
 
     // Idempotent: marking twice is marking once.
-    ops.mark_alerted(&tgt.0, Some(1), 0).unwrap();
-    assert!(ops.alerted(&tgt.0, Some(1)).unwrap());
+    ops.mark_alerted(&tgt.0, Some(1), 1, 0).unwrap();
+    assert!(ops.alerted(&tgt.0, Some(1), 1).unwrap());
+}
+
+/// Correcting a time does not silence the corrected moment.
+///
+/// A one-off carries no occurrence, so its delivery key used to be the note
+/// alone — which made "this note has been alerted" and "this moment has been
+/// alerted" the same record for exactly the notes where they come apart.
+///
+/// The 14:00 alert fires. The meeting moves to 16:00, or the recognizer
+/// misread it and somebody corrects it. `due_by` reports the new moment
+/// correctly and the delivery table says it has already been said, so 16:00
+/// passes in silence and nothing anywhere explains why. The same shape for a
+/// task pushed to tomorrow after today's alert fired.
+///
+/// The projection half of this is covered by `a_corrected_time_moves_the
+/// _moment`, which never touches the delivery key — which is why it passed all
+/// along.
+#[test]
+fn a_corrected_moment_is_not_already_delivered() {
+    let scratch = Scratch::new("corrected-moment");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "the dentist");
+    at(&paths, &slug, now() - HOUR);
+    settle(&paths);
+
+    let tgt = reading(&paths).resolve(&slug).unwrap().unwrap();
+    let ops = capture_store::ops::Ops::open(&paths.ops).unwrap();
+
+    let first = now() - HOUR;
+    let corrected = now() + HOUR;
+
+    ops.mark_alerted(&tgt.0, None, first, 0).unwrap();
+    assert!(
+        ops.alerted(&tgt.0, None, first).unwrap(),
+        "the moment that was announced stays announced"
+    );
+    assert!(
+        !ops.alerted(&tgt.0, None, corrected).unwrap(),
+        "a moment that moved is a different moment — the one that was \
+         delivered is the one that no longer exists"
+    );
 }
 
 #[test]
@@ -413,4 +560,88 @@ fn nothing_is_due_that_was_not_captured() {
             assert!(want.contains(t), "{t:?} was never given a time");
         }
     }
+}
+
+/// Looking ahead does not expire a mute.
+///
+/// Arming the next alarm asks thirty days ahead, and the horizon was being
+/// used for both halves of the question — "has this moment arrived" and "has
+/// this mute expired". So a note muted for a week came back as due the moment
+/// anything looked further ahead than the mute.
+///
+/// §2.6 makes muting the cheap way to stop something resurfacing, and it has
+/// to be cheaper than destroying. A mute that silently does not apply is that
+/// argument failing at the only moment it matters.
+#[test]
+fn a_look_ahead_does_not_expire_a_mute() {
+    let scratch = Scratch::new("mute-horizon");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "something at a time");
+    at(&paths, &slug, now() - HOUR);
+    settle(&paths);
+    assert_eq!(due(&paths, now()).len(), 1, "due before muting");
+
+    // Muted for a week.
+    capture_store::mutate::mute_note(&paths, &slug).unwrap();
+    settle(&paths);
+    assert!(due(&paths, now()).is_empty(), "and silent now");
+
+    // Thirty days ahead, which is what arming the next alarm asks.
+    let store = reading(&paths);
+    let ahead = store.due_by(now() + 30 * 24 * HOUR, now(), "UTC").unwrap();
+    assert!(
+        ahead.is_empty(),
+        "still muted — the horizon says how far to look, not what time it is: {ahead:?}",
+    );
+}
+
+/// Only the chosen device says things.
+///
+/// §2.4.1 routes time cues to the designated notifier, and nothing on any
+/// delivery path consulted the setting that designates one. Its only readers
+/// were `capture status` and an FFI getter, so with a phone and a desktop
+/// paired every moment was announced twice and the control offered to fix that
+/// did nothing at all when somebody used it.
+#[test]
+fn only_the_chosen_device_speaks() {
+    let scratch = Scratch::new("chosen-device");
+    let paths = scratch.paths();
+
+    settle(&paths);
+
+    let me = capture_store::Identity::load(&paths).unwrap();
+    let key = me.public().to_bytes();
+    let mine = capture_core::id::short_key(&key);
+
+    // Nobody has chosen. The rule applies — one device, so it is this one —
+    // and §8.9 means that is evaluated rather than written down.
+    assert!(
+        capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        "an unconfigured device must still speak"
+    );
+
+    // Chosen, and it is this one. The setting holds a shortened key, so a
+    // comparison by equality against the full one would silence the very
+    // device somebody picked.
+    capture_store::mutate::set_setting(&paths, capture_store::notifier::KEY, Some(&mine)).unwrap();
+    settle(&paths);
+    assert!(
+        capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        "the device that was chosen is the device that speaks"
+    );
+
+    // Chosen, and it is the other one.
+    capture_store::mutate::set_setting(
+        &paths,
+        capture_store::notifier::KEY,
+        Some("00112233445566778899aabbccddeeff"),
+    )
+    .unwrap();
+    settle(&paths);
+    assert!(
+        !capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        "a device that was not chosen stays quiet — otherwise choosing one \
+         changes nothing and both announce everything"
+    );
 }

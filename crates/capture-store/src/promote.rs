@@ -575,6 +575,19 @@ pub fn split_series(paths: &StorePaths, name: &str, at_occ: i64, new_rule: RuleS
         })
     })?;
 
+    // 3. And what has already been said stays said.
+    //
+    // The occurrences from the split point onward now belong to a different
+    // note, and delivery is keyed by the note — so without this every one of
+    // them reads as never announced. The boundary is the one that bites: same
+    // instant, same text, announced this morning, announced again the moment
+    // somebody changes the schedule this afternoon.
+    //
+    // Local state, so it is done here rather than in the log: which device
+    // buzzed and when is operational chatter (§2.5.2), and the split itself is
+    // the fact about the archive.
+    crate::ops::Ops::open(&paths.ops)?.carry_alerts(&tgt.0, &new_tgt.0, at_occ)?;
+
     Ok(())
 }
 

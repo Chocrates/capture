@@ -174,9 +174,30 @@ impl Session {
         //
         // Here rather than at every open, because it costs a full fold and only
         // ever fires once per upgrade.
-        if catch_up && s.state.is_stale().unwrap_or(false) {
+        // Two different questions, and only the first was ever asked.
+        //
+        // `is_stale` asks whether the projection has the shape this build
+        // expects. `behind` asks whether it holds what the log holds — which
+        // comes apart on a sync round that drops after ingesting, on a
+        // projection that was deleted (§8.8 says that is safe, and it is only
+        // safe because of this), and on a kill between the append and the
+        // fold. In every one of those the events are committed, the log's
+        // heads have moved, anti-entropy will never re-offer them, and no
+        // surface shows them. Nothing said anything.
+        let needs_rebuild = catch_up
+            && (s.state.is_stale().unwrap_or(false)
+                || s.log
+                    .heads()
+                    .ok()
+                    .map(|h| s.state.behind(&h).unwrap_or(false))
+                    .unwrap_or(false));
+
+        if needs_rebuild {
             match s.rebuild_projection() {
-                Ok(g) => tracing::info!(generation = g, "projection rebuilt for a new schema"),
+                Ok(g) => tracing::info!(
+                    generation = g,
+                    "projection rebuilt to catch up with the log"
+                ),
                 Err(e) => tracing::warn!(%e, "the projection could not be rebuilt"),
             }
         }
@@ -327,12 +348,50 @@ impl Session {
 
         if !authored.is_empty() {
             incremental::apply(&mut self.state, &self.log, &authored, now_ms() as i64)?;
+            // How far this generation has folded, so `behind` can tell a
+            // projection that is current from one that merely has the right
+            // shape. `rebuild` has always recorded this; the incremental path
+            // never did, which left the comparison correct only immediately
+            // after a full rebuild.
+            crate::projection::note_folded(&self.state, &authored)?;
             if let Some(last) = authored.last() {
                 let (wall, counter) = self.clock.persist();
                 self.identity
                     .advance(&self.paths, last.header.seq, wall, counter)?;
             }
         }
+
+        // Everything the spool held is in the log now. Whether any of it is in
+        // the projection is a different question, and for one ordinary case the
+        // answer was permanently no.
+        //
+        // A capture can fail *after* `log.append` has committed — the body is in
+        // the log, the error is real, and `commit_body` spools the payload and
+        // reports "Saved." The next drain finds `holds_body` true, counts the
+        // record as already held and skips it without authoring anything. So
+        // `authored` is empty, nothing above folds, the spool is cleared, and
+        // the capture exists in the log and in no reader's view. It is a note
+        // somebody wrote, was told was saved, and cannot find.
+        //
+        // The same gap opens when `append` fails partway down the records: the
+        // ones before it are committed and the early return skips the fold, and
+        // on the retry they take the already-held path too.
+        //
+        // Asked as the general question rather than patched per case, because
+        // the general question is already answered correctly and cheaply — a
+        // per-origin comparison of the log's heads against how far the
+        // projection has folded. When they agree this costs one query.
+        if let Ok(heads) = self.log.heads()
+            && self.state.behind(&heads).unwrap_or(false)
+        {
+            match self.rebuild_projection() {
+                Ok(g) => {
+                    tracing::info!(generation = g, "projection rebuilt after a drain")
+                }
+                Err(e) => tracing::warn!(%e, "the projection could not be rebuilt after a drain"),
+            }
+        }
+
         Ok(done.committed)
     }
 
@@ -408,18 +467,32 @@ impl Session {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
+        // Whether this device is the one that speaks (§2.4.1).
+        //
+        // Nothing asked before. The setting existed, `capture status` printed
+        // it, and no delivery path consulted it — so with two devices paired
+        // every moment was announced on both, and the control offered for
+        // exactly that did nothing when somebody used it.
+        //
+        // Before the work rather than after: asking what is due has no effect,
+        // but it is the whole cost of this path, and a device that is not going
+        // to say anything has no reason to pay it.
+        if !crate::notifier::speaks_here(&self.state, self.identity.public().as_bytes())? {
+            return Ok(0);
+        }
+
         let zone_name = crate::notifier::local_zone();
         let Some(zone) = capture_time::Zone::new(&zone_name) else {
             return Ok(0);
         };
         let hour = capture_time::civil_clock(now, zone).0;
 
-        let due = self.state.due_by(now, &zone_name)?;
+        let due = self.state.due_by(now, now, &zone_name)?;
         let ops = crate::ops::Ops::open(&self.paths.ops)?;
         let mut said = 0;
 
         for d in due {
-            if ops.alerted(&d.tgt.0, d.occ)? {
+            if ops.alerted(&d.tgt.0, d.occ, d.at)? {
                 continue;
             }
             // How late it is decides whether it is still urgent. A moment
@@ -446,7 +519,7 @@ impl Session {
             // recorded but not made spends the moment, and delivery happens
             // once.
             if crate::notifier::notify("capture", &text) {
-                ops.mark_alerted(&d.tgt.0, d.occ, now.max(0) as u64)?;
+                ops.mark_alerted(&d.tgt.0, d.occ, d.at, now.max(0) as u64)?;
                 said += 1;
             }
         }
@@ -634,7 +707,7 @@ impl Session {
         }
 
         let key = *key;
-        self.append(Kind::DEVICE_RETIRE, None, None, move |nonce| {
+        let id = self.append(Kind::DEVICE_RETIRE, None, None, move |nonce| {
             let body = capture_core::body::RetireBody {
                 nonce,
                 pubkey: key,
@@ -644,7 +717,22 @@ impl Session {
             let mut b = Vec::new();
             minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
             b
-        })
+        })?;
+
+        // And stop knowing how to phone it.
+        //
+        // The retirement is the fact; the address, the handshake key and the
+        // pairing grant are local notes about how to reach the device, and
+        // nothing removed them. That left a retired phone dialable from the
+        // remembered-address path — the inbound door refused it and this device
+        // rang it up anyway.
+        //
+        // After the append, and not fatal if it fails: the event is what
+        // matters, and a leftover row is now inert rather than dangerous.
+        if let Err(e) = crate::ops::Ops::open(&self.paths.ops).and_then(|o| o.forget_peer(&key)) {
+            tracing::warn!(%e, "retired the device but could not forget how to reach it");
+        }
+        Ok(id)
     }
 
     /// Re-admit a key, co-signed by a second one.
@@ -757,6 +845,45 @@ impl Session {
         Ok(events.iter().map(|e| e.header.id()).collect())
     }
 
+    /// Advance this device's clock to at least a stamp it has seen.
+    ///
+    /// # The guarantee this restores
+    ///
+    /// `hlc.rs` says causality is preserved "by one thing and one thing only: on
+    /// receipt, the local clock advances to at least the incoming value", and
+    /// walks through what goes wrong otherwise — an edit authored after reading a
+    /// peer's event carries a lower stamp than the event it supersedes, so the
+    /// fold sorts the correction *before* the thing it corrects and every
+    /// last-writer-wins rule in §6 resolves the wrong way.
+    ///
+    /// That is what was happening. `HlcState::observe` existed, was documented as
+    /// mandatory, was tested directly, and had no caller anywhere outside the
+    /// test harness. So ingest never adopted: two devices' conflicts were settled
+    /// by whichever machine's wall clock happened to be further ahead, which is
+    /// the behaviour of the clamping draft the module rejects — reached not by
+    /// deciding to clamp but by never adopting at all.
+    ///
+    /// Persisted immediately, for the reason `restore` exists: a clock advance
+    /// that lives only in memory is undone by the next restart, and the next
+    /// event issued reuses stamps this device has already been told about.
+    ///
+    /// Cheap enough to call per round rather than per event — the caller passes
+    /// the highest stamp it saw, and `observe` is monotonic, so one call with the
+    /// maximum is identical to a call per event.
+    pub fn adopt(&mut self, incoming: &capture_core::Hlc) -> Result<()> {
+        let before = self.clock.persist();
+        self.clock.observe(incoming, now_ms());
+        let (wall, counter) = self.clock.persist();
+        if (wall, counter) == before {
+            // Already at or ahead of it. Not writing is the point: this runs on
+            // every round, and the common case is a peer whose clock agrees.
+            return Ok(());
+        }
+        let seq = self.identity.watermark().highest_seq;
+        self.identity.advance(&self.paths, seq, wall, counter)?;
+        Ok(())
+    }
+
     /// Author an event under this device's origin.
     fn author(
         &mut self,
@@ -811,6 +938,7 @@ impl Session {
     /// integrity check says so.
     fn settle(&mut self, events: &[Envelope]) -> Result<()> {
         incremental::apply(&mut self.state, &self.log, events, now_ms() as i64)?;
+        crate::projection::note_folded(&self.state, events)?;
 
         if let Some(last) = events.last() {
             let (wall, counter) = self.clock.persist();

@@ -94,3 +94,77 @@ fn a_full_exchange_completes_over_a_socket() {
     assert_eq!(mine.received, 0);
     assert_eq!(theirs.received, 0);
 }
+
+/// A peer that is present and silent does not wait for ever.
+///
+/// This is the shape that mattered: not a closed connection, which the kernel
+/// reports at once, but a device that walked out of Wi-Fi range. No FIN is sent,
+/// so there is nothing to report, and an untimed `read_exact` blocks on a socket
+/// to a phone that is three streets away.
+///
+/// What makes it serious is what is holding the lock. `round::reconcile` opens a
+/// session for the whole exchange, so a wedged read does not stall sync — it
+/// stalls the next `capture +`, with a lock error and no explanation.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "asserting that a socket read is bounded needs to time one"
+)]
+fn a_silent_peer_times_out_rather_than_wedging() {
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().unwrap();
+    // Held, never written to: a connection that is open and going nowhere.
+    let accepting = std::thread::spawn(move || listener.accept().unwrap().0);
+    let client = TcpStream::connect(addr).expect("connect");
+    let _server = accepting.join().unwrap();
+
+    let mut a = Tcp::with_limits(client, Duration::from_millis(150), Duration::from_secs(60))
+        .expect("wrapped");
+
+    let began = Instant::now();
+    assert_eq!(
+        a.recv_blocking(),
+        Err(TransportError::TimedOut),
+        "a silent peer must be reported, not waited on",
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "the read waited {:?}, so it is not bounded by the idle window",
+        began.elapsed(),
+    );
+}
+
+/// And a peer that talks just often enough to never idle out still ends.
+///
+/// One byte inside every idle window is slow-loris by accident — a saturated
+/// uplink looks exactly like it — and with only an idle timeout it would hold
+/// the writer lock indefinitely while never once timing out.
+#[test]
+fn a_session_ends_at_its_deadline_however_busy() {
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let accepting = std::thread::spawn(move || listener.accept().unwrap().0);
+    let client = TcpStream::connect(addr).expect("connect");
+    let server = accepting.join().unwrap();
+    let mut chatty = Tcp::new(server).expect("wrapped");
+
+    // Idle never fires; the deadline does.
+    let mut a = Tcp::with_limits(client, Duration::from_secs(60), Duration::from_millis(120))
+        .expect("wrapped");
+
+    chatty.send(b"still here").unwrap();
+    assert_eq!(a.recv_blocking().unwrap(), b"still here");
+
+    std::thread::sleep(Duration::from_millis(200));
+    chatty.send(b"still here").unwrap();
+    assert_eq!(
+        a.recv_blocking(),
+        Err(TransportError::TimedOut),
+        "past the deadline the session ends even with a frame waiting",
+    );
+}

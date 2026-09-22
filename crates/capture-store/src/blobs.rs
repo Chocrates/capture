@@ -35,7 +35,7 @@
 //! So this module offers `evict` and `destroy`, and no third thing. There is
 //! nowhere to add a policy that quietly deletes.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
@@ -125,6 +125,58 @@ pub fn get(blobs: &Path, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         )));
     }
     Ok(Some(bytes))
+}
+
+/// A span from the middle of a blob, without reading the rest of it.
+///
+/// # Why this exists rather than slicing [`get`]
+///
+/// Serving a blob used to call `get` once per 32 KiB chunk, and `get` reads the
+/// whole file and BLAKE3-hashes it every time. Serving one ten-minute voice
+/// note — about 10 MB — was therefore some 320 whole-file reads and 320 whole-
+/// file hashes, roughly 3.2 GB of I/O, to move 10 MB.
+///
+/// It runs inside the writer lock and usually on the phone, which is the device
+/// least able to afford it: the round could not finish, and for its whole
+/// duration the store was unwritable at both ends, so captures went to the
+/// spool while a voice note failed to transfer.
+///
+/// # The integrity check is kept, once
+///
+/// `get` refuses to hand back a file that is not what its name says, and that
+/// refusal is load-bearing: a corrupt copy served under a trusted name travels
+/// to every replica that fetches from this one. Verifying per chunk is what
+/// made it quadratic, so it happens once at the start of a transfer instead —
+/// and the receiver verifies the assembled blob against its name before
+/// adopting it in any case, so a corruption that appears mid-transfer is caught
+/// there rather than landing.
+pub fn range(
+    blobs: &Path,
+    hash: &[u8; 32],
+    offset: u64,
+    len: usize,
+) -> Result<Option<(u64, Vec<u8>)>> {
+    let path = path_of(blobs, hash);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
+    let total = meta.len();
+
+    // At the start of a transfer, and only there.
+    if offset == 0 && get(blobs, hash)?.is_none() {
+        return Ok(None);
+    }
+
+    if offset >= total {
+        return Ok(Some((total, Vec::new())));
+    }
+
+    let mut f = std::fs::File::open(&path)?;
+    f.seek(std::io::SeekFrom::Start(offset))?;
+    let want = len.min((total - offset) as usize);
+    let mut buf = vec![0u8; want];
+    f.read_exact(&mut buf)?;
+    Ok(Some((total, buf)))
 }
 
 /// Whether this device holds the bytes.
@@ -253,6 +305,51 @@ pub fn destroy(blobs: &Path, hash: &[u8; 32]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A ranged read returns the same bytes as reading the whole thing.
+    ///
+    /// The property that lets serving stop being quadratic: 320 chunk reads of
+    /// a 10 MB blob must assemble into that blob, without any of them having
+    /// read all 10 MB.
+    #[test]
+    fn ranges_reassemble_into_the_whole_blob() {
+        let d = std::env::temp_dir().join(format!("capture-blob-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        // Not compressible and not uniform, so an off-by-one shows up.
+        let bytes: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        let h = put(&d, &bytes).unwrap();
+
+        let mut back = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let (total, chunk) = range(&d, &h, offset, 32 * 1024).unwrap().unwrap();
+            assert_eq!(
+                total,
+                bytes.len() as u64,
+                "the size is reported from metadata"
+            );
+            if chunk.is_empty() {
+                break;
+            }
+            offset += chunk.len() as u64;
+            back.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(back, bytes, "the chunks did not reassemble");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A blob this device does not hold is absent, not an error.
+    #[test]
+    fn a_range_of_a_blob_that_is_not_here_is_nothing() {
+        let d = std::env::temp_dir().join(format!("capture-blob-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(range(&d, &[7u8; 32], 0, 1024).unwrap().is_none());
+        std::fs::remove_dir_all(&d).ok();
+    }
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

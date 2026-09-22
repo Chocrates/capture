@@ -130,9 +130,19 @@ object Places {
 
     const val CHANNEL = "cues"
 
-    /** Say something, because a cue came true. */
-    fun say(context: Context, text: String) {
+    /**
+     * Say something, because a cue came true — and say whether it could be.
+     *
+     * The return is load-bearing. A place cue cannot be retried: it is held
+     * for half an hour afterwards, and standing inside the fence produces no
+     * further entry transition, so an arrival spent on a notification the
+     * platform dropped is a visit gone. The caller marks the cue fired only
+     * on a `true`.
+     */
+    fun say(context: Context, text: String): Boolean {
         val manager = context.getSystemService(NotificationManager::class.java)
+            ?: return false
+        if (!manager.areNotificationsEnabled()) return false
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Cues", NotificationManager.IMPORTANCE_HIGH),
         )
@@ -153,6 +163,11 @@ object Places {
                 .setAutoCancel(true)
                 .build(),
         )
+
+        // The channel can be muted on its own, without the application being
+        // silenced — and posting to a muted channel succeeds and does nothing.
+        return manager.getNotificationChannel(CHANNEL)?.importance !=
+            NotificationManager.IMPORTANCE_NONE
     }
 }
 
@@ -173,7 +188,11 @@ class Arrival : BroadcastReceiver() {
         val archive = Store.of(context)
         for (fence in event.triggeringGeofences.orEmpty()) {
             val say = archive.arrived(fence.requestId) ?: continue
-            Places.say(context, say)
+            // Spent only if it was heard. `arrived` no longer marks the cue
+            // fired; this does, and only on a delivery that happened.
+            if (Places.say(context, say)) {
+                runCatching { archive.cueDelivered(fence.requestId) }
+            }
         }
     }
 }

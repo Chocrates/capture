@@ -88,6 +88,11 @@ impl<'a, 'g> StoreArchive<'a, 'g> {
     /// data that something has to derive. Without this a sync moves every
     /// event correctly and no surface shows any of them, which is the failure
     /// the two-device test caught.
+    /// The highest stamp anything authentic carried in, for the session to adopt.
+    pub fn highest_stamp(&self) -> Option<capture_core::Hlc> {
+        self.gate.highest_stamp()
+    }
+
     pub fn settle(&mut self) -> crate::Result<usize> {
         if self.taken.is_empty() {
             return Ok(0);
@@ -258,11 +263,10 @@ impl capture_sync::blob::Blobs for StoreBlobs {
 
     fn chunk(&self, hash: &str, offset: u64) -> Option<(u64, Vec<u8>)> {
         let h = crate::blobs::parse(hash)?;
-        let bytes = crate::blobs::get(&self.paths.blobs, &h).ok()??;
-        let total = bytes.len() as u64;
-        let from = offset.min(total) as usize;
-        let to = (from + capture_sync::blob::CHUNK).min(bytes.len());
-        Some((total, bytes[from..to].to_vec()))
+        // Ranged, not whole-file. See `blobs::range`: reading and hashing the
+        // entire blob once per 32 KiB chunk made serving a voice note
+        // quadratic, inside the writer lock, on the phone.
+        crate::blobs::range(&self.paths.blobs, &h, offset, capture_sync::blob::CHUNK).ok()?
     }
 
     fn store(&mut self, hash: &str, offset: u64, total: u64, data: &[u8]) -> bool {

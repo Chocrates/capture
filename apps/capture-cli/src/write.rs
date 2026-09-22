@@ -54,7 +54,21 @@ pub fn edit(paths: StorePaths, name: &str, text: &str) -> Result<()> {
     }
     let mut s = Session::open(paths)?;
     let tgt = find(&s, name)?;
-    let head = s.state.note(&tgt)?.map(|n| n.tgt);
+
+    // The version being edited, not the note.
+    //
+    // This read `s.state.note(&tgt)?.map(|n| n.tgt)` — a variable named `head`
+    // holding the note's *root*, because `NoteRow` has no head field and
+    // `n.tgt` is what was there to take. `resolve` calls a version a tip when
+    // nobody names it as `prev`, so every edit after the first was a tip:
+    // three sequential edits on one device, a minute apart, came back as
+    // "3 independent versions, none superseded".
+    //
+    // A conflict signal that fires when nothing conflicts is one somebody
+    // learns to dismiss by the second day, and then it is not a signal — which
+    // matters because §6 rates a genuinely lost edit as the failure worth
+    // avoiding, and this is what was supposed to catch it.
+    let head = s.state.head_of(&tgt)?.or(Some(tgt));
 
     s.append(Kind::EDIT, Some(tgt), head, |nonce| {
         encode(&EditBody {

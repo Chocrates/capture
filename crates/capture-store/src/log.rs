@@ -38,6 +38,22 @@ CREATE TABLE IF NOT EXISTS events (
   bhash BLOB NOT NULL,
   body  BLOB,
   sig   BLOB NOT NULL,
+  -- Why this event is held but not used, or NULL for the ordinary case.
+  --
+  -- A set-aside event occupies its position and takes no part in anything
+  -- derived from the log. Both halves matter and they used to be in conflict:
+  -- the event was kept out of the log entirely, so `heads` never advanced past
+  -- it, and anti-entropy re-requested that tail from every peer for ever —
+  -- which is the hole `sync-membership/spec.md` says a version vector cannot
+  -- represent.
+  --
+  -- Storing the row closes the hole. The column is what stops it being used,
+  -- and it is here rather than in a table beside the log so that `all()` — the
+  -- one function every fold, every roster build and every surface goes
+  -- through — is correct by construction. A reader that forgets to ask would
+  -- otherwise be a reader that folds a retired device's writes, and on the
+  -- roster path that is a retired device admitting a key of its choosing.
+  aside TEXT,
   UNIQUE(dev, seq)
 ) STRICT;
 
@@ -91,6 +107,7 @@ impl Log {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = db::open_write(path)?;
         db::create_schema(&conn, SCHEMA)?;
+        add_aside_column(&conn)?;
         Ok(Log { conn })
     }
 
@@ -121,6 +138,45 @@ impl Log {
     /// slot it sits in, so it cannot be squatting. Those are stored even when
     /// this build has no idea what to do with them.
     pub fn ingest(&mut self, e: &Envelope, pubkey: &[u8; 32]) -> Result<Ingested> {
+        self.ingest_as(e, pubkey, None)
+    }
+
+    /// Ingest an event that is authentic and may not be used.
+    ///
+    /// # Why it is stored at all
+    ///
+    /// An event set aside for membership reasons — authored by a device past
+    /// the point its retirement named — used to be kept out of the log
+    /// entirely. That left `heads` for the origin stopped at the retirement
+    /// head, and a version vector cannot describe a hole: every round
+    /// afterwards asked every peer for `head+1..N`, was sent the whole tail,
+    /// set it aside again and asked again, for ever, with the bytes on the wire
+    /// each time. `sync-membership/spec.md` calls for set-aside rather than
+    /// refusal precisely to avoid that, and the implementation did the
+    /// opposite.
+    ///
+    /// Storing the row occupies the position, so the head advances and the
+    /// question stops being asked. The `aside` column is what keeps it out of
+    /// everything derived from the log — see [`Self::all`].
+    ///
+    /// `reason` is recorded rather than a flag, because "past a retirement
+    /// head" and "some later reason" are not the same fact and a surface that
+    /// had to guess would guess wrong.
+    pub fn ingest_aside(
+        &mut self,
+        e: &Envelope,
+        pubkey: &[u8; 32],
+        reason: &str,
+    ) -> Result<Ingested> {
+        self.ingest_as(e, pubkey, Some(reason))
+    }
+
+    fn ingest_as(
+        &mut self,
+        e: &Envelope,
+        pubkey: &[u8; 32],
+        aside: Option<&str>,
+    ) -> Result<Ingested> {
         match e.verify(pubkey) {
             Verdict::Authentic => {}
             Verdict::Rejected(r) => return Ok(Ingested::Rejected(r)),
@@ -156,7 +212,7 @@ impl Log {
         }
 
         let tx = self.conn.transaction()?;
-        insert(&tx, e)?;
+        insert_as(&tx, e, aside)?;
 
         // Sequence number, row, and head all move together. A crash between
         // them would leave a gap that nothing can fill, and a gap in an
@@ -176,6 +232,36 @@ impl Log {
         };
         tx.commit()?;
         Ok(outcome)
+    }
+
+    /// Let a set-aside event be used after all.
+    ///
+    /// The remedy for a retirement that was narrower than intended: reissued
+    /// naming a later head, it re-admits exactly the events below that head.
+    /// The row is already in its position, so this only clears the mark that
+    /// keeps it out of the fold — nothing moves, and no head changes.
+    ///
+    /// Returns whether a row was actually released, so a caller can tell a
+    /// decision that did something from one that did not.
+    pub fn release_aside(&mut self, id: &EventId) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE events SET aside = NULL WHERE id = ?1 AND aside IS NOT NULL",
+            params![id.0.to_vec()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Whether this device holds the event and is refusing to use it.
+    pub fn is_aside(&self, id: &EventId) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT aside FROM events WHERE id = ?1",
+                params![id.0.to_vec()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Append an event authored locally.
@@ -257,8 +343,39 @@ impl Log {
         Ok(out)
     }
 
-    /// Every event, for folding.
+    /// Every event this device may actually use, for folding.
+    ///
+    /// Excludes anything set aside. This is the function every fold, every
+    /// roster build and every surface reaches for, so the exclusion lives here
+    /// rather than at each of them: a caller that had to remember would be a
+    /// caller that eventually did not, and on the roster path forgetting means
+    /// a retired device admitting a key of its choosing.
+    ///
+    /// [`Self::all_including_aside`] is the way to see everything, and its name
+    /// is deliberately awkward.
     pub fn all(&self) -> Result<Vec<Envelope>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
+                    chain, bhash, body, sig
+             FROM events WHERE aside IS NULL ORDER BY hlc_wall, hlc_counter, hlc_origin",
+        )?;
+        let rows = st.query_map([], row_to_envelope)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Every event, including those set aside.
+    ///
+    /// For the two callers that want the archive as it physically is rather
+    /// than as it is used: an export, which must carry a set-aside event
+    /// because it occupies a position and a restore without it would reproduce
+    /// the hole; and anything auditing what this device actually holds.
+    ///
+    /// Not for folding. The name is long on purpose.
+    pub fn all_including_aside(&self) -> Result<Vec<Envelope>> {
         let mut st = self.conn.prepare(
             "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
                     chain, bhash, body, sig
@@ -337,7 +454,7 @@ impl Log {
             "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
                     chain, bhash, body, sig
              FROM events
-             WHERE tgt IN ({holes}) OR id IN ({holes})
+             WHERE (tgt IN ({holes}) OR id IN ({holes})) AND aside IS NULL
              ORDER BY hlc_wall, hlc_counter, hlc_origin"
         ))?;
         let both: Vec<&dyn rusqlite::ToSql> = ids
@@ -361,7 +478,7 @@ impl Log {
         let mut st = self.conn.prepare(
             "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
                     chain, bhash, body, sig
-             FROM events WHERE tgt IS NULL AND kind = ?1
+             FROM events WHERE tgt IS NULL AND kind = ?1 AND aside IS NULL
              ORDER BY hlc_wall, hlc_counter, hlc_origin",
         )?;
         let mut out = Vec::new();
@@ -550,13 +667,41 @@ fn head_of(tx: &rusqlite::Transaction<'_>, dev: &str) -> Result<u64> {
         .unwrap_or(0) as u64)
 }
 
+/// Give an existing log the `aside` column.
+///
+/// The schema is created with `IF NOT EXISTS`, which does nothing to a table
+/// that is already there — so a store written by an earlier build has the old
+/// `events` and every query naming `aside` would fail against it. On a phone
+/// holding the only copy of a week's captures, that is the whole archive
+/// refusing to open.
+///
+/// Additive and idempotent. The column is nullable with no default, so every
+/// existing row reads as "not set aside", which is what every existing row is.
+///
+/// Checked rather than attempted-and-ignored: swallowing the error would also
+/// swallow a real one, and this runs on the path that opens the archive.
+fn add_aside_column(conn: &Connection) -> Result<()> {
+    let present = conn
+        .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'aside'")?
+        .exists([])?;
+    if !present {
+        conn.execute("ALTER TABLE events ADD COLUMN aside TEXT", [])?;
+    }
+    Ok(())
+}
+
 fn insert(tx: &rusqlite::Transaction<'_>, e: &Envelope) -> Result<()> {
+    insert_as(tx, e, None)
+}
+
+/// Store an event, saying why it may not be used if it may not be.
+fn insert_as(tx: &rusqlite::Transaction<'_>, e: &Envelope, aside: Option<&str>) -> Result<()> {
     let h = &e.header;
     tx.execute(
         "INSERT INTO events
            (id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
-            chain, bhash, body, sig)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            chain, bhash, body, sig, aside)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             h.id().0.to_vec(),
             dev_key(&h.dev),
@@ -572,6 +717,7 @@ fn insert(tx: &rusqlite::Transaction<'_>, e: &Envelope) -> Result<()> {
             h.bhash.0.to_vec(),
             e.body.clone(),
             e.sig.to_vec(),
+            aside,
         ],
     )?;
     Ok(())
@@ -669,6 +815,89 @@ mod tests {
                 "reconstruction must verify"
             );
         }
+        clean(&p);
+    }
+
+    /// A set-aside event occupies its position and takes no part in anything.
+    ///
+    /// Both halves, because they used to be in conflict. Keeping the event out
+    /// of the log kept it out of the fold — and left `heads` stopped below it,
+    /// so every round afterwards asked every peer for that tail, was sent it,
+    /// set it aside again and asked again, for ever. A version vector cannot
+    /// describe a hole, which is why the spec calls for set-aside rather than
+    /// refusal in the first place.
+    #[test]
+    fn a_set_aside_event_holds_its_position_without_being_used() {
+        let p = tmp("aside");
+        let s = testing::mixed(1, 3, 3, 10);
+        let mut log = Log::open(&p).unwrap();
+
+        let first = &s.events[0];
+        let dev = dev_key(&first.header.dev);
+        let k = s.key_for(&first.header.dev).unwrap();
+
+        // Everything from this origin, in order, with the second set aside.
+        let mine: Vec<_> = s
+            .events
+            .iter()
+            .filter(|e| e.header.dev == first.header.dev)
+            .collect();
+        assert!(mine.len() >= 3, "need a few events from one origin");
+
+        for (i, e) in mine.iter().enumerate() {
+            if i == 1 {
+                log.ingest_aside(e, &k, "post_retire").unwrap();
+            } else {
+                log.ingest(e, &k).unwrap();
+            }
+        }
+
+        // The head is past it: no hole, so nothing re-requests the tail.
+        let heads = log.heads().unwrap();
+        assert_eq!(
+            heads.get(&dev).copied(),
+            Some(mine.last().unwrap().header.seq),
+            "the head stopped at the set-aside event, which is the hole \
+             anti-entropy asks about for ever"
+        );
+
+        // And it is invisible to everything derived from the log.
+        let used = log.all().unwrap();
+        let aside_id = mine[1].header.id();
+        assert!(
+            !used.iter().any(|e| e.header.id() == aside_id),
+            "a set-aside event reached the fold"
+        );
+        assert_eq!(
+            used.len(),
+            mine.len() - 1,
+            "exactly one event is withheld, and only the one"
+        );
+
+        // Still physically held, which is what an export must carry.
+        assert!(
+            log.all_including_aside()
+                .unwrap()
+                .iter()
+                .any(|e| e.header.id() == aside_id),
+            "the event was not stored at all"
+        );
+        assert_eq!(
+            log.is_aside(&aside_id).unwrap().as_deref(),
+            Some("post_retire")
+        );
+
+        // Releasing it is the reissued-retirement remedy, and needs no peer.
+        assert!(log.release_aside(&aside_id).unwrap());
+        assert!(
+            log.all().unwrap().iter().any(|e| e.header.id() == aside_id),
+            "a released event must be usable"
+        );
+        assert!(
+            !log.release_aside(&aside_id).unwrap(),
+            "releasing twice is not a second release"
+        );
+
         clean(&p);
     }
 

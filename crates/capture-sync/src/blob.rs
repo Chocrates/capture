@@ -85,18 +85,47 @@ pub struct Moved {
     /// ordinary state of a constrained device, and the answer is to ask
     /// somebody else.
     pub missing: usize,
+    /// Whether the phase stopped on its budget rather than on finishing.
+    ///
+    /// Not a failure either, and worth distinguishing: a round that moved what
+    /// it could and will continue next time is a different report from one that
+    /// found nothing left to move.
+    pub ran_out_of_time: bool,
 }
 
 /// Fetch what this replica wants, one blob at a time.
 ///
 /// The peer must be running [`serve`] for the same stretch.
+///
+/// # The budget
+///
+/// `spent` says whether the round has used the time it was given. It is asked
+/// between chunks rather than between blobs, because a single large blob over a
+/// slow link is the case that matters: one ten-minute voice note was enough to
+/// occupy a phone's whole sync window, and the window is not negotiable — it is
+/// a `WorkManager` job that the platform destroys mid-sentence when the budget
+/// ends.
+///
+/// Stopping costs nothing, which is what makes a deadline the right shape here.
+/// A partial blob is a partial file on disk and `have_bytes` is where the next
+/// round resumes from, so a big attachment crosses several rounds and arrives,
+/// instead of one round restarting it for ever and finishing none of them.
+///
+/// A predicate rather than an instant, because this crate does not read clocks
+/// (DESIGN.md D12) — the caller owns the clock and the deadline computed from
+/// it, exactly as `round::bounded` does for the rest of the round.
 pub fn fetch<T: Transport, B: Blobs>(
     session: &mut Session<T>,
     blobs: &mut B,
+    spent: &dyn Fn() -> bool,
 ) -> Result<Moved, TransportError> {
     let mut moved = Moved::default();
 
     for hash in blobs.wanted() {
+        if spent() {
+            moved.ran_out_of_time = true;
+            break;
+        }
         let mut offset = blobs.have_bytes(&hash);
 
         loop {
@@ -134,6 +163,13 @@ pub fn fetch<T: Transport, B: Blobs>(
                         moved.fetched += 1;
                         break;
                     }
+                    // Between chunks, so a single large blob cannot hold the
+                    // whole window. What has arrived is already on disk and the
+                    // next round resumes from it.
+                    if spent() {
+                        moved.ran_out_of_time = true;
+                        break;
+                    }
                     // A peer that keeps answering with nothing, forever, is
                     // not making progress and is not going to.
                     if data.is_empty() {
@@ -151,6 +187,10 @@ pub fn fetch<T: Transport, B: Blobs>(
         }
     }
 
+    // Said, always, and on every path out. The peer is inside `serve` and
+    // leaves it only when told; a fetch that stopped early without saying so
+    // would leave it blocked on a message that is never coming, and the round
+    // would end on a timeout at both ends rather than on a decision at one.
     send(session, &Message::Done)?;
     Ok(moved)
 }

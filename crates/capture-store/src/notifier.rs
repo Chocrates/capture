@@ -45,6 +45,41 @@ pub fn chosen(state: &Store) -> Result<Option<String>> {
     state.setting(KEY)
 }
 
+/// Whether this device is the one that says things.
+///
+/// # Why this had to exist
+///
+/// `chosen` had two readers — `capture status` and an FFI getter — and no
+/// delivery path consulted either. So the setting offered for choosing a
+/// notifier was inert: with a phone and a desktop paired, every moment was
+/// announced on both, and the control that exists to stop that did nothing
+/// when it was used. §2.4.1 routes time cues to the designated notifier, and
+/// only geofences and `git_branch` were actually honouring device routing —
+/// those by asking `observable`, which answers a different question.
+///
+/// # The default is a rule, not a choice
+///
+/// `None` means nobody has chosen, and the answer is yes: one device, so it is
+/// this one. §8.9 turns on keeping that distinct from a stored preference, so
+/// this evaluates the rule rather than writing it down.
+///
+/// # Matched on a prefix
+///
+/// The setting holds a device key as `capture peers` prints it, which is
+/// shortened. Comparing a shortened key against a full one by equality would
+/// silently never match and silence the device that should speak — the failure
+/// this is meant to prevent, arriving by the other door.
+pub fn speaks_here(state: &Store, me: &[u8; 32]) -> Result<bool> {
+    let Some(who) = chosen(state)? else {
+        return Ok(true);
+    };
+    let who = who.trim().to_ascii_lowercase();
+    if who.is_empty() {
+        return Ok(true);
+    }
+    Ok(capture_core::id::hexed(me).starts_with(&who))
+}
+
 /// What to do when nobody has chosen.
 ///
 /// One device, so it is this one. The rule is stated as a rule rather than
@@ -172,11 +207,90 @@ pub fn notify(summary: &str, body: &str) -> bool {
 /// Falling back rather than failing: a wrong zone moves quiet hours by the
 /// offset, which is bad; refusing to answer stops the notification budget
 /// working at all, which is worse.
+///
+/// # Why it is not simply the library's answer any more
+///
+/// `jiff` reads the system zone once and caches it for the life of the
+/// process, which is right for a command that runs for a second and wrong for
+/// the two processes that matter here: the overlay and the daemon run for
+/// weeks.
+///
+/// The hour is the input to every §2.6 decision, so a stale zone is not a
+/// cosmetic error. London to Los Angeles, and `civil_clock` says 22:00 when it
+/// is 14:00: the whole working afternoon reads as quiet hours and is held, and
+/// what does escape is released at "07:00" London, which is 23:00 where the
+/// person actually is. Everything arrives at night, for a week, and nothing
+/// anywhere says why.
+///
+/// So the sources that *change* are consulted first, on every call, and the
+/// library's cached answer is the fallback rather than the whole answer.
+///
+/// # And why this is not the symlink parsing that was removed
+///
+/// Four copies of this used to parse `/etc/localtime` by hand, and that was
+/// removed for good reasons: it got `$TZ` wrong in every form that is not a
+/// zone name (`EST5EDT`, an absolute path, a POSIX offset string), it got
+/// nothing at all where `/etc/localtime` is a copy rather than a link, and it
+/// was reimplemented each time somebody needed it because nothing owned it.
+///
+/// All three still apply, and none of them is a reason to read a stale zone:
+///
+/// - This is the one owner. A guard compares function bodies, and it is what
+///   found the fifth copy.
+/// - Every candidate is **validated** before it is returned — a form this
+///   cannot resolve is not returned wrong, it is passed over. That is what the
+///   hand-rolled parsers never did.
+/// - A copied rather than linked `/etc/localtime` yields nothing here and falls
+///   through to the library, which is exactly the old behaviour.
 pub fn local_zone() -> String {
+    // `$TZ` first: it is the explicit instruction, and a process given one was
+    // given it on purpose.
+    if let Some(name) = std::env::var("TZ")
+        .ok()
+        .and_then(|t| resolvable(t.trim_start_matches(':')))
+    {
+        return name;
+    }
+
+    // Then the link, which is how a zone change actually lands on Linux —
+    // `timedatectl`, a desktop settings panel and a distribution installer all
+    // repoint it.
+    if let Some(name) = std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|p| zone_from_path(&p))
+    {
+        return name;
+    }
+
+    // Otherwise whatever the library read when the process started.
     jiff::tz::TimeZone::system()
         .iana_name()
         .unwrap_or("UTC")
         .to_string()
+}
+
+/// A candidate zone name, if it is one this machine can actually resolve.
+///
+/// The validation is the point. Every caller feeds the result straight into
+/// `Zone::new`, and a name that fails there means quiet hours and batch windows
+/// fall back to UTC without saying so.
+fn resolvable(name: &str) -> Option<String> {
+    capture_time::Zone::new(name).map(|_| name.to_string())
+}
+
+/// The zone named by a path like `/usr/share/zoneinfo/Europe/London`.
+///
+/// Taken from the `zoneinfo` component rather than from a fixed prefix: the
+/// directory is `/usr/share/zoneinfo` on most systems and somewhere else on
+/// enough of them to matter. Validated like any other candidate.
+fn zone_from_path(p: &std::path::Path) -> Option<String> {
+    let s = p.to_str()?;
+    let (_, after) = s.rsplit_once("zoneinfo/")?;
+    resolvable(
+        after
+            .trim_start_matches("posix/")
+            .trim_start_matches("right/"),
+    )
 }
 
 /// When the day goes quiet, and when it comes back. Local hours.
@@ -208,6 +322,13 @@ pub enum Delivery {
     /// day it is and this does not — and because a decision that returned an
     /// instant would need a clock, which §8.1 keeps out of this crate.
     At(u32),
+    /// Do not say it at all. The moment is too far gone to be news.
+    ///
+    /// Distinct from holding, because a hold is a promise to say it later and
+    /// this is a decision not to. The moment stays on every surface that lists
+    /// what is outstanding — it is undone, and nothing here changes that. What
+    /// it has stopped being is an announcement.
+    Stale,
 }
 
 /// Decide when something due may actually be said.
@@ -246,11 +367,45 @@ pub fn deliver(hour: u32, timed: bool, armed: bool) -> Delivery {
 /// long after the time had gone.
 pub const STILL_PROMPT_MS: i64 = 30 * 60 * 1000;
 
+/// How late a moment can be and still be worth announcing at all.
+///
+/// # Why there has to be a floor
+///
+/// Without one, "has this been delivered yet" is asked of every moment the
+/// horizon can reach, and the horizon is a year wide on either side. Three
+/// things follow, and all three were reachable:
+///
+/// - **A rule edit renames a year of moments.** Delivery is keyed by the
+///   instant an occurrence falls on, so shifting a daily series by half an hour
+///   makes three hundred already-delivered mornings undelivered at once. They
+///   are all in the past, they were all said when they happened, and nothing
+///   about the edit makes any of them news.
+/// - **A restore replays everything.** `ops.db` is local state and a recovered
+///   device starts with an empty one, so every moment in the horizon reads as
+///   never delivered — the precise replay the delivery table exists to prevent,
+///   arriving through the front door on the worst possible day.
+/// - **A task from 2020 is announced today.** It is genuinely outstanding and
+///   genuinely not news, and a notification is the wrong surface for it.
+///
+/// A week, because that is the span over which "I have not done this yet" is
+/// still an announcement rather than a fact of life, and it matches the review
+/// cycle that exists for exactly this. Past it the moment is still on every
+/// list that shows what is outstanding; it has simply stopped interrupting.
+pub const STALE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 /// The same decision, told how late the moment is.
 ///
 /// `late_by` is milliseconds since the moment passed; zero or negative means
 /// it is arriving on time.
 pub fn deliver_late(hour: u32, timed: bool, armed: bool, late_by: i64) -> Delivery {
+    // Before anything else, including armed. An alarm somebody set for a
+    // fortnight ago is not an alarm that is going off late; it is an alarm for
+    // a moment that has been and gone, and ringing it now tells them nothing
+    // they can act on while teaching them that the ring means nothing.
+    if late_by > STALE_MS {
+        return Delivery::Stale;
+    }
+
     // The waking day is the half-open range; quiet is everything else.
     let quiet = !(QUIET_UNTIL..QUIET_FROM).contains(&hour);
 
@@ -264,13 +419,34 @@ pub fn deliver_late(hour: u32, timed: bool, armed: bool, late_by: i64) -> Delive
         return Delivery::Now;
     }
 
-    // Not time-critical: it joins the next delivery. The next one *today* —
-    // an hour that has already passed today would mean "yesterday", and
-    // returning the first batch of tomorrow is the caller's job to work out
-    // from the hour it gets back.
+    // Arrived at a delivery: this is the delivery.
+    //
+    // This line was `find(|&b| b > hour)` and nothing else, which meant that
+    // at 09:00 the 09:00 batch was not "now" but "wait until 14:00" — and 19
+    // wrapped to 9. Traced across a whole day, a batched item was delivered at
+    // **no hour at all**: every task carrying a due date was silently never
+    // announced, every late alert was lost, and every quiet-hours hold was
+    // permanent.
+    //
+    // The test that should have caught it asserted the batch hours all sit
+    // outside quiet hours — that a loop *could not* exist — and never asked
+    // what happens at 9, 14 or 19. A property about the arrangement, where
+    // what was needed was a property about the outcome.
+    if BATCHES.contains(&hour) {
+        return Delivery::Now;
+    }
+
+    // Otherwise the next one today, or tomorrow's first. An hour that has
+    // already passed today would mean "yesterday", and the caller works the
+    // day out from the hour it gets back.
+    Delivery::At(next_batch(hour))
+}
+
+/// The next batch hour after the one given, wrapping to tomorrow's first.
+pub fn next_batch(hour: u32) -> u32 {
     match BATCHES.iter().find(|&&b| b > hour) {
-        Some(&b) => Delivery::At(b),
-        None => Delivery::At(BATCHES[0]),
+        Some(&b) => b,
+        None => BATCHES[0],
     }
 }
 
@@ -328,8 +504,25 @@ pub fn mark_fired(paths: &StorePaths, id: &[u8], now: u64) -> Result<()> {
 mod zone {
     use super::*;
 
+    /// `$TZ` is process-wide, and the test harness runs these in parallel.
+    ///
+    /// Without this, a test that sets the variable changes what a test
+    /// asserting a *stable* answer sees, and the pair fail each other
+    /// intermittently — the kind of flake that gets a real assertion deleted
+    /// for being unreliable.
+    static TZ: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Hold the lock for the body of a test that touches `$TZ`.
+    ///
+    /// Ignores poisoning: a panicking test has already failed, and its failure
+    /// is the news rather than every later test in the module failing too.
+    fn serially() -> std::sync::MutexGuard<'static, ()> {
+        TZ.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn it_answers_something_that_is_actually_a_zone() {
+        let _guard = serially();
         // The only property worth asserting, and the one that matters: every
         // caller feeds this straight into `Zone::new`, and a name that fails
         // to parse there means quiet hours and batch windows silently fall
@@ -340,37 +533,52 @@ mod zone {
 
     #[test]
     fn it_is_the_same_answer_every_time() {
+        let _guard = serially();
         // Two callers a moment apart must not disagree. `today()` and
         // `agenda()` deriving the zone separately is how they came to
         // disagree about what day it was.
         assert_eq!(local_zone(), local_zone());
     }
 
-    /// `$TZ` set after the process starts does not take effect.
+    /// A zone change during the process takes effect.
     ///
-    /// Not a defect to fix here, but a fact worth writing down: `jiff` reads
-    /// the system zone once and caches it, so a long-running process — the
-    /// overlay, the daemon — keeps the zone it started with. Somebody who
-    /// travels and changes their system zone gets quiet hours in the old one
-    /// until the process restarts.
-    ///
-    /// The previous implementation parsed `/etc/localtime` on every call and
-    /// so did pick it up, which reads like an advantage and was not: it also
-    /// mishandled every `$TZ` form that is not an IANA name, and it was
-    /// reimplemented five times because nothing owned it.
+    /// This asserted the opposite, and recorded the caching as a fact rather
+    /// than a defect. It is a defect for the two processes that matter: the
+    /// overlay and the daemon run for weeks, and the hour they read is the
+    /// input to every §2.6 decision. Somebody who flies gets an afternoon that
+    /// reads as quiet hours and a night that reads as morning.
     #[test]
-    fn the_zone_is_read_once_per_process() {
-        let before = local_zone();
+    fn a_zone_change_is_picked_up_without_a_restart() {
+        let _guard = serially();
         // SAFETY-adjacent: restored immediately, and nothing else in this
         // test binary reads TZ.
         unsafe { std::env::set_var("TZ", "Europe/Berlin") };
-        let after = local_zone();
+        let berlin = local_zone();
+        unsafe { std::env::set_var("TZ", "America/Los_Angeles") };
+        let la = local_zone();
         unsafe { std::env::remove_var("TZ") };
 
-        assert_eq!(
-            before, after,
-            "the system zone is cached; this test exists to record that",
-        );
+        assert_eq!(berlin, "Europe/Berlin");
+        assert_eq!(la, "America/Los_Angeles", "the zone did not follow");
+    }
+
+    /// A `$TZ` that is not a zone name is passed over, not returned wrong.
+    ///
+    /// The reason the hand-rolled symlink parsing was removed. Every caller
+    /// feeds this straight into `Zone::new`, so returning `EST5EDT` means
+    /// silently falling back to UTC — a five-hour error nothing reports.
+    #[test]
+    fn a_tz_that_is_not_a_zone_name_is_not_believed() {
+        let _guard = serially();
+        for odd in ["EST5EDT", "<+07>-7", "/usr/share/zoneinfo/Europe/Rome", ""] {
+            unsafe { std::env::set_var("TZ", odd) };
+            let z = local_zone();
+            unsafe { std::env::remove_var("TZ") };
+            assert!(
+                capture_time::Zone::new(&z).is_some(),
+                "{odd:?} produced something that is not a zone: {z:?}"
+            );
+        }
     }
 }
 
@@ -435,9 +643,13 @@ mod budget {
     }
 
     #[test]
-    fn an_armed_alarm_is_urgent_however_late_it_is() {
+    fn an_armed_alarm_is_urgent_however_late_in_the_day_it_is() {
         // Somebody who set an alarm meant it. Arriving late is a reason to say
         // so, not a reason to wait until the afternoon.
+        //
+        // "However late" is about the hour, not about the calendar: past
+        // `STALE_MS` an armed moment is stale like any other, which
+        // `arming_does_not_survive_a_fortnight` is the other half of.
         assert_eq!(
             deliver_late(10, true, true, 10 * STILL_PROMPT_MS),
             Delivery::Now
@@ -476,6 +688,107 @@ mod budget {
         );
         assert_eq!(deliver(22, true, false), Delivery::At(QUIET_UNTIL));
         assert_eq!(deliver(7, true, false), Delivery::Now, "07:00 is morning");
+    }
+
+    /// Everything held is eventually said.
+    ///
+    /// The property that was missing, and its absence cost the entire batched
+    /// class: tasks with due dates, late alerts, and anything held over quiet
+    /// hours were delivered at no hour of the day. The old test asserted the
+    /// batch hours sit outside quiet hours — that a loop could not exist —
+    /// which is a fact about the arrangement rather than about the outcome,
+    /// and the loop was one comparison away from it.
+    ///
+    /// Stated as: whatever is held, following the holds forward terminates.
+    /// A moment far enough past stops being an announcement.
+    ///
+    /// The three ways this was reachable are in `STALE_MS`, and the worst is
+    /// the quietest: a restore starts with an empty delivery table, so without
+    /// a floor every moment in a year-wide horizon reads as never delivered.
+    /// Somebody recovering an archive would be handed a year of alerts for
+    /// moments they already lived through, on the day they could least afford
+    /// it.
+    #[test]
+    fn a_moment_long_past_is_not_announced() {
+        let week = STALE_MS;
+        // Just inside: still said, on whatever terms lateness allows.
+        assert_ne!(deliver_late(10, true, false, week), Delivery::Stale);
+        // Past it: nothing, on any terms.
+        for hour in [0, 7, 9, 14, 19, 23] {
+            for timed in [true, false] {
+                for armed in [true, false] {
+                    assert_eq!(
+                        deliver_late(hour, timed, armed, week + 1),
+                        Delivery::Stale,
+                        "hour={hour} timed={timed} armed={armed}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Armed is unconditional about *quiet hours*, not about time itself.
+    ///
+    /// An alarm somebody set is said whenever it arrives, however inconvenient
+    /// the hour — that is what arming means. An alarm for a moment a fortnight
+    /// gone is a different claim, and ringing it teaches somebody the ring
+    /// means nothing.
+    #[test]
+    fn arming_does_not_survive_a_fortnight() {
+        assert_eq!(deliver_late(3, true, true, 0), Delivery::Now);
+        assert_eq!(
+            deliver_late(3, true, true, 14 * 24 * 60 * 60 * 1000),
+            Delivery::Stale
+        );
+    }
+
+    #[test]
+    fn a_hold_always_ends_somewhere() {
+        for start in 0..24 {
+            for timed in [true, false] {
+                let mut hour = start;
+                let mut hops = 0;
+                loop {
+                    match deliver_late(hour, timed, false, 24 * 60 * 60 * 1000) {
+                        Delivery::Now => break,
+                        Delivery::At(next) => {
+                            hour = next;
+                            hops += 1;
+                            assert!(
+                                hops <= BATCHES.len() + 2,
+                                "held from {start}:00 (timed={timed}) and never said — \
+                                 the holds cycle rather than terminating",
+                            );
+                        }
+                        // A day late is well inside the floor. If this ever
+                        // fires, the floor has moved under the property rather
+                        // than the property being wrong.
+                        Delivery::Stale => {
+                            panic!("a day late was treated as too late to say")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arriving_at_a_batch_hour_is_the_batch() {
+        for b in BATCHES {
+            assert_eq!(deliver(b, false, false), Delivery::Now, "at {b}:00");
+            assert_eq!(
+                deliver_late(b, true, false, 24 * 60 * 60 * 1000),
+                Delivery::Now,
+                "a day-late timed alert at {b}:00",
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_with_a_due_date_is_announced_at_some_point() {
+        // The ordinary case, and the one that was silently never delivered.
+        let said_somewhere = (0..24).any(|h| deliver(h, false, false) == Delivery::Now);
+        assert!(said_somewhere, "a due date is never announced at any hour");
     }
 
     #[test]

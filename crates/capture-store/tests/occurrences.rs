@@ -300,6 +300,67 @@ fn the_new_series_carries_on_from_the_split() {
     assert!(occ.iter().all(|o| o.start_ms >= boundary));
 }
 
+/// Delivery survives a split, which is the other half of §3.5's inheritance.
+///
+/// Splitting gives every occurrence from the boundary onward a new note, and
+/// delivery is keyed by the note — so all of them read as never announced. The
+/// boundary is the one that bites: the same instant and the same text as one
+/// already said. "Change standup from today onward", done at four in the
+/// afternoon, re-announced this morning's standup.
+///
+/// The expansion already inherits exceptions across a split, for the reason
+/// that what somebody did to an occurrence survives a change to the schedule
+/// it sits on. This is the same principle applied to what the archive already
+/// told them.
+#[test]
+fn delivery_survives_a_split() {
+    let sc = Scratch::new("split-delivery");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let before = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let boundary = before[10].occ;
+
+    // Every one of them announced, the way a week of standups would be.
+    let ops = capture_store::ops::Ops::open(&p.ops).unwrap();
+    for o in &before {
+        ops.mark_alerted(&tgt.0, Some(o.occ), o.occ, 0).unwrap();
+    }
+    drop(ops);
+
+    promote::split_series(
+        &p,
+        &slug,
+        boundary,
+        RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0b0110_0000,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        },
+    )
+    .unwrap();
+
+    // The note the boundary now belongs to.
+    let store = rebuild(&p, NOW);
+    let new_tgt = store
+        .promoted("series", 100)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .find(|t| *t != tgt)
+        .expect("the split made a second series");
+
+    let ops = capture_store::ops::Ops::open(&p.ops).unwrap();
+    assert!(
+        ops.alerted(&new_tgt.0, Some(boundary), boundary).unwrap(),
+        "the boundary occurrence was announced before the split and is the \
+         same instant afterwards — changing the schedule is not news about it"
+    );
+}
+
 #[test]
 fn a_completion_survives_a_split_that_moves_past_it() {
     // The fiddly half of §3.5: exceptions bind to whichever series covers their

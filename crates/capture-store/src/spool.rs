@@ -36,6 +36,18 @@
 //! A zero length marks the end. Because the file is preallocated with zeroes, a
 //! fresh spool already reads as empty, and a torn write at the tail reads as
 //! the end of the records rather than as corruption.
+//!
+//! That last property is a consequence of the *write order*, not of the format,
+//! and it did not hold when the length was written first. Preallocation means
+//! the payload's bytes are already there and already readable: a crash between
+//! the length landing and the payload landing left a record whose length was
+//! durable and whose body was ten thousand zeroes, and nothing downstream could
+//! tell that from a capture. It was hashed, signed and appended to the log —
+//! the one artifact in the system that is never rewritten.
+//!
+//! So the payload and its terminator are written and synced first, and the
+//! length last. Until that length is durable the record does not exist, and
+//! after it is, everything it points at already does.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -94,12 +106,22 @@ pub fn push(path: &Path, payload: &[u8]) -> Result<()> {
         )));
     }
 
-    f.seek(SeekFrom::Start(end))?;
-    f.write_all(&(payload.len() as u32).to_le_bytes())?;
+    // Payload first, length last, with a sync between them. See the module
+    // header: written the other way round, a crash in the gap leaves a record
+    // that is complete as far as any reader can tell and is entirely zeroes.
+    //
+    // The terminator goes down in the first pass too. `clear` only zeroes the
+    // first length, so the bytes after a reused spool's new record are whatever
+    // the previous contents left there, and the record needs an end of its own.
+    f.seek(SeekFrom::Start(end + 4))?;
     f.write_all(payload)?;
     f.write_all(&0u32.to_le_bytes())?;
-    // The spool exists because the ordinary durable path is unavailable; a
-    // capture it accepted must survive whatever happens next.
+    f.sync_all()?;
+
+    // Now the record exists. The spool exists because the ordinary durable path
+    // is unavailable; a capture it accepted must survive whatever happens next.
+    f.seek(SeekFrom::Start(end))?;
+    f.write_all(&(payload.len() as u32).to_le_bytes())?;
     f.sync_all()?;
     Ok(())
 }
@@ -126,6 +148,17 @@ pub fn read_all(path: &Path) -> Result<Vec<SpooledCapture>> {
         if f.read_exact(&mut buf).is_err() {
             // Torn tail: the record was never completed, so it was never
             // acknowledged either. Stopping here loses nothing.
+            break;
+        }
+        // Belt as well as braces, for the one window the write order does not
+        // close: the length itself is four bytes and a crash can tear those,
+        // leaving a plausible count over preallocated zeroes.
+        //
+        // An encoded capture is never all zeroes — it is CBOR, and its first
+        // byte is a map or array header. Reading zeroes as a capture is how a
+        // signed record of nothing reaches the append-only log, so they end the
+        // scan like any other torn tail.
+        if buf.iter().all(|b| *b == 0) {
             break;
         }
         out.push(SpooledCapture { payload: buf });
@@ -193,6 +226,61 @@ mod tests {
         preallocate(&p).unwrap();
         assert!(read_all(&p).unwrap().is_empty());
         assert!(!in_use(&p).unwrap());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// A torn record is not a capture.
+    ///
+    /// The failure this guards against is not a corrupt read — it is a
+    /// perfectly successful one. The spool is preallocated with zeroes, so
+    /// every byte a length points at is already there and already readable:
+    /// a length that became durable without its payload yields a record that
+    /// `read_exact` completes, `drain` hashes, `author` signs and `log.append`
+    /// writes into the one file in the system that is never rewritten.
+    ///
+    /// Reproduced here by writing what the old order left behind — the length,
+    /// and nothing after it.
+    #[test]
+    fn a_torn_length_does_not_become_an_all_zero_capture() {
+        let p = tmp("torn");
+        preallocate(&p).unwrap();
+        push(&p, &[0xa1, 0x01, 0x02]).unwrap();
+
+        let mut f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        let end = scan_end(&mut f).unwrap();
+        f.seek(SeekFrom::Start(end)).unwrap();
+        f.write_all(&64u32.to_le_bytes()).unwrap();
+        f.sync_all().unwrap();
+
+        let back = read_all(&p).unwrap();
+        assert_eq!(back.len(), 1, "a torn record was read back as a capture");
+        assert_eq!(back[0].payload, vec![0xa1, 0x01, 0x02]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// The length is the last thing to become durable.
+    ///
+    /// Stated as the property rather than the byte order, because the property
+    /// is what makes a torn write survivable: at every instant during a push,
+    /// either the record is absent or everything it points at is already on
+    /// disk. A reader can therefore never see a length without a payload.
+    #[test]
+    fn a_record_is_durable_before_it_is_visible() {
+        let p = tmp("durable-order");
+        preallocate(&p).unwrap();
+
+        let mut f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        let end = scan_end(&mut f).unwrap();
+
+        // The payload, written where a push would put it, with no length yet.
+        f.seek(SeekFrom::Start(end + 4)).unwrap();
+        f.write_all(&[0xa1, 0x01, 0x02]).unwrap();
+        f.sync_all().unwrap();
+
+        assert!(
+            read_all(&p).unwrap().is_empty(),
+            "a payload with no length was visible as a record"
+        );
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

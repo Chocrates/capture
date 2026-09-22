@@ -58,6 +58,7 @@ pub fn tick(
     round: u64,
     port: u16,
     now: &dyn Fn() -> u64,
+    spent: &dyn Fn() -> bool,
 ) -> Result<()> {
     let (roster, heads) = look(paths)?;
     let Some(secret) = roster.secret else {
@@ -95,7 +96,7 @@ pub fn tick(
     // pairing record is consulted here rather than only in the surfaces.
     let mut members: Vec<[u8; 32]> = roster.keys.iter().copied().filter(|k| k != &me).collect();
     for k in ops.dialable()? {
-        if k != me && !members.contains(&k) {
+        if may_dial(&roster, &me, &k) && !members.contains(&k) {
             members.push(k);
         }
     }
@@ -122,6 +123,14 @@ pub fn tick(
         // no way to call.
         let Some(addr) = p.addr.clone() else { continue };
         if p.key == me || reachable.iter().any(|(k, _, _)| k == &p.key) {
+            continue;
+        }
+        // Against membership, which this path never checked. The advertised
+        // route does — `discovery::consider` takes `members` — and the
+        // remembered-address fallback beside it did not, so the guard was
+        // present on the path that needs it least. A remembered address is
+        // exactly what a retired device leaves behind.
+        if !members.contains(&p.key) {
             continue;
         }
         // Backed off, so a device that is simply switched off is not dialled
@@ -157,7 +166,7 @@ pub fn tick(
             continue;
         }
 
-        match dial(paths, identity, &peer, &addr, now()) {
+        match dial(paths, identity, &peer, &addr, now(), spent) {
             Ok(done) => {
                 ops.peer_reached(&peer, &addr, now())?;
                 if let Some(d) = digest {
@@ -189,13 +198,14 @@ pub fn dial(
     peer: &[u8; 32],
     addr: &str,
     now: u64,
+    spent: &dyn Fn() -> bool,
 ) -> Result<Exchanged> {
     let noise = noise_key_for(paths, peer)?;
     let tcp = Tcp::connect(addr).map_err(Error::Io)?;
     let mut secure = Secure::initiate(tcp, &identity.noise_secret(), &noise)
         .map_err(|e| Error::Usage(format!("handshake refused: {e:?}")))?;
 
-    reconcile(paths, &mut secure, now, true)
+    reconcile(paths, &mut secure, now, true, spent)
 }
 
 /// Answer a peer that dialled this device.
@@ -204,6 +214,7 @@ pub fn answer(
     identity: &Identity,
     stream: std::net::TcpStream,
     now: u64,
+    spent: &dyn Fn() -> bool,
 ) -> Result<()> {
     let tcp = Tcp::new(stream).map_err(Error::Io)?;
 
@@ -237,7 +248,7 @@ pub fn answer(
         )));
     };
 
-    let done = reconcile(paths, &mut secure, now, false)?;
+    let done = reconcile(paths, &mut secure, now, false, spent)?;
     // Alive, but not necessarily reachable at the address it dialled from —
     // that is an ephemeral source port. Where to call it back comes from the
     // advertisement, or from a remembered address, not from this.
@@ -252,6 +263,7 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     secure: &mut Secure<T>,
     now: u64,
     dialled: bool,
+    spent: &dyn Fn() -> bool,
 ) -> Result<Exchanged> {
     let mut s = Session::open(paths.clone())?;
     let ops = Ops::open(&paths.ops)?;
@@ -259,8 +271,17 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     let mut gate = Gate::open(&mut s.log, &mut s.state, &ops, own)?;
     let mut archive = StoreArchive::new(&mut gate, &ops, now);
 
-    let done = exchange(secure, &mut archive)
-        .map_err(|e| Error::Usage(format!("exchange failed: {e:?}")))?;
+    let done = exchange(secure, &mut archive).map_err(|e| match e {
+        // A phone that walked out of Wi-Fi range mid-round, which is the most
+        // ordinary event in the system and not a fault. Reported as its own kind
+        // so a caller can log it quietly and try again on the next sweep,
+        // instead of putting "exchange failed" in front of the user for the
+        // thing that happens every time a pocket moves.
+        capture_sync::transport::TransportError::TimedOut => {
+            Error::Unreachable(String::from("the peer stopped responding mid-round"))
+        }
+        other => Error::Usage(format!("exchange failed: {other:?}")),
+    })?;
 
     // The log has them; the projection does not until this runs. Without it a
     // round moves every event correctly and no surface shows any of them.
@@ -268,6 +289,14 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     if folded > 0 {
         tracing::debug!(folded, "arrivals folded into the projection");
     }
+
+    // Adopt the peer's clock (§HLC: "adopt, never clamp"). Without this the log
+    // converges and the *ordering* does not: an edit this device makes after
+    // seeing the peer's event carries a lower stamp than the event it replaces,
+    // so every last-writer-wins rule resolves in favour of the thing that was
+    // corrected. Here rather than inside the gate because the clock belongs to
+    // the session, which is what persists it across a restart.
+    let adopt = archive.highest_stamp();
 
     // What the peer said it can watch for (§7.5), against whoever it turned
     // out to be.
@@ -293,18 +322,51 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     // indistinguishable from a stall in the other.
     let mut mine = StoreBlobs::new(paths.clone());
     if dialled {
-        capture_sync::blob::fetch(secure, &mut mine)
+        capture_sync::blob::fetch(secure, &mut mine, spent)
             .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
         capture_sync::blob::serve(secure, &mine)
             .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
     } else {
         capture_sync::blob::serve(secure, &mine)
             .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
-        capture_sync::blob::fetch(secure, &mut mine)
+        capture_sync::blob::fetch(secure, &mut mine, spent)
             .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
     }
 
+    // Last, because it needs the session back — the gate borrowed its log and
+    // its projection for the length of the exchange. A round that got this far
+    // has already committed what it ingested; the clock advance is the part that
+    // makes the *next* thing this device writes order correctly against it.
+    if let Some(stamp) = adopt {
+        drop(archive);
+        drop(gate);
+        s.adopt(&stamp)?;
+    }
+
     Ok(done)
+}
+
+/// Whether this device may open an outbound session with a key.
+///
+/// # Why this is not just "is it in the roster"
+///
+/// It is nearly that, with one addition that matters and one that is a trap.
+///
+/// The addition: a device that has *just* paired is not in its own roster — the
+/// admission lives in the other device's log — so a daemon that dialled only
+/// roster members could never make the first connection and would never receive
+/// the log that would make it a member. The pairing grant exists to break that
+/// deadlock, so a key learned by pairing is dialable.
+///
+/// The trap: that grant does not expire. A retired key is still a *known* key,
+/// and it keeps its pairing row, so "not in `keys`" was never enough — the
+/// retired set has to be consulted explicitly. Without that, §5.3's remedy is
+/// half a remedy: `answer` refuses the retired device's calls, and this device
+/// rings it up on the next sweep and hands over everything written since. A
+/// device is retired because it is lost or compromised, which makes the outbound
+/// direction the one that matters.
+pub fn may_dial(roster: &Roster, me: &[u8; 32], key: &[u8; 32]) -> bool {
+    key != me && !roster.retired.contains_key(key)
 }
 
 /// Membership and what this device holds, without taking the writer lock.
@@ -443,6 +505,16 @@ fn jitter(key: &[u8; 32]) -> u64 {
     u64::from_be_bytes(key[..8].try_into().expect("32 bytes has 8"))
 }
 
+/// How much of the window to leave for winding a phase up.
+///
+/// A fetch that stops on its budget still has to say `Done`, and the peer is
+/// blocked in `serve` until it hears it. Stopping at the deadline itself would
+/// mean the message going out after the window closed, which on a phone is the
+/// platform destroying the job mid-sentence — and the peer then waits for a
+/// message that is never coming.
+#[cfg(feature = "mdns")]
+const WIND_UP_MS: u64 = 2_000;
+
 /// One bounded round, for a caller that is about to be killed.
 ///
 /// The daemon runs until stopped and can afford a listener that lives as long
@@ -488,8 +560,19 @@ pub fn bounded(
 
     // Advertise and dial. Whether this found anybody is in the peer records
     // `tick` writes, which is where the surfaces read it from anyway.
+    // The budget the blob phase answers to, from the deadline this round
+    // already has. A transfer that cannot finish inside the window is stopped
+    // and resumed next round rather than restarted: partial blobs are partial
+    // files, and `have_bytes` is where the next round picks up.
+    //
+    // A little short of the deadline, so a phase that stops still has room to
+    // say `Done` and wind the session up tidily. A round killed mid-sentence by
+    // the platform is exactly what the window exists to avoid.
+    let blob_budget = deadline.saturating_sub(WIND_UP_MS);
+    let spent = || now() >= blob_budget;
+
     let round = now() / 1000;
-    if let Err(e) = tick(paths, identity, &mut beacon, round, port, now) {
+    if let Err(e) = tick(paths, identity, &mut beacon, round, port, now, &spent) {
         report.trouble = Some(e.to_string());
     }
 
@@ -499,7 +582,7 @@ pub fn bounded(
     // part that goes wrong when the platform is killing the process anyway.
     while now() < deadline {
         match listener.accept() {
-            Ok((stream, _)) => match answer(paths, identity, stream, now()) {
+            Ok((stream, _)) => match answer(paths, identity, stream, now(), &spent) {
                 Ok(()) => report.answered += 1,
                 Err(e) => report.trouble = Some(e.to_string()),
             },
@@ -510,7 +593,64 @@ pub fn bounded(
         }
     }
 
+    // Recorded before returning, and recorded whatever happened.
+    //
+    // This is the only evidence that sync is running at all. Everything else a
+    // surface can read — the peer rows, the digests — describes what a round
+    // *achieved*, and is identically empty when no round has run. A periodic
+    // job held off by a constraint it cannot satisfy produces no run, no error
+    // and no retry, so without this the difference between a quiet network and
+    // a sync that has not happened since Tuesday is not recoverable from the
+    // store.
+    //
+    // The write is on the success path and the trouble path alike: a round that
+    // ended badly still ran, and saying so is the point.
+    note_round(paths, now(), &report)?;
+
+    // And forget anything that is no longer a member, so a stale row cannot go
+    // on being reported as a device that has not been reached.
+    if let Ok((roster, _)) = look(paths) {
+        let _ = forget_strangers(paths, &roster);
+    }
+
     Ok(report)
+}
+
+/// Write down that a round happened. See the call site.
+#[cfg(feature = "mdns")]
+fn note_round(paths: &StorePaths, at: u64, report: &Report) -> Result<()> {
+    let ops = crate::ops::Ops::open(&paths.ops)?;
+    ops.round_ran(at, report.multicast, report.trouble.as_deref())?;
+    Ok(())
+}
+
+/// Forget peers the roster no longer has.
+///
+/// `peer_state` is local operational chatter keyed by device key, and nothing
+/// removed a row when the device it describes stopped being a member. A phone
+/// reinstalled is a *new* key, so the old one lingers — and every staleness
+/// report afterwards names a device that no longer exists and cannot ever be
+/// reached again. The desktop reports "device … has not been reached in 9
+/// days", it cannot be acknowledged, and the health surface never goes clean
+/// again.
+///
+/// A permanent false condition is worse than no condition: it is what teaches
+/// somebody to stop reading the screen that will one day have something real
+/// on it.
+///
+/// Membership is the authority, and it lives in the log. A key the roster does
+/// not hold is not a peer, whether it was retired, replaced, or never admitted.
+#[cfg(feature = "mdns")]
+fn forget_strangers(paths: &StorePaths, roster: &Roster) -> Result<usize> {
+    let ops = crate::ops::Ops::open(&paths.ops)?;
+    let mut gone = 0;
+    for peer in ops.peer_addresses()? {
+        if !roster.keys.contains(&peer.key) {
+            ops.forget_peer(&peer.key)?;
+            gone += 1;
+        }
+    }
+    Ok(gone)
 }
 
 /// What one bounded round managed.

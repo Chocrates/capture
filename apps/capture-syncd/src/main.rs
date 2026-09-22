@@ -58,6 +58,20 @@ const IDLE: Duration = Duration::from_secs(30);
 /// and it is written down rather than claimed away.
 const LOOK: Duration = Duration::from_secs(2);
 
+/// How long one round may spend moving blob bytes.
+///
+/// The daemon has no externally imposed window — unlike the phone, nothing is
+/// going to destroy it mid-sentence — but the blob phase runs inside the writer
+/// lock, and a device that cannot be written to is a device where a capture
+/// goes to the spool. An unbounded transfer therefore means the gesture §2.1
+/// exists to protect stops working for as long as somebody's voice note takes
+/// to move.
+///
+/// A minute, because stopping is nearly free: a partial blob is a partial file
+/// and the next round resumes from it. The cost of stopping early is one more
+/// round; the cost of not stopping is every capture in the meantime.
+const BLOB_WINDOW_MS: u64 = 60_000;
+
 /// What to say when asked, rather than starting.
 const USAGE: &str = "\
 capture-syncd — find paired devices and reconcile with them
@@ -156,7 +170,15 @@ fn run() -> Result<(), capture_store::Error> {
 
     let mut round = 0u64;
     loop {
-        if let Err(e) = tick(&paths, &identity, &mut beacon, round, port, &now) {
+        // The daemon has no window the platform imposes, which is not the
+        // same as having no budget. The blob phase runs inside the writer
+        // lock, so a large attachment would otherwise make captures spool for
+        // as long as it takes to move — and the device with the attachment is
+        // usually the one somebody is capturing on.
+        let until = now() + BLOB_WINDOW_MS;
+        let spent = || now() >= until;
+
+        if let Err(e) = tick(&paths, &identity, &mut beacon, round, port, &now, &spent) {
             // A round that fails is a round. The next one may find a different
             // network, a woken peer, or a released lock.
             tracing::warn!(%e, "sync round did not complete");
@@ -171,7 +193,9 @@ fn run() -> Result<(), capture_store::Error> {
         loop {
             match rx.recv_timeout(LOOK) {
                 Ok(Arrival::Dialled(stream)) => {
-                    if let Err(e) = answer(&paths, &identity, stream, now()) {
+                    let until = now() + BLOB_WINDOW_MS;
+                    let spent = || now() >= until;
+                    if let Err(e) = answer(&paths, &identity, stream, now(), &spent) {
                         tracing::info!(%e, "a peer connection ended");
                     }
                 }

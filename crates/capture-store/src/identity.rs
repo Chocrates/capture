@@ -31,7 +31,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use capture_core::{Dev, Incarnation};
@@ -292,33 +292,103 @@ fn to_cbor<T: Encode<()>>(v: &T) -> Vec<u8> {
 /// start rather than fixing the mode afterwards — the gap between create and
 /// chmod is a window where the key is readable.
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    atomically(path, bytes, Some(0o600))
 }
 
 fn write_plain(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+    atomically(path, bytes, None)
+}
+
+/// Replace a file's contents, or leave the old contents alone.
+///
+/// # What was wrong with truncating in place
+///
+/// Both of these files used to be opened with `.truncate(true)` and written over.
+/// That has a window in it, and for one of the two files the window is fatal:
+///
+/// `identity.key` holds this device's signing key. It is rewritten by
+/// `reincarnate` — which runs during a **restore**, immediately after the event
+/// that lost the store in the first place. Truncate makes the file zero bytes
+/// before a single byte of the replacement lands, so a crash, a power cut or a
+/// full disk in that window leaves no key at all. There is no recovering from
+/// it: the key is not derived from anything, no peer holds a copy, and a device
+/// without it cannot author an event or be recognised by the roster. The archive
+/// survives and the identity that authors into it does not.
+///
+/// It is also the *least* forgiving moment to have a window, because a restore
+/// is what somebody does after something has already gone wrong — a disk that is
+/// failing, a machine that keeps cutting out — so the conditions that make the
+/// crash likely are the conditions that put you here.
+///
+/// A temp file plus `rename` has no such window. `rename` within a directory is
+/// atomic on POSIX: a reader sees the old file or the new one, never a partial
+/// one, and a crash anywhere before it leaves the original untouched.
+///
+/// # The two syncs, and why both
+///
+/// - The **file** is synced before the rename, or the rename can be durable
+///   while the bytes it points at are not — which trades a truncated file for an
+///   intact-looking file full of zeros, a worse failure because nothing
+///   detects it.
+/// - The **directory** is synced after, or the rename itself can be lost, and
+///   after a crash the temp file exists while the name still points at the old
+///   contents.
+///
+/// # Mode
+///
+/// Set on the temp file before anything is written to it, for the reason the old
+/// code's comment gives: creating 0644 and fixing it afterwards is a window in
+/// which the key is world-readable. The rename preserves the mode.
+fn atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+
+    // Beside the target rather than in the system temp directory: `rename` is
+    // only atomic within one filesystem, and `/tmp` is frequently a different
+    // one. Named after the process so two of these cannot collide.
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| String::from("file")),
+        std::process::id(),
+    ));
+
+    let write = || -> Result<()> {
+        let mut o = fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        if let Some(m) = mode {
+            o.mode(m);
+        }
+        let mut f = o.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
-    let mut f = fs::File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+
+    // The rename's own durability. Not fatal if the directory cannot be opened
+    // — some filesystems refuse it — because by here the replacement is
+    // complete and the worst remaining outcome is losing it to a crash, which
+    // is the same outcome as not having written it yet.
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn tmp(name: &str) -> StorePaths {
@@ -407,6 +477,106 @@ mod tests {
         assert_eq!(again.watermark().highest_seq, 7);
         assert_eq!(again.watermark().hlc_wall, 12_345);
         assert_eq!(again.watermark().hlc_counter, 2);
+        fs::remove_dir_all(&p.root).ok();
+    }
+
+    /// The signing key is never truncated in place.
+    ///
+    /// Both files used to be rewritten with `.truncate(true)`, and for
+    /// `identity.key` that window is unrecoverable: it is zero bytes long before
+    /// any replacement lands, and the key it held is not derived from anything,
+    /// not held by any peer, and not reconstructible from the log. A device
+    /// without it cannot author an event or be recognised by the roster — the
+    /// archive survives and the identity that writes into it does not.
+    ///
+    /// Worse, the rewrite happens in `reincarnate`, during a **restore** — which
+    /// is to say on a machine where something has already gone wrong badly enough
+    /// to need one. The conditions that make the crash likely are the conditions
+    /// that put you there.
+    ///
+    /// A crash cannot be staged in a unit test, so this asserts the property that
+    /// makes the crash survivable: the replacement arrives by `rename`, so at no
+    /// point does the path hold anything but a complete file.
+    #[test]
+    fn the_signing_key_is_replaced_atomically() {
+        let p = tmp("ident-atomic");
+        let before = Identity::create(&p).unwrap();
+        let key = fs::read(&p.identity).unwrap();
+        assert!(!key.is_empty(), "the fixture wrote no key");
+
+        // A rewrite of the same file, which is what `reincarnate` does.
+        let mut id = Identity::load(&p).unwrap();
+        id.reincarnate(&p).unwrap();
+
+        let after = fs::read(&p.identity).unwrap();
+        assert!(!after.is_empty(), "the key file is empty after a rewrite");
+        assert_ne!(after, key, "the rewrite did not take");
+        assert_eq!(
+            Identity::load(&p).unwrap().public().to_bytes(),
+            before.public().to_bytes(),
+            "reincarnating changed the signing key rather than the incarnation",
+        );
+
+        // Nothing left behind. A stray temp file beside the key is a copy of the
+        // secret with no reason to exist.
+        let strays: Vec<_> = fs::read_dir(p.identity.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "temp files left beside the key: {strays:?}"
+        );
+
+        // 0600 from creation, and preserved across the rename — the mode is set
+        // on the temp file before a byte is written, so there is no window in
+        // which the key is world-readable.
+        let mode = fs::metadata(&p.identity).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the key is readable by somebody else: {mode:o}"
+        );
+
+        fs::remove_dir_all(&p.root).ok();
+    }
+
+    /// A half-written replacement leaves the original intact.
+    ///
+    /// Staged the only way it can be without killing a process: the temp file is
+    /// made undeletable-over by putting a directory where it wants to go, so the
+    /// write fails at the point a crash would have. What matters is what is left
+    /// behind.
+    #[test]
+    fn a_failed_write_leaves_the_old_contents() {
+        let p = tmp("ident-atomic-fail");
+        let id = Identity::create(&p).unwrap();
+        let original = fs::read(&p.identity).unwrap();
+
+        let blocker = p.identity.with_file_name(format!(
+            "{}.{}.tmp",
+            p.identity.file_name().unwrap().to_string_lossy(),
+            std::process::id(),
+        ));
+        fs::create_dir_all(&blocker).unwrap();
+
+        assert!(
+            write_secret(&p.identity, b"replacement").is_err(),
+            "the fixture failed to block the write",
+        );
+        assert_eq!(
+            fs::read(&p.identity).unwrap(),
+            original,
+            "a failed write destroyed the key it was replacing",
+        );
+        assert_eq!(
+            Identity::load(&p).unwrap().dev(),
+            id.dev(),
+            "the identity did not survive a failed rewrite",
+        );
+
+        fs::remove_dir_all(&blocker).ok();
         fs::remove_dir_all(&p.root).ok();
     }
 

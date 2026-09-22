@@ -88,21 +88,48 @@ class SyncWorker(context: Context, params: WorkerParameters) :
             val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(
                     Constraints.Builder()
-                        // Not metered: sync moves a whole log to a device that
-                        // has never seen it, and doing that over a cellular
-                        // connection is a decision to spend somebody's money.
-                        .setRequiredNetworkType(NetworkType.UNMETERED)
-                        .setRequiresBatteryNotLow(true)
+                        // Connected, not unmetered.
+                        //
+                        // This asked for UNMETERED to avoid spending somebody's
+                        // cellular data on moving a whole log. The intent was
+                        // right and the constraint did not express it: "metered"
+                        // is a flag on a *network*, not a statement about
+                        // cellular, and a home Wi-Fi carries it whenever it is a
+                        // phone hotspot, some carrier-supplied routers, or the
+                        // owner once tapped "Network usage → Metered". On such a
+                        // network UNMETERED is never satisfied, so the job is
+                        // never eligible — and an ineligible job is not a failed
+                        // one. It does not run, does not retry and does not
+                        // report, all week, while every surface looks correct.
+                        //
+                        // Cellular is not the exposure it was guarding anyway.
+                        // A round discovers peers by mDNS on the local network
+                        // and otherwise dials an address it remembers, which is
+                        // a LAN address: off that LAN it is unroutable and the
+                        // dial fails in the first second. There is no path by
+                        // which this spends mobile data on a log.
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build(),
                 )
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 PERIODIC,
-                // KEEP: re-enqueuing on every launch would reset the period
-                // each time, so an application opened often would sync less
-                // than one opened rarely.
-                ExistingPeriodicWorkPolicy.KEEP,
+                // UPDATE rather than KEEP.
+                //
+                // KEEP was chosen so that re-enqueuing on every launch would not
+                // reset the period — an application opened often would otherwise
+                // sync less than one opened rarely. That reasoning is correct and
+                // UPDATE keeps it: it preserves the existing period and its next
+                // run time, and changes only the specification.
+                //
+                // What KEEP also did was make the constraints above permanent on
+                // every device that had already installed once. A phone that
+                // enqueued this work with UNMETERED keeps obeying UNMETERED
+                // forever, and no later build can reach it — the corrected
+                // request is discarded, unread, in favour of the one that does
+                // not work. A bug in a WorkSpec is not shippable under KEEP.
+                ExistingPeriodicWorkPolicy.UPDATE,
                 work,
             )
         }

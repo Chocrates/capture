@@ -53,6 +53,16 @@ pub enum Error {
     /// Underlying filesystem failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A peer was there and stopped making progress.
+    ///
+    /// Separate from `Usage` because it is not a fault and should not read like
+    /// one: a phone leaving Wi-Fi range mid-round is the single most ordinary
+    /// event in a two-device system, and the honest response is to say so and
+    /// try again on the next sweep. Anti-entropy is resumable, so nothing is
+    /// lost by the round ending where it did.
+    #[error("{0}")]
+    Unreachable(String),
 }
 
 impl Error {
@@ -65,6 +75,10 @@ impl Error {
             // Storage and IO failures are not usage errors and not integrity
             // failures — they are the environment failing underneath us.
             Error::Sqlite(_) | Error::Io(_) => ExitCode::Usage,
+            // Not a usage error and not a broken archive: the network is the
+            // network. `capture sync` exits non-zero so a script can retry,
+            // which is the same code an unreachable peer already produced.
+            Error::Unreachable(_) => ExitCode::Usage,
         }
     }
 }

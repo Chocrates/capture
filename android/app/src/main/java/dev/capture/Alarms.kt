@@ -45,6 +45,15 @@ object Alarms {
     /** How far ahead to look for the next moment. */
     private const val HORIZON_MS = 30L * 24 * 60 * 60 * 1000
 
+    /**
+     * How long to wait before asking again after the archive could not be read.
+     *
+     * Five minutes: comfortably past a sync round's window, which is the
+     * contention this exists for, and far enough apart that a fault which is
+     * not transient costs a handful of wakes a day rather than a loop.
+     */
+    private const val RETRY_MS = 5L * 60 * 1000
+
     private fun pending(context: Context): PendingIntent = PendingIntent.getBroadcast(
         context,
         0,
@@ -63,38 +72,103 @@ object Alarms {
         val manager = context.getSystemService(AlarmManager::class.java) ?: return
         val archive = Store.of(context)
 
-        val next = runCatching { archive.due(HORIZON_MS) }
-            .getOrNull()
-            .orEmpty()
-            .firstOrNull { !it.delivered }
-            ?: return
+        // Whether this device is the one that speaks (§2.4.1).
+        //
+        // Asked here as well as at delivery, because arming is what costs: a
+        // device that is not going to announce anything has no reason to wake
+        // for a moment the other one is handling. A failure to ask is treated
+        // as yes — silence is the expensive mistake, and the setting is a
+        // preference about where an alert lands rather than whether it exists.
+        if (!runCatching { archive.saysThingsHere() }.getOrDefault(true)) {
+            runCatching { archive.setAlertsUnscheduled(false) }
+            return
+        }
 
-        // Something already overdue wants the alarm as soon as the platform
-        // will give it, not at a time in the past — which some versions treat
-        // as "immediately" and others as nonsense.
-        val at = maxOf(next.atMs, System.currentTimeMillis() + 1_000)
+        // Asked as three outcomes, not two.
+        //
+        // This was `runCatching { ... }.getOrNull().orEmpty().firstOrNull { ... }
+        // ?: return`, which collapses "the archive says nothing is due" into
+        // "the archive could not be read". The first correctly sets no alarm.
+        // The second ends the chain: only one alarm is ever outstanding and each
+        // firing schedules the next, so an arming that gives up schedules
+        // nothing, and the firing that would have tried again is the one that
+        // was never set. Alerts then stop for good — until the owner happens to
+        // open the application.
+        //
+        // It is not a rare path. `due()` opens a Session, which takes the
+        // writer flock and refuses when a sync round holds it (`session.rs`),
+        // and flock conflicts between file descriptions in the same process —
+        // so an alarm firing while a round is mid-exchange is exactly this.
+        val due = runCatching { archive.due(HORIZON_MS) }
+        val next = due.getOrNull()?.firstOrNull { !it.delivered }
 
-        // Exact only where the capture named a time of day. Everything else
-        // joins a batch anyway, so spending an exact alarm — and the special
-        // permission one needs — on it would be paying for precision that is
-        // then deliberately thrown away.
-        val allowed = canBeExact(manager)
-        val exact = next.timed && allowed
+        val at = when {
+            next != null ->
+                // Something already overdue wants the alarm as soon as the
+                // platform will give it, not at a time in the past — which some
+                // versions treat as "immediately" and others as nonsense.
+                maxOf(next.atMs, System.currentTimeMillis() + 1_000)
 
-        // Told to the archive, which is what reports it. Written on every
-        // arming rather than once, because the permission can be taken away in
-        // Settings at any time and a phone that remembered the answer from
-        // when it was granted would go on claiming a precision it no longer
-        // has.
-        runCatching { archive.setAlertsInexact(!allowed) }
+            due.isFailure ->
+                // Could not read the archive. Keep the chain alive and ask
+                // again: the contention this comes from is a sync round holding
+                // the writer lock for a bounded window of seconds, so by the
+                // retry it is long over. Minutes rather than seconds because a
+                // failure that is not contention should not become a wake loop.
+                System.currentTimeMillis() + RETRY_MS
 
-        runCatching {
-            if (exact) {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
-            } else {
-                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
+            // Read it, and there is genuinely nothing to say. No alarm, and the
+            // chain is not broken by its absence — a capture, a resume or a
+            // boot will arm the next one.
+            else -> {
+                runCatching { archive.setAlertsUnscheduled(false) }
+                return
             }
         }
+
+        val allowed = canBeExact(manager)
+
+        // Exact only where the capture named a time of day, and only for a real
+        // moment — a retry is this code asking itself a question again and has
+        // no precision worth spending a permission on.
+        val exact = next != null && next.timed && allowed
+
+        // Set first, recorded afterwards, and recorded from what happened.
+        //
+        // The flag used to be written before the attempt, which made the one
+        // case it exists for report the opposite of the truth: the exact-alarm
+        // permission is revoked in Settings between `canBeExact` and the call,
+        // `setExactAndAllowWhileIdle` throws, and `alerts.inexact = false` has
+        // already been written. The surface then states that alerts are exact
+        // while no alarm exists at all.
+        //
+        // So an exact alarm that is refused falls back to an inexact one — late
+        // is a great deal better than never — and what gets reported is whichever
+        // one is actually set.
+        var scheduled = false
+        var inexact = !allowed
+
+        if (exact) {
+            val ok = runCatching {
+                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
+            }
+            scheduled = ok.isSuccess
+            if (ok.isFailure) inexact = true
+        }
+
+        if (!scheduled) {
+            scheduled = runCatching {
+                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
+            }.isSuccess
+        }
+
+        runCatching { archive.setAlertsInexact(inexact) }
+
+        // The chain's own state, said out loud. If neither call would take an
+        // alarm there is nothing left to try and nothing that will try again,
+        // and that is worth a condition on the health surface rather than a
+        // swallowed exception.
+        runCatching { archive.setAlertsUnscheduled(!scheduled) }
     }
 
     /**
@@ -119,6 +193,7 @@ object Alarms {
      */
     fun ring(context: Context) {
         val archive = Store.of(context)
+        if (!runCatching { archive.saysThingsHere() }.getOrDefault(true)) return
         val due = runCatching { archive.due(0) }.getOrNull().orEmpty()
 
         // Whether this device can speak at all, recorded every time it tries.
@@ -159,13 +234,13 @@ object Alarms {
             // arrived at from the other direction.
             if (summarise(context, sayable)) {
                 for (alert in sayable) {
-                    runCatching { archive.delivered(alert.slug, alert.occ) }
+                    runCatching { archive.delivered(alert.slug, alert.occ, alert.atMs) }
                 }
             }
         } else {
             for (alert in sayable) {
                 if (say(context, alert)) {
-                    runCatching { archive.delivered(alert.slug, alert.occ) }
+                    runCatching { archive.delivered(alert.slug, alert.occ, alert.atMs) }
                 }
             }
         }
@@ -194,7 +269,16 @@ object Alarms {
         val at = due.filter { !it.delivered }
             .mapNotNull {
                 val lateBy = System.currentTimeMillis() - it.atMs
-                runCatching { archive.holdUntil(it.timed, false, lateBy) }.getOrNull()
+                // A moment too old to announce is not held either — a hold is a
+                // promise to say it later, and there is no later. Arming for
+                // one would wake the device at every batch hour to decide
+                // again that it has nothing to say, which is a slow version of
+                // the wake loop rather than a different thing.
+                if (runCatching { archive.tooLateToSay(lateBy) }.getOrDefault(false)) {
+                    null
+                } else {
+                    runCatching { archive.holdUntil(it.timed, false, lateBy) }.getOrNull()
+                }
             }
             .minOrNull() ?: return
 
@@ -249,7 +333,14 @@ object Alarms {
                 .setAutoCancel(true)
                 .build(),
         )
-        return true
+
+        // The same check `say` ends with, and it was missing here — which is
+        // the worse place for it to be missing. The caller marks *every* alert
+        // in the batch delivered on the strength of this return, so a muted
+        // channel would have spent nine moments on one notification nobody
+        // could see. Delivery happens once.
+        return manager.getNotificationChannel(CHANNEL)?.importance !=
+            NotificationManager.IMPORTANCE_NONE
     }
 
     /**
@@ -314,8 +405,39 @@ class Ring : BroadcastReceiver() {
  */
 class Restarted : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            Alarms.rearm(context)
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_TIMEZONE_CHANGED,
+            Intent.ACTION_TIME_CHANGED,
+            -> {}
+            else -> return
         }
+
+        // Which zone this device is in, reported rather than worked out.
+        //
+        // Android exposes neither `$TZ` nor `/etc/localtime`, so the core's own
+        // lookup returns whatever the library read when the process started and
+        // keeps returning it. The platform is the only thing that knows, and
+        // this is the moment it says so.
+        runCatching {
+            Store.of(context).setZone(java.util.TimeZone.getDefault().id)
+        }
+
+        // And the alarm is recomputed, because the instant it was set for was
+        // worked out in the old zone. A clock change without this leaves an
+        // alarm pointing at a moment that is no longer the moment it named.
+        Alarms.rearm(context)
+
+        // Geofences do not survive a restart either, and this receiver only
+        // restored the alarms.
+        //
+        // The fences were re-registered on every launch of MainActivity, which
+        // sounds sufficient and is not: the surfaces that matter are the tile
+        // and the share sheet, and somebody who captures through those can go
+        // days without opening the application. A phone that rebooted
+        // overnight would then have no place cues at all, while the health
+        // surface went on reporting that location was permitted — which it
+        // was. Permission is not registration.
+        runCatching { Places.rearm(context) }
     }
 }

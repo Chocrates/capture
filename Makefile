@@ -23,7 +23,7 @@ export CAPTURE_SILENT := 1
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity duplicated deny \
-        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired \
+        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired aside \
         build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -49,7 +49,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired duplicated deny
+ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired duplicated aside deny
 	@echo
 	@echo 'ci: all gates passed'
 	@echo '     (not included: `make android` — it needs an SDK, an NDK and a'
@@ -268,6 +268,23 @@ unwired:
 duplicated:
 	@echo '--- no decision is made twice'
 	@python3 tools/duplicated.py
+
+## aside: fail when a fold or a roster is built from set-aside events
+#
+# An event authored past the point a retirement named is authentic and
+# unusable. It is stored so the origin's head advances — a version vector
+# cannot describe a hole, and without the row every round re-requested that
+# tail from every peer for ever — and marked so that nothing derived from the
+# log can see it.
+#
+# `Log::all` excludes it, which makes every existing caller right by default.
+# The check is for the next one: `roster::build` admits a `DEVICE_ADD` whose
+# issuer's origin it knows, and a retired origin stays known so its past events
+# can still be verified. A retired device's post-head admission, folded, is a
+# retired device choosing a new member.
+aside:
+	@echo '--- events set aside stay aside'
+	@python3 tools/aside-stays-aside.py
 
 ## purity: the three-layer boundary — no_std, dependency tree, clock probe
 #

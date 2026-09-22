@@ -175,14 +175,14 @@ fn sync(a: &Device, b: &Device) {
         let stream = listener.accept().unwrap().0;
         let tcp = Tcp::new(stream).unwrap();
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
-        capture_store::round::reconcile(&b_paths, &mut secure, AT, false)
+        capture_store::round::reconcile(&b_paths, &mut secure, AT, false, &|| false)
             .expect("the responder finished")
     });
 
     let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
     let mut secure =
         Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
-    capture_store::round::reconcile(&a.paths, &mut secure, AT, true)
+    capture_store::round::reconcile(&a.paths, &mut secure, AT, true, &|| false)
         .expect("the initiator finished");
 
     responder.join().expect("no panic");
@@ -757,5 +757,264 @@ fn a_recording_the_other_device_never_had_is_not_waited_for() {
         a.note_count(),
         b.note_count(),
         "and the round still moved every event"
+    );
+}
+
+/// The HLC advances to what a peer has shown it.
+///
+/// §HLC is unambiguous about this: "Causality is preserved by one thing and one
+/// thing only: on receipt, the local clock advances to at least the incoming
+/// value." It spells out the consequence of not doing it — an edit authored
+/// after reading a peer's event carries a *lower* stamp than the event it
+/// supersedes, so a fold ordered by HLC reaches the correction before the
+/// version it corrects, and every last-writer-wins rule in §6 resolves the
+/// wrong way. It even names the failure mode: "every consequence is silent".
+///
+/// `HlcState::observe` implemented it, the module documented it as mandatory,
+/// and its only callers anywhere were `capture-core`'s test harness and these
+/// suites' own fixtures. No ingest path called it. So a real pair of devices
+/// resolved conflicts by whichever machine's wall clock happened to be further
+/// ahead — which is the behaviour of the clamping draft the module rejects,
+/// reached by never adopting at all.
+///
+/// The skew here is manufactured, because that is the only way to see it: with
+/// two clocks that agree, adopting and not adopting are indistinguishable, and
+/// the bug lived for exactly that reason.
+#[test]
+fn a_device_adopts_a_peers_clock() {
+    let a = Device::new("a-hlc");
+    let b = Device::new("b-hlc");
+    pair(&a, &b);
+
+    // Push A's clock an hour ahead — a laptop that has not seen an NTP server,
+    // which §HLC says must drag every peer forward rather than be clamped.
+    const AHEAD_MS: u64 = 60 * 60 * 1000;
+    {
+        let s = a.session();
+        let w = s.identity.watermark();
+        let mut id = a.identity();
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        id.advance(&a.paths, w.highest_seq, now + AHEAD_MS, 0)
+            .unwrap();
+    }
+
+    let slug = a.capture("dentist thursday");
+    let ahead = a.read().note(&a.id_of(&slug)).unwrap().unwrap();
+    let from_a = stamp_of(&a, &slug);
+    assert!(
+        from_a.wall > jiff::Timestamp::now().as_millisecond().max(0) as u64,
+        "the fixture failed to skew A's clock, so this test proves nothing",
+    );
+    assert!(ahead.text.is_some());
+
+    sync(&a, &b);
+
+    // B now holds A's event. The correction B makes *after* seeing it has to
+    // order after it, or B's own fix loses to the thing it is fixing.
+    capture_store::mutate::edit(&b.paths, &slug, "dentist friday").unwrap();
+    let correction = stamp_of(&b, &slug);
+
+    assert!(
+        correction > from_a,
+        "B's correction ({}, {}) does not order after the event it corrects ({}, {}): B's clock \
+         never adopted A's, so the fold reaches the edit before the version it replaces and every \
+         last-writer-wins rule resolves backwards",
+        correction.wall,
+        correction.counter,
+        from_a.wall,
+        from_a.counter,
+    );
+
+    // And it survives a restart: a clock advance held only in memory is undone
+    // by the next process, which then reissues stamps it was already told about.
+    let persisted = b.identity().watermark();
+    assert!(
+        persisted.hlc_wall >= from_a.wall,
+        "B's adopted clock was not persisted: {} < {}",
+        persisted.hlc_wall,
+        from_a.wall,
+    );
+}
+
+/// The highest stamp any event for this note carries on this device.
+fn stamp_of(d: &Device, slug: &str) -> capture_core::Hlc {
+    let log = capture_store::log::Log::open_read(&d.paths.events).unwrap();
+    let tgt = d.id_of(slug);
+    log.all()
+        .unwrap()
+        .iter()
+        .filter(|e| e.header.tgt == Some(tgt) || e.header.id() == tgt)
+        .map(|e| e.header.hlc)
+        .max()
+        .expect("the note is in the log")
+}
+
+/// Retiring a device stops this one calling it.
+///
+/// §5.3 retires a key because the device holding it is lost or compromised. The
+/// inbound half worked — `answer` refuses a session with a non-member — and the
+/// outbound half did not exist, which is the direction that matters: a device
+/// you no longer trust does not need to call you if you keep calling it.
+///
+/// Two separate holes, both on the path that has no multicast and so is the one
+/// most likely to be in use:
+///
+/// - The pairing grant that lets a brand-new device be dialled before it appears
+///   in any roster does not expire, so a retired key stayed dialable on the
+///   strength of having once been paired.
+/// - The remembered-address fallback never checked membership at all. Its
+///   neighbour, the advertised path, does — `discovery::consider` takes the
+///   member list — so the guard was on the path that needs it least.
+#[test]
+fn a_retired_device_is_not_dialled_and_not_remembered() {
+    let a = Device::new("a-retire-dial");
+    let b = Device::new("b-retire-dial");
+    pair(&a, &b);
+    sync(&a, &b);
+
+    let subject = b.admitted().pubkey;
+
+    // What a reachable peer leaves behind: an address and a handshake key.
+    let ops = Ops::open(&a.paths.ops).unwrap();
+    ops.peer_reached(&subject, "192.0.2.7:9999", AT).unwrap();
+    assert!(
+        ops.peer_addresses()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == subject),
+        "the fixture failed to leave an address to dial",
+    );
+
+    a.session().retire(&subject, None).unwrap();
+
+    let log = capture_store::log::Log::open_read(&a.paths.events).unwrap();
+    let roster = capture_core::roster::build(&log.all().unwrap());
+    let me = a.identity().public().to_bytes();
+    assert!(
+        !roster.keys.contains(&subject),
+        "the fixture failed to retire the device",
+    );
+    assert!(
+        !capture_store::round::may_dial(&roster, &me, &subject),
+        "a retired key is still dialable, so the next sweep hands it everything \
+         written since it was retired",
+    );
+    // And a member still is, or the guard would be a way to stop syncing.
+    assert!(
+        capture_store::round::may_dial(&roster, &me, &[9u8; 32]),
+        "may_dial refuses a key that was never retired",
+    );
+
+    // The material to dial with is gone too, not merely unused. A row left in
+    // place is one the next change to the sweep can start reading again.
+    let after = Ops::open_read(&a.paths.ops).unwrap();
+    assert!(
+        !after
+            .peer_addresses()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == subject),
+        "a retired device's address is still remembered",
+    );
+    assert!(
+        !after.dialable().unwrap().contains(&subject),
+        "a retired device's handshake key is still held, so it stays dialable",
+    );
+    assert!(
+        after.noise_for(&subject).unwrap().is_none(),
+        "the retired device's noise key survived the retirement",
+    );
+}
+
+/// A retired device's later events occupy their positions without being used.
+///
+/// Both halves of the set-aside contract, because they used to be in conflict.
+///
+/// They were kept out of the log entirely, which did keep them out of the fold
+/// — and left this device's head for that origin stopped at the retirement
+/// head. A version vector is one number per origin and cannot describe a hole,
+/// so every round afterwards asked every peer for the tail above it, was sent
+/// the whole thing, set it aside again, and asked again. For ever, with the
+/// bytes on the wire each time. `sync-membership/spec.md` calls for set-aside
+/// rather than refusal to avoid exactly that, and keeping the events out of the
+/// log was the refusal under another name.
+///
+/// So the rows are stored and marked. The head advances, and `Log::all` — what
+/// every fold and every roster build goes through — does not return them.
+#[test]
+fn a_retired_devices_later_events_hold_their_places_and_are_not_used() {
+    let a = Device::new("a-aside");
+    let b = Device::new("b-aside");
+    pair(&a, &b);
+    a.capture("before any of this");
+    sync(&a, &b);
+
+    // b keeps writing after it has been retired, which is what a device that
+    // has not been told does. The retirement names b's head as it stands now.
+    let stolen = b.identity().public().to_bytes();
+    a.session().retire(&stolen, None).unwrap();
+
+    b.capture("written after the retirement");
+    b.capture("and another");
+
+    let b_dev = b.identity().dev();
+    let b_key = capture_store::projection::dev_hex(&b_dev);
+    let b_head = {
+        let log = capture_store::log::Log::open_read(&b.paths.events).unwrap();
+        log.heads().unwrap().get(&b_key).copied().unwrap()
+    };
+
+    // Handed to a directly: `round` will not dial a retired peer any more, so
+    // in life these arrive from a third device that still holds them. What is
+    // under test is what a does with them, not how they got here.
+    {
+        let after: Vec<_> = {
+            let log = capture_store::log::Log::open_read(&b.paths.events).unwrap();
+            log.all()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.header.dev == b_dev)
+                .collect()
+        };
+        let mut s = a.session();
+        let own = a.identity().public().to_bytes();
+        let ops = a.ops();
+        let mut gate =
+            capture_store::gate::Gate::open(&mut s.log, &mut s.state, &ops, own).unwrap();
+        for e in &after {
+            let _ = gate.offer(e, 1_700_000_100_000).unwrap();
+        }
+    }
+
+    // No hole: the head is level with b's own, so nothing re-requests the tail.
+    let log = capture_store::log::Log::open_read(&a.paths.events).unwrap();
+    assert_eq!(
+        log.heads().unwrap().get(&b_key).copied(),
+        Some(b_head),
+        "the head stopped below the set-aside events, which is the hole \
+         anti-entropy asks every peer about for ever"
+    );
+
+    // And unused: not in the fold, and not in the roster.
+    let used = log.all().unwrap();
+    assert!(
+        !used
+            .iter()
+            .any(|e| e.header.dev == b_dev && e.header.seq > b_head - 2),
+        "a retired device's post-head events reached the fold"
+    );
+    assert!(
+        !capture_core::roster::build(&used).keys.contains(&stolen),
+        "the retired key came back"
+    );
+
+    // Still physically held, which is what the remedy and the export need.
+    assert!(
+        log.all_including_aside()
+            .unwrap()
+            .iter()
+            .any(|e| e.header.dev == b_dev && e.header.seq == b_head),
+        "the events were not stored at all, so reissuing the retirement \
+         could only recover them from a peer that may be long gone"
     );
 }

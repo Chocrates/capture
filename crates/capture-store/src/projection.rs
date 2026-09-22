@@ -507,7 +507,7 @@ const ALERTABLE: &str = "n.text IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM redact_queue q
                        WHERE q.tgt = n.tgt AND q.cancelled = 0)
        AND (n.muted_until IS NULL
-            OR (n.muted_until != 0 AND n.muted_until <= ?1))";
+            OR (n.muted_until != 0 AND n.muted_until <= ?2))";
 
 /// What every review tier excludes, and why.
 ///
@@ -763,6 +763,40 @@ impl Store {
     /// Whether this projection needs rebuilding.
     pub fn is_stale(&self) -> Result<bool> {
         Ok(self.schema_version()? != PROJECTION_SCHEMA)
+    }
+
+    /// Whether this projection reflects the log, per origin.
+    ///
+    /// # Why the schema version was never enough
+    ///
+    /// `is_stale` asks whether the projection has the *shape* this build
+    /// expects. It says nothing about whether it holds what the log holds, and
+    /// those come apart in ways that are ordinary rather than exotic:
+    ///
+    /// - A sync round ingests forty events and the connection drops before
+    ///   the fold. The events are committed, the log's heads have moved, and
+    ///   anti-entropy will never re-offer them because they are no longer
+    ///   wanted. They exist and no surface shows them.
+    /// - The projection is deleted — which §8.8 says is safe at any time, and
+    ///   it is, provided something rebuilds. Opening creates a fresh empty one
+    ///   and stamps the current schema into it, so `is_stale` answers *false*
+    ///   and the whole archive is silently invisible.
+    /// - A process is killed between `log.append` and the incremental fold.
+    ///
+    /// Each of those was reachable and none of them said anything. The
+    /// `fold_head` table has existed since M1 for exactly this comparison and
+    /// was written by `rebuild` and read by nothing.
+    ///
+    /// Compares per origin rather than by a count: events do not arrive in one
+    /// global order, and a single number either skips what landed late or
+    /// reports a mismatch every time something does.
+    pub fn behind(&self, log_heads: &std::collections::BTreeMap<String, u64>) -> Result<bool> {
+        for (dev, seq) in log_heads {
+            if self.fold_head(dev)? < *seq {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn set_meta(&self, k: &str, v: &str) -> Result<()> {
@@ -1643,18 +1677,54 @@ impl Store {
     /// they simply stop being returned. A task with no due date is absent for
     /// the same reason it is never overdue: §3.6 refuses the manufactured
     /// backlog, and a thing with no date has no moment to arrive.
-    pub fn due_by(&self, now: i64, zone: &str) -> Result<Vec<Due>> {
+    /// `horizon` is how far ahead to look; `now` is when it actually is.
+    ///
+    /// Two parameters rather than one, because they answer different
+    /// questions and one value answered both wrongly. Asking thirty days
+    /// ahead — which is what arming the next alarm does — evaluated every
+    /// mute as if thirty days had already passed, so a note somebody muted
+    /// for a week came back as due. §2.6 makes muting the cheap way to stop
+    /// something resurfacing, and a horizon that expires mutes early is that
+    /// gesture quietly not working.
+    pub fn due_by(&self, horizon: i64, now: i64, zone: &str) -> Result<Vec<Due>> {
         let mut out = Vec::new();
 
         // Events, which named an instant.
+        //
+        // # Why the `done` column is not the whole test
+        //
+        // `promotions.done` is only ever non-null for a task. For an event it
+        // is always NULL, so `COALESCE(p.done, 0) = 0` is a filter that is
+        // always true — and completing a one-off event is not recorded there at
+        // all. A tick writes an *occurrence exception* against the promotion's
+        // own start, which is the path the agenda uses, and that suppresses the
+        // occurrence row while leaving this one due.
+        //
+        // So the workshop somebody ticked off this morning announced itself
+        // this afternoon, and cancelling made no difference either — `OCC_CANCEL`
+        // has the identical shape.
+        //
+        // Moving one was worse, because it produced *two* rows: this one at the
+        // instant the event no longer starts, and an occurrence row at the
+        // instant it now does. Two alert keys, two notifications, one event,
+        // and the first of them for a time that had been deliberately changed.
+        //
+        // An occurrence row against this promotion's own start is therefore the
+        // authority on that moment, whatever it says: done, cancelled, moved or
+        // merely present. The occurrence query below reports it if it is still
+        // due, and reports nothing if it is not.
         let mut st = self.conn.prepare(&format!(
             "SELECT p.tgt, p.start_ms, n.text
                FROM promotions p JOIN notes n ON n.tgt = p.tgt
               WHERE p.kind = 'event' AND p.start_ms IS NOT NULL AND p.start_ms <= ?1
                 AND COALESCE(p.done, 0) = 0
+                AND NOT EXISTS (
+                  SELECT 1 FROM occurrences o
+                   WHERE o.tgt = p.tgt AND o.occ = p.start_ms
+                )
                 AND {ALERTABLE}",
         ))?;
-        for r in st.query_map(params![now], |r| {
+        for r in st.query_map(params![horizon, now], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, i64>(1)?,
@@ -1682,7 +1752,7 @@ impl Store {
                 AND o.cancelled = 0 AND o.done = 0
                 AND {ALERTABLE}",
         ))?;
-        for r in st.query_map(params![now], |r| {
+        for r in st.query_map(params![horizon, now], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, i64>(1)?,
@@ -1714,7 +1784,7 @@ impl Store {
                 AND COALESCE(p.done, 0) = 0
                 AND {ALERTABLE}",
         ))?;
-        for r in st.query_map(params![now], |r| {
+        for r in st.query_map(params![horizon, now], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, String>(1)?,
@@ -1732,7 +1802,7 @@ impl Store {
             let Some(at) = capture_time::at_local(date, 0, 0, zone) else {
                 continue;
             };
-            if at <= now {
+            if at <= horizon {
                 out.push(Due {
                     tgt,
                     at,
@@ -1747,6 +1817,29 @@ impl Store {
         // as a day that happened, rather than as a pile.
         out.sort_by_key(|d| (d.at, d.tgt.0, d.occ));
         Ok(out)
+    }
+
+    /// The newest version of a note — what a further edit should follow.
+    ///
+    /// The `notes` table has tracked this since M1 and nothing read it, which
+    /// is how every edit came to name the note's *root* as its predecessor
+    /// rather than the version it was editing. `resolve` computes tips as the
+    /// versions nobody names as `prev`, so with the root named every time,
+    /// every edit after the first was a tip — and two sequential edits on one
+    /// device, a minute apart, reported as a divergence.
+    ///
+    /// The conflict signal is only worth having if it is quiet when nothing
+    /// conflicts.
+    pub fn head_of(&self, tgt: &EventId) -> Result<Option<EventId>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT head FROM notes WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .and_then(id_from))
     }
 
     /// A list: the items expanded under a tag, then the tasks carrying it.
@@ -3121,6 +3214,27 @@ pub fn rebuild(base: &Path, events: &[Envelope], current: u64, now: i64) -> Resu
         store.set_fold_head(&d, s)?;
     }
     Ok(next)
+}
+
+/// Record how far a generation has folded, for the incremental path.
+///
+/// `rebuild` has always written this; the incremental fold never did, so the
+/// one comparison that could tell a projection from the log was only ever
+/// correct immediately after a full rebuild.
+pub fn note_folded(store: &Store, events: &[Envelope]) -> Result<()> {
+    let mut per: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for e in events {
+        let cur = per
+            .entry(e.header.dev.0.iter().map(|b| format!("{b:02x}")).collect())
+            .or_default();
+        *cur = (*cur).max(e.header.seq);
+    }
+    for (d, s) in per {
+        if store.fold_head(&d)? < s {
+            store.set_fold_head(&d, s)?;
+        }
+    }
+    Ok(())
 }
 
 /// Remove a superseded generation.

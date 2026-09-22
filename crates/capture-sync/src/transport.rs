@@ -32,6 +32,16 @@ pub enum TransportError {
     Closed,
     /// A frame arrived that this build cannot read.
     Malformed,
+    /// The peer stopped talking without closing: no frame within the idle
+    /// window, or a session that outran its deadline.
+    ///
+    /// Distinct from [`Self::Closed`] because it says something different about
+    /// what to do next. A closed connection is a peer that finished or went
+    /// away, and dialling it again is reasonable. A timeout is a peer that is
+    /// *there* and not making progress — a phone that walked out of Wi-Fi range
+    /// mid-round, which is the ordinary case and not a fault worth reporting as
+    /// one.
+    TimedOut,
 }
 
 /// An authenticated, ordered, message-oriented channel to one peer.

@@ -614,6 +614,22 @@ impl Archive {
         Ok(())
     }
 
+    /// Whether this device failed to schedule the next moment.
+    ///
+    /// Only one alarm is ever outstanding and each firing schedules the next, so
+    /// the chain is the entire alerting mechanism: a single arming that does not
+    /// happen ends it, and nothing later notices, because what would have
+    /// noticed is the alarm that was never set.
+    ///
+    /// Recorded rather than retried away, because the retry can fail too. Every
+    /// other alert condition here describes a platform refusal that at least
+    /// left the machinery running; this one says the machinery stopped.
+    pub fn set_alerts_unscheduled(&self, unscheduled: bool) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        ops.set("alerts.unscheduled", if unscheduled { "1" } else { "0" })?;
+        Ok(())
+    }
+
     fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(capture_store::ops::Ops::open_read(&self.paths.ops)?.get(key)?)
     }
@@ -641,7 +657,7 @@ impl Archive {
         let now = self.now_ms() as i64;
 
         store
-            .due_by(now + within_ms, &self.zone_name())?
+            .due_by(now + within_ms, now, &self.zone_name())?
             .into_iter()
             .map(|d| {
                 Ok(Alert {
@@ -650,7 +666,7 @@ impl Archive {
                     at_ms: d.at,
                     occ: d.occ,
                     timed: d.timed,
-                    delivered: ops.alerted(&d.tgt.0, d.occ)?,
+                    delivered: ops.alerted(&d.tgt.0, d.occ, d.at)?,
                 })
             })
             .collect()
@@ -661,12 +677,24 @@ impl Archive {
     /// Local state rather than the log (§2.5.2): which device buzzed and when
     /// is operational chatter, and an archive restored on a new machine must
     /// not replay a year of notifications.
-    pub fn delivered(&self, slug: String, occ: Option<i64>) -> Result<()> {
+    ///
+    /// `at_ms` is the moment delivered, not the moment of delivery — it comes
+    /// straight back from the alert the caller was handed. It is part of the
+    /// key: a one-off carries no occurrence, so without it "this note was
+    /// alerted" and "this moment was alerted" are the same record, and
+    /// correcting a time after the first alert fired silences the corrected
+    /// moment for good.
+    pub fn delivered(&self, slug: String, occ: Option<i64>, at_ms: i64) -> Result<()> {
         let store = self.read()?;
         let tgt = store
             .resolve(&slug)?
             .ok_or(CaptureError::NotFound { name: slug })?;
-        capture_store::ops::Ops::open(&self.paths.ops)?.mark_alerted(&tgt.0, occ, self.now_ms())?;
+        capture_store::ops::Ops::open(&self.paths.ops)?.mark_alerted(
+            &tgt.0,
+            occ,
+            at_ms,
+            self.now_ms(),
+        )?;
         Ok(())
     }
 
@@ -691,6 +719,17 @@ impl Archive {
     /// Kotlin, which `make android-decides` refuses — and rightly: it is the
     /// same calculation the core already does, differing at the edges nobody
     /// looks at until a clock goes back.
+    /// Whether a moment is still recent enough to be worth announcing.
+    ///
+    /// Asked before `hold_until`, and separately from it, because "say this
+    /// now", "say this at seven" and "do not say this" are three answers and an
+    /// optional instant can only carry two.
+    ///
+    /// The surface still lists it. This is only about interrupting somebody.
+    pub fn too_late_to_say(&self, late_by_ms: i64) -> bool {
+        late_by_ms > capture_store::notifier::STALE_MS
+    }
+
     pub fn hold_until(&self, timed: bool, armed: bool, late_by_ms: i64) -> Result<Option<i64>> {
         let zone = capture_time::Zone::new(&self.zone_name())
             .or_else(|| capture_time::Zone::new("UTC"))
@@ -704,6 +743,14 @@ impl Archive {
         let until = match capture_store::notifier::deliver_late(hour, timed, armed, late_by_ms) {
             capture_store::notifier::Delivery::Now => return Ok(None),
             capture_store::notifier::Delivery::At(h) => h,
+            // A hold, so that a caller which did not ask first still does the
+            // harmless thing rather than announcing it. The answer a surface
+            // wants for this case is [`Self::too_late_to_say`], which it is
+            // expected to ask before this — the two are separate because they
+            // are separate questions, and collapsing them into one optional
+            // instant is what made "say it now" and "never say it" the same
+            // answer.
+            capture_store::notifier::Delivery::Stale => capture_store::notifier::next_batch(hour),
         };
 
         // Today if that hour is still ahead, tomorrow otherwise. Equal counts
@@ -772,15 +819,52 @@ impl Archive {
     /// One answer, used by everything here that has to turn a day into a
     /// window. Two callers deriving it separately is how `today()` and
     /// `agenda()` came to disagree about what day it was.
+    /// The zone every time decision on this device is made in.
+    ///
+    /// The platform's answer wins where a platform reported one. On Linux the
+    /// zone is discoverable — `$TZ`, or what `/etc/localtime` points at — and
+    /// `local_zone` reads it afresh on every call. Android exposes neither, so
+    /// the library's answer there is whatever it read when the process started
+    /// and stays that until the process dies. A phone is the device most likely
+    /// to be carried across a time zone and the least likely to be restarted
+    /// afterwards.
+    ///
+    /// So the surface reports it, the same way it reports whether notifications
+    /// are permitted: a platform fact the core cannot ask about, written down
+    /// where the core can read it.
     fn zone_name(&self) -> String {
+        if let Ok(Some(z)) = self.setting(DEVICE_ZONE)
+            && capture_time::Zone::new(&z).is_some()
+        {
+            return z;
+        }
         capture_store::notifier::local_zone()
     }
 
+    /// Say which zone this device is in.
+    ///
+    /// Called at launch and whenever the platform announces a change. Refused
+    /// rather than stored if it does not resolve: a name nothing can parse
+    /// would silently become UTC at every reader, which on most of the planet
+    /// is a whole-day error at the edges.
+    pub fn set_zone(&self, name: String) -> Result<()> {
+        if capture_time::Zone::new(&name).is_none() {
+            return Err(CaptureError::Refused {
+                reason: format!("'{name}' is not a zone this device can resolve"),
+            });
+        }
+        capture_store::ops::Ops::open(&self.paths.ops)?.set(DEVICE_ZONE, &name)?;
+        Ok(())
+    }
+
     pub fn today(&self) -> String {
-        let now = jiff::Timestamp::now();
-        now.to_zoned(jiff::tz::TimeZone::system())
-            .strftime("%Y-%m-%d")
-            .to_string()
+        // The same zone as everything else. Reading the library's directly is
+        // how `today()` and `agenda()` came to disagree about what day it was.
+        let zone = capture_time::Zone::new(&self.zone_name())
+            .or_else(|| capture_time::Zone::new("UTC"))
+            .expect("UTC resolves");
+        let d = capture_time::civil_date(jiff::Timestamp::now().as_millisecond().max(0), zone);
+        format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
     }
 
     /// What is happening on a day, and what is due.
@@ -907,6 +991,37 @@ impl Archive {
         // event that failed to authenticate is a security signal, and burying
         // it beside version skew is how it goes unnoticed.
         for (reason, n) in ops.rejected_counts()? {
+            // A collision is not an authentication failure and must not be
+            // described as one. The event verified under its origin's own key —
+            // it was genuinely authored by a device holding that key — and what
+            // is wrong is that two different events claim one position in that
+            // origin's sequence, which means the origin forked. Filing it under
+            // "failed authentication" points at the one explanation that is
+            // definitely not the case.
+            // Neither of these is an authentication failure, and describing
+            // them as one points at the single explanation that is definitely
+            // not the case. Both events verified under their origin's own key.
+            if reason == "post_retire" {
+                out.push(Condition {
+                    tier: "worth-knowing".into(),
+                    text: format!(
+                        "{n} event(s) arrived from a device that was retired, authored \
+                         after the point the retirement named. They are kept, unused, \
+                         and are re-admitted only by reissuing the retirement."
+                    ),
+                });
+                continue;
+            }
+
+            if reason == "collision" {
+                out.push(Condition {
+                    tier: "attention".into(),
+                    text: format!(
+                        "{n} event(s) arrived claiming a position this device has already                          filled — two devices have been writing as the same origin. The                          arriving events were not merged and their contents are kept."
+                    ),
+                });
+                continue;
+            }
             out.push(Condition {
                 tier: "attention".into(),
                 text: format!("{n} event(s) failed authentication ({reason})"),
@@ -945,6 +1060,23 @@ impl Archive {
                 text: "alerts fire approximately — this device has not been allowed exact \
                        alarms, so a time may be up to an hour late. Settings › Apps › \
                        capture › Alarms & reminders"
+                    .into(),
+            });
+        }
+
+        // The chain, before anything about the quality of what it delivers.
+        //
+        // "Alerts fire approximately" is a different statement from "no alert
+        // will fire", and the two were indistinguishable: `alerts.silenced` and
+        // `alerts.inexact` are written only from inside the arming path, so when
+        // that path stopped running both keys kept whatever they last held —
+        // almost certainly the values meaning everything is fine — and this
+        // surface went on reporting a healthy alerting system with no alarm
+        // behind it.
+        if self.setting("alerts.unscheduled")?.as_deref() == Some("1") {
+            out.push(Condition {
+                tier: "attention".into(),
+                text: "nothing is scheduled to wake this device, so no time will be                        announced until capture is opened again"
                     .into(),
             });
         }
@@ -1000,6 +1132,169 @@ impl Archive {
                 out.push(Condition {
                     tier: "attention".into(),
                     text,
+                });
+            }
+        }
+
+        // Whether the archive is still reaching the other device.
+        //
+        // # Why there was nothing here
+        //
+        // Every other condition on this screen is about one device. This is the
+        // only one about the pair, and its absence was the largest hole in the
+        // surface: §1.2 is explicit that replication is what protects against
+        // losing a device, and a replication that quietly stopped is a person
+        // believing they have two copies while they have one.
+        //
+        // The failure has no symptom. Captures land locally, every screen is
+        // correct, nothing is slow. It is discovered when somebody goes looking
+        // on the desktop for four days of notes that were never sent — which is
+        // the "stops holding it in mind" failure at the scale of the archive.
+        //
+        // # Two questions, not one
+        //
+        // A round that ran and reached nobody and a round that never ran are
+        // different situations with different fixes, and the peer rows report
+        // them identically. So they are asked separately:
+        //
+        // - *Has a round run?* If not, sync is not happening — the periodic job
+        //   is being held off, the application was force-stopped, the OEM put it
+        //   to sleep. Nothing about the network is wrong.
+        // - *Did it reach anyone?* If rounds run and reach nobody, the network
+        //   is the problem: a VPN, a guest SSID, discovery unavailable, an
+        //   address that changed.
+        //
+        // # Why the thresholds are where they are
+        //
+        // The period is fifteen minutes and Doze stretches it to hours, so
+        // anything under a day is noise. A day of silence is still ordinary —
+        // the other device was off. Three days is not: no plausible week has the
+        // desktop closed for three days while the phone is in daily use, and by
+        // then there is enough unreplicated work that losing the phone would
+        // cost real notes.
+        //
+        // Reported with *when*, never as a bare "sync is broken". The date is
+        // what tells somebody whether this started before or after the thing
+        // they changed.
+        let peers = ops.peer_addresses()?;
+        if !peers.is_empty() {
+            let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+            let reached = peers.iter().filter_map(|p| p.last_seen).max();
+            let ran = ops.last_round()?;
+
+            // The job, before the network. If rounds are not happening, what the
+            // network would have done is not a question anybody can act on.
+            match ran {
+                Some(at) if now.saturating_sub(at) > DAY_MS => {
+                    out.push(Condition {
+                        tier: if now.saturating_sub(at) > 3 * DAY_MS {
+                            "attention"
+                        } else {
+                            "worth-knowing"
+                        }
+                        .into(),
+                        text: format!(
+                            "sync has not run for {}. Captures are safe on this device and                              have not been copied to any other one.",
+                            lasting(now.saturating_sub(at))
+                        ),
+                    });
+                }
+                None => {
+                    out.push(Condition {
+                        tier: "attention".into(),
+                        text: "sync has never run on this device, so nothing here exists                                anywhere else"
+                            .into(),
+                    });
+                }
+                _ => {
+                    // Rounds are happening. Now the network is a fair question.
+                    match reached {
+                        Some(at) if now.saturating_sub(at) > DAY_MS => {
+                            out.push(Condition {
+                                tier: if now.saturating_sub(at) > 3 * DAY_MS {
+                                    "attention"
+                                } else {
+                                    "worth-knowing"
+                                }
+                                .into(),
+                                text: format!(
+                                    "no other device has been reached for {}, though sync is                                      running. Both devices need to be awake on the same                                      network.",
+                                    lasting(now.saturating_sub(at))
+                                ),
+                            });
+                        }
+                        None => {
+                            out.push(Condition {
+                                tier: "attention".into(),
+                                text: "no other device has ever been reached, so nothing here                                        exists anywhere else"
+                                    .into(),
+                            });
+                        }
+                        _ => {}
+                    }
+
+                    // §5.2's named trap, on a surface rather than in a toast.
+                    //
+                    // It was reported by `Toast.note` from a fifteen-minute
+                    // background job: three and a half seconds over whatever
+                    // application happened to be in front, possibly with the
+                    // screen off, recorded nowhere. The one message whose whole
+                    // purpose is to prevent a silent failure was itself
+                    // effectively silent.
+                    if ops.last_round_had_discovery()? == Some(false) {
+                        out.push(Condition {
+                            tier: "worth-knowing".into(),
+                            text: "the last sync ran without discovery, so it could only                                    reach devices whose address is already known"
+                                .into(),
+                        });
+                    }
+                }
+            }
+
+            // Said only when it is the reason something is not working. A peer
+            // that refused one dial is one peer, and the round after it
+            // succeeded — reporting that would be reporting the ordinary.
+            if let Some(t) = ops.last_round_trouble()? {
+                let stale = reached.is_none_or(|at| now.saturating_sub(at) > DAY_MS);
+                if stale {
+                    out.push(Condition {
+                        tier: "worth-knowing".into(),
+                        text: format!("the last sync reported: {t}"),
+                    });
+                }
+            }
+        }
+
+        // A choice about where alerts land, when it lands nowhere.
+        //
+        // Now that the delivery paths actually honour this setting, a choice
+        // that names no device this archive knows about is total silence on
+        // every device — which is a worse failure than the duplicate alerts it
+        // was set to stop, and one with no symptom other than nothing ever
+        // happening again.
+        if let Some(who) = capture_store::notifier::chosen(&store)? {
+            let me = capture_store::Identity::load(&self.paths)?;
+            let mine = capture_core::id::hexed(&me.public().to_bytes());
+            let wanted = who.trim().to_ascii_lowercase();
+
+            let log = capture_store::log::Log::open_read(&self.paths.events)?;
+            let known = capture_core::roster::build(&log.all()?)
+                .keys
+                .iter()
+                .any(|k| capture_core::id::hexed(k).starts_with(&wanted));
+
+            if !known {
+                out.push(Condition {
+                    tier: "attention".into(),
+                    text: format!(
+                        "times are set to be announced on device {who}, which is not a \
+                         device this archive knows — so nothing will be announced anywhere"
+                    ),
+                });
+            } else if !mine.starts_with(&wanted) {
+                out.push(Condition {
+                    tier: "worth-knowing".into(),
+                    text: format!("times are announced on device {who}, not on this one"),
                 });
             }
         }
@@ -1689,8 +1984,33 @@ impl Archive {
         ) {
             return Ok(None);
         }
-        ops.mark_intent_fired(&raw, now)?;
+        // Not marked here. The caller has to post a notification, and on
+        // Android that can be accepted and dropped — a muted channel, or the
+        // permission revoked in Settings — with no error anywhere.
+        //
+        // Marking first meant an arrival was spent on something nobody saw,
+        // and a place cue cannot be retried: `may_fire_again` holds it for
+        // half an hour, and standing inside the fence produces no new entry
+        // transition. The visit is simply gone.
+        //
+        // This is the same failure that was fixed on the time path, where
+        // `notify` and `say` were made to report whether they spoke. The
+        // location path never got it.
         Ok(Some(intent.then_do))
+    }
+
+    /// Say that a cue was actually delivered.
+    ///
+    /// Separate from [`Self::arrived`] so that a cue is spent only when it was
+    /// heard. The caller knows whether the platform took the notification;
+    /// this crate cannot.
+    pub fn cue_delivered(&self, id: String) -> Result<()> {
+        let Some(raw) = unhex(&id) else {
+            return Err(CaptureError::NotFound { name: id });
+        };
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        capture_store::ops::Ops::open(&self.paths.ops)?.mark_intent_fired(&raw, now)?;
+        Ok(())
     }
 
     /// Make a plan about a place.
@@ -1761,6 +2081,22 @@ impl Archive {
     /// later.
     pub fn notifier(&self) -> Result<Option<String>> {
         Ok(capture_store::notifier::chosen(&self.read()?)?)
+    }
+
+    /// Whether this device is the one that says things (§2.4.1).
+    ///
+    /// Asked by the alarm path before it arms anything. The setting had a
+    /// getter and a setter and no reader on any delivery path, so choosing a
+    /// notifier changed nothing and both paired devices announced everything.
+    ///
+    /// `true` when nobody has chosen, which is the rule rather than a stored
+    /// preference: one device, so it is this one.
+    pub fn says_things_here(&self) -> Result<bool> {
+        let me = capture_store::Identity::load(&self.paths)?;
+        Ok(capture_store::notifier::speaks_here(
+            &self.read()?,
+            &me.public().to_bytes(),
+        )?)
     }
 
     /// Choose which device says things.
@@ -1957,6 +2293,30 @@ impl Offer {
 /// The first bytes of a key, which is how every surface names a device.
 /// Where the location permission is remembered.
 const LOCATION_PERMITTED: &str = "android.location_permitted";
+
+/// Where the platform's own idea of this device's zone is remembered.
+const DEVICE_ZONE: &str = "device.zone";
+
+/// A day, in milliseconds.
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// How long something has been going on, in the coarsest unit that is still
+/// true.
+///
+/// Coarse deliberately. "2 days" is a thing somebody can compare against what
+/// they remember doing; "51 hours" is arithmetic, and a condition that has to
+/// be worked out gets skipped.
+fn lasting(ms: u64) -> String {
+    let hours = ms / (60 * 60 * 1000);
+    let days = hours / 24;
+    match (days, hours) {
+        (0, 0) => "less than an hour".into(),
+        (0, 1) => "an hour".into(),
+        (0, h) => format!("{h} hours"),
+        (1, _) => "a day".into(),
+        (d, _) => format!("{d} days"),
+    }
+}
 
 /// The radius used when the intent did not name one.
 ///

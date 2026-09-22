@@ -217,14 +217,23 @@
             android:exported="false" />
 
         <!--
-          A restart. Exported false for the same reason; the boot broadcast is
-          delivered to the package regardless.
+          A restart, and a change of time zone. Exported false for the same
+          reason; both broadcasts are delivered to the package regardless.
+
+          The zone belongs here rather than being read when something happens
+          to run. Every quiet-hours and batching decision takes the local hour
+          as its input, and an alarm is an instant that was worked out in
+          whatever zone the phone was in when it was set. Neither is recomputed
+          by anything else, so after a flight the afternoon reads as quiet hours
+          and what does get said arrives in the middle of the night.
         -->
         <receiver
             android:name=".Restarted"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
             </intent-filter>
         </receiver>
 

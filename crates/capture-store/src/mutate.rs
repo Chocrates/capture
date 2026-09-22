@@ -48,7 +48,21 @@ pub fn edit(paths: &StorePaths, name: &str, text: &str) -> Result<()> {
     }
     let mut s = Session::open(paths.clone())?;
     let tgt = find(&s, name)?;
-    s.append(Kind::EDIT, Some(tgt), Some(tgt), |nonce| {
+
+    // The version being edited, not the note.
+    //
+    // `prev` is what this edit follows, and it was the note's root every
+    // time — so `resolve` (which calls a version a tip when nobody names it
+    // as `prev`) saw every edit after the first as a tip. Two sequential
+    // edits on one device, a minute apart, came back as "2 independent
+    // versions". A conflict signal that fires when nothing conflicts is one
+    // somebody learns to dismiss, and then it is not a signal.
+    //
+    // Falls back to the root where the projection has no head yet, which is
+    // the pre-fold case and where the old behaviour was correct anyway.
+    let prev = s.state.head_of(&tgt)?.unwrap_or(tgt);
+
+    s.append(Kind::EDIT, Some(tgt), Some(prev), |nonce| {
         encode(&EditBody {
             nonce,
             text: text.to_string(),

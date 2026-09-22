@@ -73,7 +73,7 @@ fn transfer(mut asker: Held, holder: Held) -> (Held, Held, blob::Moved) {
     });
 
     let mut session = Session::initiate_paired(ea, &[9; 32]).expect("session");
-    let moved = blob::fetch(&mut session, &mut asker).expect("fetched");
+    let moved = blob::fetch(&mut session, &mut asker, &|| false).expect("fetched");
 
     let (holder, _) = serving.join().expect("no panic");
     (asker, holder, moved)

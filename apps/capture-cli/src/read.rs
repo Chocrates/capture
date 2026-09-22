@@ -1118,7 +1118,7 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     // only the overdue would answer the question with silence, which is what
     // they were already looking at.
     const AHEAD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-    let rows = store.due_by(now + AHEAD_MS, &zone)?;
+    let rows = store.due_by(now + AHEAD_MS, now, &zone)?;
 
     if json {
         let items: Vec<String> = rows
@@ -1152,7 +1152,7 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
         // because "it fired and you missed it" and "it never fired" are
         // different answers to the same question and only one of them is a
         // bug.
-        let state = if ops.alerted(&d.tgt.0, d.occ)? {
+        let state = if ops.alerted(&d.tgt.0, d.occ, d.at)? {
             "delivered".into()
         } else if d.at > now {
             "waiting".into()
@@ -1160,6 +1160,10 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
             match deliver_late(hour, d.timed, false, now.saturating_sub(d.at)) {
                 Delivery::Now => "now".into(),
                 Delivery::At(h) => format!("held to {h:02}:00"),
+                // Said plainly rather than shown as a pending delivery that
+                // will never happen. It is still outstanding and still listed;
+                // what it will not do is interrupt anybody about it.
+                Delivery::Stale => "too late to say".into(),
             }
         };
         let z = capture_time::Zone::new(&zone).unwrap_or_else(utc);

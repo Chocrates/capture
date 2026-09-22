@@ -204,6 +204,15 @@ const STALE_EXPORTS: &str = "stale_exports";
 /// When the due-work queue was last drained.
 const DUE_PROCESSED: &str = "due_last_processed";
 
+/// When a bounded round last ran, whatever it achieved.
+const ROUND_AT: &str = "sync_last_round";
+
+/// Whether discovery was available to that round.
+const ROUND_MULTICAST: &str = "sync_last_multicast";
+
+/// The last thing that round reported going wrong, if anything did.
+const ROUND_TROUBLE: &str = "sync_last_trouble";
+
 /// Bucket counts for how long the overlay takes to appear.
 const LATENCY: &str = "overlay_latency";
 
@@ -244,6 +253,13 @@ impl Ops {
              ON CONFLICT(k) DO UPDATE SET v = ?2",
             params![k, v],
         )?;
+        Ok(())
+    }
+
+    /// Drop a local value.
+    pub fn forget_key(&self, k: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM local WHERE k = ?1", params![k])?;
         Ok(())
     }
 
@@ -516,13 +532,68 @@ impl Ops {
     /// archive. It also means two devices each deliver their own without
     /// arguing — and that an archive restored elsewhere does not replay a
     /// year of notifications.
-    pub fn alerted(&self, tgt: &[u8], occ: Option<i64>) -> Result<bool> {
-        Ok(self.get(&alert_key(tgt, occ))?.is_some())
+    pub fn alerted(&self, tgt: &[u8], occ: Option<i64>, at: i64) -> Result<bool> {
+        Ok(self.get(&alert_key(tgt, occ, at))?.is_some())
     }
 
     /// Remember that one was delivered.
-    pub fn mark_alerted(&self, tgt: &[u8], occ: Option<i64>, at: u64) -> Result<()> {
-        self.set(&alert_key(tgt, occ), &at.to_string())
+    pub fn mark_alerted(&self, tgt: &[u8], occ: Option<i64>, moment: i64, at: u64) -> Result<()> {
+        self.set(&alert_key(tgt, occ, moment), &at.to_string())
+    }
+
+    /// Carry delivery forward when a series is split into a new note.
+    ///
+    /// # Why this is not bookkeeping
+    ///
+    /// Delivery is keyed by the note, and splitting a series gives the
+    /// occurrences from the split point onward a *new* note — a new capture,
+    /// with its own target, carrying the same commitment under a different
+    /// schedule. Every one of them therefore reads as never delivered, and the
+    /// boundary occurrence is the one that bites: it is the same instant and
+    /// the same text as one already announced.
+    ///
+    /// "Change standup from today onward", done at four in the afternoon,
+    /// re-announced this morning's standup. Splitting from a date further back
+    /// re-announced every occurrence since it.
+    ///
+    /// The expansion already inherits *exceptions* across a split (§3.5) for
+    /// the same reason: what somebody did to an occurrence survives a change to
+    /// the schedule it sits on. Delivery inherited nothing, which is the same
+    /// principle missing its other half.
+    ///
+    /// Only from the split point onward. Occurrences below it still belong to
+    /// the old note and keep their own records there.
+    pub fn carry_alerts(&self, from: &[u8], to: &[u8], from_occ: i64) -> Result<usize> {
+        let from_hex: String = from.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let to_hex: String = to.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let prefix = format!("alerted.{from_hex}.");
+
+        let mut q = self
+            .conn
+            .prepare("SELECT k, v FROM local WHERE k LIKE ?1 || '%'")?;
+        let rows = q
+            .query_map(params![prefix], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut carried = 0;
+        for (k, v) in rows {
+            let Some(suffix) = k.strip_prefix(&prefix) else {
+                continue;
+            };
+            // Series occurrences only. A one-off's key carries `at<instant>`
+            // and a one-off is not what was split.
+            let Ok(occ) = suffix.parse::<i64>() else {
+                continue;
+            };
+            if occ < from_occ {
+                continue;
+            }
+            self.set(&format!("alerted.{to_hex}.{occ}"), &v)?;
+            carried += 1;
+        }
+        Ok(carried)
     }
 
     /// Add one overlay-appearance measurement.
@@ -623,6 +694,55 @@ impl Ops {
     /// bad signature however the roster changes, and retrying those forever
     /// would turn every membership event into a re-verification of the entire
     /// forensic pile.
+    /// Record that a round ran, and what it managed.
+    ///
+    /// # Why this is not the peer rows
+    ///
+    /// `peer_state.last_seen` answers "when was this device last reached". It
+    /// cannot answer "is sync running", because the two most different
+    /// situations a person can be in produce an identical row: a round that ran
+    /// and found nobody awake, and a round that never ran at all.
+    ///
+    /// The second is the one that goes unnoticed for a week. A periodic job can
+    /// be held off indefinitely by a constraint it will never satisfy — a
+    /// network the platform calls metered, a battery under the threshold every
+    /// evening — and the platform reports that as nothing whatsoever: no run,
+    /// no failure, no retry, because the job was never eligible to begin with.
+    /// Every surface then reads exactly as it does on a quiet network.
+    ///
+    /// So the fact that a round *happened* is recorded separately from anything
+    /// it achieved, and a surface can tell "nobody was home" from "nobody
+    /// knocked".
+    pub fn round_ran(&self, at: u64, multicast: bool, trouble: Option<&str>) -> Result<()> {
+        self.set(ROUND_AT, &at.to_string())?;
+        self.set(ROUND_MULTICAST, if multicast { "1" } else { "0" })?;
+        match trouble {
+            Some(t) => self.set(ROUND_TROUBLE, t)?,
+            // Cleared rather than left: a fault from four days ago, still being
+            // reported after the rounds since have been clean, teaches somebody
+            // that the surface is describing the past.
+            None => self.forget_key(ROUND_TROUBLE)?,
+        }
+        Ok(())
+    }
+
+    /// When a round last ran, whatever it achieved.
+    pub fn last_round(&self) -> Result<Option<u64>> {
+        Ok(self.get(ROUND_AT)?.and_then(|v| v.parse().ok()))
+    }
+
+    /// Whether discovery was available to the last round that ran.
+    ///
+    /// `None` when no round has run, which is not the same as `Some(false)`.
+    pub fn last_round_had_discovery(&self) -> Result<Option<bool>> {
+        Ok(self.get(ROUND_MULTICAST)?.map(|v| v == "1"))
+    }
+
+    /// What the last round reported going wrong, if anything did.
+    pub fn last_round_trouble(&self) -> Result<Option<String>> {
+        self.get(ROUND_TROUBLE)
+    }
+
     /// Record that a peer answered, without claiming to know where it lives.
     ///
     /// An inbound connection proves the peer is alive and says nothing about
@@ -888,6 +1008,34 @@ impl Ops {
     ///
     /// A device that has just joined has exactly one of these and no log, so
     /// this is the only thing that lets it start.
+    /// Forget everything local about how to reach a peer.
+    ///
+    /// Called when a device is retired. The retirement itself is a fact about
+    /// the archive and lives in the log; *how to phone that device* is
+    /// operational chatter in `ops.db` (§2.5.2), and nothing was removing it.
+    ///
+    /// Belt as well as braces. `round::sweep` now refuses to dial a retired key,
+    /// and this makes the material to do it with absent rather than merely
+    /// unused — a peer row that is still there is one the next change to the
+    /// sweep can start reading again, which is how the guard got skipped on the
+    /// remembered-address path in the first place.
+    ///
+    /// Not idempotency-sensitive and not an error when the rows are absent: a
+    /// device retired twice, or retired having never been reached, is ordinary.
+    pub fn forget_peer(&self, peer_key: &[u8; 32]) -> Result<()> {
+        for sql in [
+            "DELETE FROM peer_state WHERE peer_key = ?1",
+            "DELETE FROM peer_noise WHERE peer_key = ?1",
+            "DELETE FROM admissions_seen WHERE peer_key = ?1",
+        ] {
+            self.conn.execute(sql, rusqlite::params![&peer_key[..]])?;
+        }
+        // Keyed by hex rather than by blob, and so not reachable by the loop
+        // above.
+        self.forget_key(&observes_key(peer_key))?;
+        Ok(())
+    }
+
     pub fn dialable(&self) -> Result<Vec<[u8; 32]>> {
         let mut q = self
             .conn
@@ -958,15 +1106,33 @@ impl Ops {
 
 /// The local-state key recording that one *moment* has been delivered.
 ///
-/// Keyed by the note and the occurrence together, not by the note alone. An
+/// Keyed by the note and the moment together, not by the note alone. An
 /// occurrence at 9am on Tuesday and the same series at 9am on Wednesday are
 /// two moments of one note, and a key that could not tell them apart would
 /// deliver one of them and swallow the rest of the week.
-fn alert_key(tgt: &[u8], occ: Option<i64>) -> String {
+///
+/// # Why a one-off needs the instant too
+///
+/// A series occurrence carries `occ`, which *is* the instant the rule produced,
+/// so its key already changes when the moment does. A one-off event or task
+/// carried `None`, and the key was the note alone — which made "this note has
+/// been alerted" and "this moment has been alerted" the same statement for
+/// exactly the notes where they come apart.
+///
+/// Correcting a time is the ordinary case. The 14:00 alert fires; the meeting
+/// moves, or the recognizer misread it, and the note is corrected to 16:00.
+/// `due_by` reports the new moment properly and the key says it was already
+/// delivered, so 16:00 passes in silence with nothing anywhere saying why. The
+/// same shape for a task pushed to tomorrow after today's alert fired: the new
+/// day is silent, permanently.
+///
+/// So the instant is part of the key. A moment that moves is a different
+/// moment, and the one that was delivered was the one that no longer exists.
+fn alert_key(tgt: &[u8], occ: Option<i64>, at: i64) -> String {
     let hex: String = tgt.iter().take(8).map(|b| format!("{b:02x}")).collect();
     match occ {
         Some(o) => format!("alerted.{hex}.{o}"),
-        None => format!("alerted.{hex}"),
+        None => format!("alerted.{hex}.at{at}"),
     }
 }
 

@@ -39,6 +39,7 @@ use capture_core::{
     body::OriginClaimBody,
     envelope::{Envelope, Rejection},
     event::Kind,
+    hlc::Hlc,
     roster::{self, Roster},
 };
 
@@ -72,6 +73,13 @@ pub struct Gate<'a> {
     roster: Roster,
     /// This device's own signing key, for the self-retirement guard.
     own: [u8; 32],
+    /// The highest stamp on anything that authenticated here, for the caller to
+    /// adopt into its clock.
+    ///
+    /// Collected rather than applied: the gate holds the log and the projection
+    /// and not the clock, which belongs to the session that persists it. See
+    /// [`Gate::highest_stamp`].
+    seen: Option<Hlc>,
 }
 
 impl<'a> Gate<'a> {
@@ -105,6 +113,7 @@ impl<'a> Gate<'a> {
             ops,
             roster: r,
             own,
+            seen: None,
         })
     }
 
@@ -149,12 +158,40 @@ impl<'a> Gate<'a> {
         if let Some((head, _)) = self.roster.head_of(&e.header.dev)
             && e.header.seq > head
         {
+            // Stored in its position, and marked unusable.
+            //
+            // It used to be kept out of the log entirely, which left `heads`
+            // for this origin stopped at the retirement head — and a version
+            // vector cannot describe a hole. Every round afterwards asked every
+            // peer for the tail above it, was sent the whole thing, set it
+            // aside again and asked again, for ever. The spec calls for
+            // set-aside rather than refusal to avoid exactly that, and keeping
+            // the event out of the log was the refusal in all but name.
+            //
+            // The position being occupied is what ends the loop. The `aside`
+            // column is what keeps the event out of every fold and every roster
+            // build — which matters most on the roster: a retired device's
+            // admission, folded, is a retired device choosing a new member.
+            //
+            // It also makes the remedy local. A retirement reissued with a
+            // later head re-admits the events below it, and `release` used to
+            // delete a row holding an id, an origin and a sequence — a record
+            // of an event rather than the event. Recovering them depended on a
+            // peer still being reachable and still offering them. Now the
+            // bytes are here.
+            let took = self.log.ingest_aside(e, &key, "post_retire")?;
+            if !matches!(took, Ingested::Rejected(_)) {
+                self.witness(e);
+            }
             self.state
                 .quarantine(&id, &e.header.dev, e.header.seq, "post_retire", at)?;
             return Ok(Outcome::SetAside("post_retire"));
         }
 
         let took = self.log.ingest(e, &key)?;
+        if !matches!(took, Ingested::Rejected(_)) {
+            self.witness(e);
+        }
         match took {
             Ingested::Rejected(r) => {
                 // Authentication failed under the origin's own key. No later
@@ -163,6 +200,39 @@ impl<'a> Gate<'a> {
                 Ok(Outcome::Refused(r))
             }
             Ingested::Collision => {
+                // The bytes are kept, and this is the one refusal where that is
+                // the whole point.
+                //
+                // `log.rs` says plainly that treating a collision as benign is
+                // silent, permanent, two-way data loss. The quarantine row
+                // records that it happened — id, origin, sequence — and records
+                // none of what arrived, while `ingest` returns success to the
+                // peer, which then counts the event as delivered and never
+                // offers it again. Anti-entropy will not ask either: the local
+                // head is already past that sequence. So the event existed on
+                // exactly one other device, was handed over, was thrown away,
+                // and both sides believe it was filed.
+                //
+                // Kept in `ops` rather than in the projection, because the
+                // projection is a derived artifact that is deleted and rebuilt
+                // from the log — and these bytes are precisely the ones that are
+                // *not* in the log. A rebuild would be the second time the same
+                // event was discarded.
+                //
+                // Not retried: `reconsider` asks for specific reasons, and no
+                // arrival of a key or a claim makes a taken position free. This
+                // is a copy for a person to recover by hand, which is the only
+                // remedy a fork admits.
+                let mut raw = Vec::new();
+                minicbor::encode(e, &mut raw).expect("encoding into Vec is infallible");
+                self.ops.reject(
+                    &id.0,
+                    Some(&dev_hex(&e.header.dev)),
+                    Some(e.header.seq),
+                    "collision",
+                    at,
+                    Some(&raw),
+                )?;
                 self.state
                     .quarantine(&id, &e.header.dev, e.header.seq, "collision", at)?;
                 Ok(Outcome::SetAside("collision"))
@@ -204,7 +274,23 @@ impl<'a> Gate<'a> {
                 .and_then(|d| self.roster.head_of(d))
                 .is_some_and(|(head, _)| seq > head);
             if !still_excluded {
+                // The record, and the event itself.
+                //
+                // Releasing the quarantine row clears an id, an origin and a
+                // sequence — the thing the surface was reporting, which is not
+                // the event. The event is in the log in its own position with
+                // the mark that keeps it out of every fold, and clearing that
+                // mark is what carrying out the decision means. Nothing is
+                // fetched and no head moves.
+                //
+                // Before these were stored at all, this depended on a peer
+                // offering them again: the remedy for "keep those after all"
+                // required the retired device's neighbour to still be
+                // reachable and still be holding them.
                 self.state.release(&id)?;
+                if self.log.release_aside(&id)? {
+                    admitted += 1;
+                }
             }
         }
         for (id, raw) in self.ops.retryable("UnknownOrigin")? {
@@ -218,6 +304,7 @@ impl<'a> Gate<'a> {
                 Ingested::Rejected(_) | Ingested::Collision => {}
                 _ => {
                     self.ops.forget(&id)?;
+                    self.witness(&e);
                     admitted += 1;
                 }
             }
@@ -236,6 +323,53 @@ impl<'a> Gate<'a> {
     }
 
     /// The roster as it currently stands.
+    /// The highest stamp carried by anything that authenticated through this
+    /// gate, or `None` if nothing did.
+    ///
+    /// # Why this is not applied here
+    ///
+    /// Adoption is the one thing that keeps the HLC causal: `hlc.rs` is explicit
+    /// that a device must advance its clock to at least any value it has seen,
+    /// and that failing to means its own later edits lose every last-writer-wins
+    /// race for the duration of the skew. Nothing in the ingest path did it —
+    /// `observe` had no caller outside the test harness, so in a running system
+    /// two devices' conflicts were decided by raw clock difference rather than by
+    /// causality, and a fold could reach an edit before the version it replaces.
+    ///
+    /// It is collected here and applied by the caller because the clock lives in
+    /// the session, which is what persists it. A gate holding its own copy would
+    /// be a second clock.
+    pub fn highest_stamp(&self) -> Option<Hlc> {
+        self.seen
+    }
+
+    /// Note the stamp of an event whose signature verified.
+    ///
+    /// Authenticity is the bar, not acceptance. An event set aside for a
+    /// collision verified under its origin's own key — it was genuinely authored
+    /// at that time by a device holding that key — and its stamp is part of what
+    /// this device has now seen. Ignoring it would leave the clock behind exactly
+    /// when a conflict is being resolved.
+    ///
+    /// An event refused for a bad signature is not witnessed. Witnessing one
+    /// would let an unauthenticated stamp drag this device's clock — an
+    /// unsigned event claiming the year 2400 would distort every comparison
+    /// until the wall clock caught up, which is the one thing adoption must not
+    /// allow.
+    ///
+    /// A `post_retire` event *is* witnessed, and that changed when it started
+    /// being stored: it now goes through `ingest_aside`, which verifies it
+    /// under the origin's own key before anything else happens. It was authored
+    /// by a device holding that key, at that time, and this device now holds it
+    /// — all of which is true whether or not the roster will let it be used.
+    /// What is withheld from it is the fold, not the fact that it exists.
+    fn witness(&mut self, e: &Envelope) {
+        let stamp = e.header.hlc;
+        if self.seen.is_none_or(|s| stamp > s) {
+            self.seen = Some(stamp);
+        }
+    }
+
     /// Fold arrived events into the projection.
     ///
     /// The gate puts events in the log and stops there, because the log is the
@@ -246,7 +380,12 @@ impl<'a> Gate<'a> {
     /// and earns a rebuild, while a sync round touches whatever a peer wrote
     /// since last time — usually a handful.
     pub fn fold(&mut self, arriving: &[Envelope], now: i64) -> Result<usize> {
-        crate::incremental::apply(self.state, self.log, arriving, now)
+        let n = crate::incremental::apply(self.state, self.log, arriving, now)?;
+        // The sync path, and the one where falling behind was invisible: a
+        // round that ingests and then loses the connection before folding
+        // leaves the log ahead of the projection with nothing to notice it.
+        crate::projection::note_folded(self.state, arriving)?;
+        Ok(n)
     }
 
     /// The log this gate guards, for reads.
@@ -298,6 +437,7 @@ impl<'a> Gate<'a> {
             self.refuse(e, r, at, false)?;
             return Ok(Outcome::Refused(r));
         }
+        self.witness(e);
         self.reconsider()?;
         if self.roster.key_for(&e.header.dev).is_none() {
             // Stored, because it is authentic and holds its position, but it

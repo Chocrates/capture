@@ -80,7 +80,13 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
     let mut fresh: Vec<Envelope> = Vec::new();
     let mut stripped = 0usize;
 
-    for e in log.all()? {
+    // Everything the device physically holds, including what it is refusing to
+    // use. A set-aside event occupies a position in its origin's numbering, and
+    // an export that skipped it would restore to an archive with a hole in that
+    // numbering — the one state this module's own header calls unrecoverable.
+    // Whether the restored archive then uses it is the roster's decision to
+    // make again, on its own terms.
+    for e in log.all_including_aside()? {
         let dev = dev_hex(&e.header.dev);
         if e.header.seq <= heads.get(&dev).copied().unwrap_or(0) {
             continue;
@@ -115,11 +121,37 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
 
     // The watermark moves only after the bytes are on disk. The other order
     // would mean a crash between them silently skipping events forever.
+    //
+    // # Contiguous, not maximum
+    //
+    // This took each origin's head to the highest sequence exported, which is
+    // wrong for the same reason the log itself keeps a separate `pending` table
+    // rather than a single number: events from one origin do not arrive in
+    // order. Sequences 6..10 can land while 5 is still in flight — `capture
+    // health` reports precisely that, as an ordinary state — and an export run
+    // in that window wrote 6..10 and moved the head to 10. When 5 finally
+    // arrived it was already below the watermark, so every export afterwards
+    // skipped it. The one event that existed nowhere else was the one event
+    // never backed up, and a restore from those files reproduces the hole in an
+    // origin's numbering this module's own header calls unrecoverable.
+    //
+    // So the head advances only across sequences actually held, and stops below
+    // the first gap. Events above the gap were still written to this file and
+    // will be written again after the gap closes. That costs a duplicated
+    // envelope in one later archive, and the restore path ingests duplicates
+    // idempotently — which is a trade with nothing on the other side of it.
     let mut moved: std::collections::BTreeMap<String, u64> = heads;
+    let mut exported: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+        std::collections::BTreeMap::new();
     for e in &fresh {
-        let dev = dev_hex(&e.header.dev);
+        exported
+            .entry(dev_hex(&e.header.dev))
+            .or_default()
+            .insert(e.header.seq);
+    }
+    for (dev, seqs) in exported {
         let entry = moved.entry(dev).or_insert(0);
-        *entry = (*entry).max(e.header.seq);
+        *entry = contiguous_head(*entry, &seqs);
     }
     ops.set_export_heads(&moved)?;
 
@@ -273,6 +305,7 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
     let mut aside = 0usize;
     let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
 
+    let adopt;
     {
         // The ordinary ingest path, not an importer. A restore route exercised
         // only during a disaster is one that has never run when it mattered.
@@ -293,6 +326,18 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
                 }
             }
         }
+        adopt = gate.highest_stamp();
+    }
+
+    // Adopt the archive's clock before authoring anything under it.
+    //
+    // This restore is the sharpest case for it. The identity file was lost with
+    // the store, so the clock resumed from zero, and the origin claim written a
+    // few lines below would carry a stamp far below every event just restored —
+    // the first thing the recovered device writes would lose every ordering
+    // comparison against its own history.
+    if let Some(stamp) = adopt {
+        s.adopt(&stamp)?;
     }
 
     // A fresh origin, before anything local can be written.
@@ -347,4 +392,59 @@ fn short(d: &Dev) -> String {
 
 fn dev_hex(d: &Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// How far an origin's export watermark may move, given what was just written.
+///
+/// Stops below the first sequence not held. The log keeps its own heads
+/// contiguous for the same reason and tracks arrivals above a gap separately:
+/// events from one origin do not arrive in order, and a watermark that jumps to
+/// the highest number seen writes off everything still in flight below it.
+fn contiguous_head(from: u64, seqs: &std::collections::BTreeSet<u64>) -> u64 {
+    let mut next = from + 1;
+    while seqs.contains(&next) {
+        next += 1;
+    }
+    next - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contiguous_head;
+    use std::collections::BTreeSet;
+
+    fn set(xs: &[u64]) -> BTreeSet<u64> {
+        xs.iter().copied().collect()
+    }
+
+    #[test]
+    fn an_unbroken_run_moves_the_head_to_its_end() {
+        assert_eq!(contiguous_head(0, &set(&[1, 2, 3])), 3);
+        assert_eq!(contiguous_head(3, &set(&[4, 5])), 5);
+    }
+
+    /// The whole point: a gap stops the watermark.
+    ///
+    /// Sequences 6..10 arrive while 5 is still in flight — a state `capture
+    /// health` reports as ordinary. Taking the head to 10 would put 5 below the
+    /// watermark before it ever existed here, and every export afterwards would
+    /// skip it. That event exists in one place on earth, and the backup would be
+    /// the one copy that never contained it.
+    #[test]
+    fn a_gap_holds_the_head_below_it() {
+        assert_eq!(contiguous_head(4, &set(&[6, 7, 8, 9, 10])), 4);
+    }
+
+    #[test]
+    fn the_head_resumes_once_the_gap_closes() {
+        // The late event arrives and is exported with the rest again.
+        assert_eq!(contiguous_head(4, &set(&[5, 6, 7, 8, 9, 10])), 10);
+    }
+
+    #[test]
+    fn nothing_exported_leaves_the_head_alone() {
+        assert_eq!(contiguous_head(7, &set(&[])), 7);
+        // Only events above the gap: still nothing to promise.
+        assert_eq!(contiguous_head(7, &set(&[9])), 7);
+    }
 }

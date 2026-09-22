@@ -91,10 +91,19 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
     let hour = capture_time::civil_clock(now, zone).0;
 
     let state = capture_store::projection::current(paths)?;
+
+    // Whether this device is the one that speaks (§2.4.1). Nothing asked
+    // before, so a paired phone and desktop each announced every moment and
+    // the setting offered to stop that was inert.
+    let me = capture_store::identity::Identity::load(paths)?;
+    if !capture_store::notifier::speaks_here(&state, me.public().as_bytes())? {
+        return Ok(());
+    }
+
     let ops = capture_store::ops::Ops::open(&paths.ops)?;
 
-    for d in state.due_by(now, &zone_name)? {
-        if ops.alerted(&d.tgt.0, d.occ)? {
+    for d in state.due_by(now, now, &zone_name)? {
+        if ops.alerted(&d.tgt.0, d.occ, d.at)? {
             continue;
         }
         // Held, not dropped. Nothing is marked, so it is still due when the
@@ -113,7 +122,7 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
             d.text.clone()
         };
         if notifier::notify("capture", &said) {
-            ops.mark_alerted(&d.tgt.0, d.occ, now.max(0) as u64)?;
+            ops.mark_alerted(&d.tgt.0, d.occ, d.at, now.max(0) as u64)?;
         }
         tracing::info!("an alert fired");
     }
