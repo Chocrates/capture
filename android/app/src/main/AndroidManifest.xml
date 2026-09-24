@@ -59,7 +59,7 @@
 
     <application
         android:name=".App"
-        android:label="capture"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:allowBackup="false">
         <!--
@@ -75,7 +75,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="capture">
+            android:label="${appLabel}">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -89,11 +89,35 @@
           because the tile that opens it is reachable from there and demanding
           an unlock afterwards would put the gesture behind the thing it was
           avoiding.
+
+          `taskAffinity=""` is what makes the launcher icon work at all, and
+          the reason is not obvious from here.
+
+          Without it this activity inherits the package affinity, `dev.capture`
+          — the same one `MainActivity` has. The launcher starts a `LAUNCHER`
+          entry with `NEW_TASK|RESET_TASK_IF_NEEDED`, and with a matching
+          affinity the platform's answer to that is to bring the *existing*
+          task forward rather than start anything. So once the reading surface
+          had been opened even once, tapping the capture icon resurfaced it and
+          the capture window never appeared: `START ... result code=2`
+          (`START_TASK_TO_FRONT`), no exception, nothing in the log that looks
+          like a failure. On a cold boot, with no task to find, the same tap
+          worked — which is what made it look intermittent rather than broken.
+
+          `launchMode="singleTop"` does not cover this. It dedupes an activity
+          already at the top of the *same* task; the decision that goes wrong
+          here is made before that, when the platform picks which task to use.
+
+          An empty affinity means this activity belongs to no task by name, so
+          it gets one of its own and the reading surface keeps its own. That is
+          the behaviour the dialog already implies: it appeared over what you
+          were doing, and `excludeFromRecents` means it leaves nothing behind.
         -->
         <activity
             android:name=".CaptureActivity"
             android:exported="true"
             android:theme="@style/CaptureDialog"
+            android:taskAffinity=""
             android:excludeFromRecents="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
@@ -138,12 +162,20 @@
           `targetActivity` is exported already; the alias inherits nothing and
           declares its own exported state, which has to be true for the
           launcher to start it.
+
+          Its label is its own placeholder, and the capital is load-bearing.
+          Neither this nor `MainActivity` declares an `android:icon`, so both
+          draw the application's, and the word underneath is the only thing
+          that says which one opens the capture window. Give them one label and
+          the launcher shows the same icon and the same name twice, with no way
+          to tell the reading surface from the gesture — which is what happened
+          when all five labels in this file were collapsed into `appLabel`.
         -->
         <activity-alias
             android:name=".CaptureShortcut"
             android:targetActivity=".CaptureActivity"
             android:exported="true"
-            android:label="Capture">
+            android:label="${captureLabel}">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -168,7 +200,7 @@
             android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
-            android:label="capture">
+            android:label="${appLabel}">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -186,7 +218,7 @@
             android:name=".CaptureTile"
             android:exported="true"
             android:icon="@android:drawable/ic_menu_edit"
-            android:label="capture"
+            android:label="${appLabel}"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />

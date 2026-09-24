@@ -67,7 +67,41 @@ android {
     }
 
     buildTypes {
+        // The debug build is a different application from the one you live in.
+        //
+        // Both used to be `dev.capture`, so there was one install on the phone
+        // and one archive in it — and every capture typed to see whether the
+        // tile worked, or the voice path, or a share, went into the archive a
+        // person actually keeps. Nothing in an append-only store can take that
+        // back quietly; §1.1 says what tombstone and redact are for, and "I was
+        // testing" is neither.
+        //
+        // A suffix gives the debug build its own package, so its own private
+        // storage, its own device identity and its own tile, side by side with
+        // the real one. `make android-app` installs this; the one you keep is
+        // `make android-release`, which is still `dev.capture` and so updates
+        // the existing install in place — same id, same (debug) signing key, so
+        // Android keeps its data.
+        //
+        // What this cannot stop: pairing the dev install with the desktop's real
+        // archive. That joins its junk to the real log on both ends. Pair it
+        // with a scratch store (`CAPTURE_HOME=... capture pair`) instead; the
+        // label is the only thing that tells the two apart on the phone, which
+        // is why it says so.
+        //
+        // Two labels, not one. `appLabel` names the application and its
+        // reading surface; `captureLabel` names the launcher icon that opens
+        // the capture window. They differ by the capital, because the two
+        // entries sit side by side in the launcher drawing the same icon and
+        // the word is the only thing that distinguishes them.
+        debug {
+            applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLabel"] = "capture dev"
+            manifestPlaceholders["captureLabel"] = "Capture dev"
+        }
         release {
+            manifestPlaceholders["appLabel"] = "capture"
+            manifestPlaceholders["captureLabel"] = "Capture"
             // Shrunk and stripped, because the debug build is not the thing
             // whose speed is worth knowing. §2.1 makes capture's cost the
             // point, and a measurement taken against an unstripped 74 MB

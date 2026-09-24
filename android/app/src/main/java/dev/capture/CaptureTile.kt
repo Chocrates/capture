@@ -22,8 +22,14 @@ class CaptureTile : TileService() {
     override fun onClick() {
         super.onClick()
 
+        // NEW_TASK and nothing else. CaptureActivity declares an empty
+        // taskAffinity, so it is alone in a task of its own and there is
+        // never anything above it to clear; a repeat press is absorbed by
+        // launchMode="singleTop" instead. CLEAR_TOP was here when the
+        // activity still shared MainActivity's task, and leaving it would
+        // describe a stack the manifest now forbids.
         val intent = Intent(this, CaptureActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
         // `startActivityAndCollapse` takes a PendingIntent from API 34 and an
