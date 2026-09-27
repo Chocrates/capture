@@ -23,3 +23,19 @@
 # Applies to every profile, so `cargo test` and the debug builds get it too.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Half the cores, for memory rather than speed.
+#
+# At the default of one job per core (sixteen here), a `make ci` run took the
+# cgroup it ran in to 51.9G of a 62G machine with 2G of swap, and systemd-oomd
+# killed it along with the session that started it. Parallel rustc and link
+# jobs are the likely term — the one thing in that cgroup that scales with the
+# job count — though that is an inference from the number, not a profile of it.
+#
+# Eight is a guess at the knee, not a measurement: it roughly halves the peak
+# if the peak is per-job, and costs something under 2x on a cold build and
+# close to nothing on the one-crate incremental rebuilds that are most of the
+# day. If builds feel slow, measure before raising it; if oomd fires again,
+# lower it. `cargo build -j16` still overrides it for one run.
+[build]
+jobs = 8

@@ -113,9 +113,9 @@ impl Log {
 
     /// Open read-only, without needing the writer.
     pub fn open_read(path: &Path) -> Result<Self> {
-        Ok(Log {
-            conn: db::open_read(path)?,
-        })
+        let conn = db::open_read(path)?;
+        shadow_missing_aside(&conn)?;
+        Ok(Log { conn })
     }
 
     /// Take in an event.
@@ -690,6 +690,35 @@ fn add_aside_column(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Let a read-only connection query a log that predates `aside`.
+///
+/// `add_aside_column` runs on the write path, and a read-only connection cannot
+/// run it. So a store last written by an earlier build, opened by anything that
+/// only reads — `capture peers`, a timeline, the phone looking up a recording —
+/// failed every query naming the column with "no such column: aside", until
+/// something happened to open it for writing. That was the real desktop archive
+/// on the day this landed: the daemon had not written since the upgrade, and
+/// every read command that touched the log refused.
+///
+/// A temporary view named `events` is found before the table of that name —
+/// SQLite resolves an unqualified name against `temp` first — so every query in
+/// this file sees the column without the file being touched. The temp schema
+/// belongs to the connection, which is why a read-only one may create it.
+/// Every row reads as not set aside, which is true: nothing could have set one
+/// aside in a log with nowhere to record it.
+fn shadow_missing_aside(conn: &Connection) -> Result<()> {
+    let present = conn
+        .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'aside'")?
+        .exists([])?;
+    if !present {
+        conn.execute(
+            "CREATE TEMP VIEW events AS SELECT *, NULL AS aside FROM main.events",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert(tx: &rusqlite::Transaction<'_>, e: &Envelope) -> Result<()> {
     insert_as(tx, e, None)
 }
@@ -790,6 +819,48 @@ mod tests {
 
     fn clean(p: &Path) {
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_log_from_before_aside_can_be_read_without_being_written() {
+        // The real desktop archive, the day SYNC 6 landed: last written by an
+        // earlier build, so its `events` table has no `aside` column, and
+        // `capture peers` refused with "no such column: aside".
+        let p = tmp("pre-aside");
+        let s = testing::mixed(4, 1, 2, 4);
+        let events = &s.events;
+        {
+            let mut log = Log::open(&p).unwrap();
+            for e in events {
+                let k = s.key_for(&e.header.dev).unwrap();
+                log.ingest(e, &k).unwrap();
+            }
+        }
+        // Back to the shape an earlier build wrote.
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute("ALTER TABLE events DROP COLUMN aside", [])
+                .unwrap();
+        }
+
+        let log = Log::open_read(&p).unwrap();
+        assert_eq!(
+            log.all().unwrap().len(),
+            events.len(),
+            "every event, none set aside"
+        );
+        assert_eq!(log.all_including_aside().unwrap().len(), events.len());
+
+        // And reading did not migrate it: a reader that wrote would be a
+        // reader that needs the writer.
+        let c = Connection::open(&p).unwrap();
+        let migrated = c
+            .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'aside'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(!migrated, "the file was left as it was");
+        clean(&p);
     }
 
     #[test]

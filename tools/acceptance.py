@@ -27,7 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = "dev.capture"
+# The debug build's package. It carries a suffix so it cannot share storage with
+# the install a person keeps (see `buildTypes` in app/build.gradle.kts); the
+# classes are still in `dev.capture`, so components are named in full — `.X`
+# would resolve against the suffixed package and name nothing.
+APP = "dev.capture.dev"
+NS = "dev.capture"
 
 
 def emulator_only():
@@ -110,18 +115,18 @@ def main():
 
     step("a phone with nothing on it")
     ui.adb("shell", "pm", "clear", APP)
-    ui.adb("shell", "am", "start", "-n", f"{APP}/.MainActivity")
+    ui.adb("shell", "am", "start", "-n", f"{APP}/{NS}.MainActivity")
     time.sleep(4)
     ui.wait_for("Nothing captured yet")
     check(True, "an empty archive says it is empty rather than showing a blank list")
 
     step("capture, from the window the tile opens")
-    ui.adb("shell", "am", "start", "-n", f"{APP}/.CaptureActivity")
+    ui.adb("shell", "am", "start", "-n", f"{APP}/{NS}.CaptureActivity")
     time.sleep(3)
     ui.adb("shell", "input", "text", "'written%son%sthe%sphone'")
     ui.adb("shell", "input", "keyevent", "66")
     time.sleep(3)
-    ui.adb("shell", "am", "start", "-n", f"{APP}/.MainActivity")
+    ui.adb("shell", "am", "start", "-n", f"{APP}/{NS}.MainActivity")
     time.sleep(3)
     ui.wait_for("written on the phone")
     check(True, "the capture is in the timeline")
@@ -146,10 +151,10 @@ def main():
         "android.intent.extra.SUBJECT",
         "'a page'",
         "-n",
-        f"{APP}/.ShareActivity",
+        f"{APP}/{NS}.ShareActivity",
     )
     time.sleep(4)
-    ui.adb("shell", "am", "start", "-n", f"{APP}/.MainActivity")
+    ui.adb("shell", "am", "start", "-n", f"{APP}/{NS}.MainActivity")
     time.sleep(3)
     ui.wait_for("shared from elsewhere")
     check(True, "text shared from another application is captured")
@@ -168,7 +173,7 @@ def main():
     check(os.path.exists(apk), "there is an apk to reinstall")
     ui.adb("install", "-r", apk, timeout=300)
     ui.adb("shell", "am", "force-stop", APP)
-    ui.adb("shell", "am", "start", "-n", f"{APP}/.MainActivity")
+    ui.adb("shell", "am", "start", "-n", f"{APP}/{NS}.MainActivity")
     time.sleep(5)
     ui.tap("Health")
     after = ui.wait_for("(this phone)")[0]

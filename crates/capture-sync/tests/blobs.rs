@@ -124,7 +124,11 @@ fn a_peer_that_does_not_have_it_says_so() {
     // that is only true if a miss is fast.
     let (asker, _, moved) = transfer(Held::with(&[], &["b3:cc"]), Held::with(&[], &[]));
 
-    assert_eq!(moved.missing, 1);
+    assert_eq!(
+        moved.missing,
+        vec![String::from("b3:cc")],
+        "named, so it can be recorded"
+    );
     assert_eq!(moved.fetched, 0);
     assert!(
         asker.have.is_empty(),

@@ -81,10 +81,14 @@ pub struct Moved {
     pub fetched: usize,
     /// Bytes received, across all of them.
     pub bytes: u64,
-    /// Blobs the peer did not have. Not a failure: an evicted blob is the
-    /// ordinary state of a constrained device, and the answer is to ask
+    /// Blobs the peer did not have, by name. Not a failure: an evicted blob is
+    /// the ordinary state of a constrained device, and the answer is to ask
     /// somebody else.
-    pub missing: usize,
+    ///
+    /// Names rather than a count, because a count could only be logged. The
+    /// caller records each one, and a blob every peer keeps refusing is the
+    /// only evidence this device will ever have that the last copy is gone.
+    pub missing: Vec<String>,
     /// Whether the phase stopped on its budget rather than on finishing.
     ///
     /// Not a failure either, and worth distinguishing: a round that moved what
@@ -177,7 +181,7 @@ pub fn fetch<T: Transport, B: Blobs>(
                     }
                 }
                 Some(Message::NoBlob { .. }) => {
-                    moved.missing += 1;
+                    moved.missing.push(hash.clone());
                     break;
                 }
                 // Anything else means the peer is not in this phase, which

@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import uniffi.capture_ffi.NoteKind
 import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Pending
 
@@ -72,6 +73,29 @@ fun Actions(note: NoteSummary, pending: Pending?, model: Model) {
         }) { Text("Move") }
         TextButton({ model.pin(note.slug, !note.pinned) }) {
             Text(if (note.pinned) "Unpin" else "Pin")
+        }
+        // Saying what something is, which the archive would otherwise only
+        // guess at — and, below the floor, deliberately not guess at.
+        //
+        // Here and not on a timeline row. A correction is pinned, so it beats
+        // every later reparse, and a control on a scrolling surface is a
+        // mis-tap away from writing one of those while thumbing past.
+        if (note.kind != "task") {
+            TextButton({ model.asTask(note.slug, null) }) { Text("It's a task") }
+        }
+        if (note.kind == "task") {
+            TextButton({
+                asking = Ask(
+                    "Due",
+                    "A day, as 2026-09-20. Empty clears it.",
+                    "",
+                ) { model.asTask(note.slug, it.ifBlank { null }) }
+            }) { Text("Due") }
+        }
+        // A thing wrongly promoted is as ordinary as a thing wrongly left
+        // alone, so the way back is the same gesture rather than a harder one.
+        if (note.kind != "note") {
+            TextButton({ model.setKind(note.slug, NoteKind.NOTE) }) { Text("Just a note") }
         }
         if (note.mutedUntilMs == null) {
             TextButton({ model.mute(note.slug) }) { Text("Mute") }

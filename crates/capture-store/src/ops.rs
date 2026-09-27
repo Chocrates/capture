@@ -216,6 +216,19 @@ const ROUND_TROUBLE: &str = "sync_last_trouble";
 /// Bucket counts for how long the overlay takes to appear.
 const LATENCY: &str = "overlay_latency";
 
+/// Prefix for a blob peers have been asked for and did not have. The name
+/// follows; the value is `count first_at`.
+const BLOB_REFUSED: &str = "blob_refused.";
+
+/// How many rounds must have been refused before a blob is called unavailable.
+const REFUSALS_BEFORE_UNAVAILABLE: u32 = 3;
+
+/// And over how long. Rounds on a phone can run every fifteen minutes, so three
+/// refusals alone could be one peer saying no three times in the hour the
+/// device holding the bytes was asleep. A day is long enough that "asleep" has
+/// usually stopped being the explanation.
+const UNAVAILABLE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Handle to this device's local state.
 pub struct Ops {
     conn: Connection,
@@ -738,6 +751,56 @@ impl Ops {
         Ok(self.get(ROUND_MULTICAST)?.map(|v| v == "1"))
     }
 
+    /// A peer was asked for a blob and said it does not have it.
+    ///
+    /// Counted rather than acted on. One refusal is the ordinary state of a
+    /// constrained device — a phone evicts (§5.6), and the answer is to ask
+    /// somebody else. What is worth knowing is a blob that *everyone asked*
+    /// keeps refusing, because that is the difference between "it will arrive"
+    /// and "the only copy is gone", and a surface that says the first forever
+    /// is telling somebody to wait for something that is not coming.
+    ///
+    /// Returns how many rounds have now refused it.
+    pub fn blob_refused(&self, name: &str, at: u64) -> Result<u32> {
+        let k = format!("{BLOB_REFUSED}{name}");
+        let (count, first) = self
+            .get(&k)?
+            .and_then(|v| parse_refusal(&v))
+            .unwrap_or((0, at));
+        let count = count.saturating_add(1);
+        self.set(&k, &format!("{count} {first}"))?;
+        Ok(count)
+    }
+
+    /// The blob arrived, so whatever was said about it no longer holds.
+    pub fn blob_arrived(&self, name: &str) -> Result<()> {
+        self.forget_key(&format!("{BLOB_REFUSED}{name}"))
+    }
+
+    /// When a blob started being refused, if it has been refused long enough
+    /// and often enough to say so.
+    ///
+    /// `None` means "keep saying it will arrive" — including when it has been
+    /// refused, but not yet by enough rounds over enough time. The threshold
+    /// is decided here rather than on a surface so every surface says the same
+    /// thing about the same blob.
+    ///
+    /// What this can honestly claim is narrower than "no device has it": only
+    /// that every device this one has reached for a day did not. A laptop that
+    /// has been shut for a week and holds the only copy is indistinguishable
+    /// from a copy that was evicted everywhere, and the wording has to allow
+    /// for it.
+    pub fn blob_unavailable_since(&self, name: &str, now: u64) -> Result<Option<u64>> {
+        let Some((count, first)) = self
+            .get(&format!("{BLOB_REFUSED}{name}"))?
+            .and_then(|v| parse_refusal(&v))
+        else {
+            return Ok(None);
+        };
+        let long_enough = now.saturating_sub(first) >= UNAVAILABLE_AFTER_MS;
+        Ok((count >= REFUSALS_BEFORE_UNAVAILABLE && long_enough).then_some(first))
+    }
+
     /// What the last round reported going wrong, if anything did.
     pub fn last_round_trouble(&self) -> Result<Option<String>> {
         self.get(ROUND_TROUBLE)
@@ -1151,6 +1214,12 @@ fn observes_key(peer: &[u8; 32]) -> String {
     format!("peer_observes.{hex}")
 }
 
+/// `count first_at`, as `blob_refused` writes it.
+fn parse_refusal(v: &str) -> Option<(u32, u64)> {
+    let (count, first) = v.split_once(' ')?;
+    Some((count.parse().ok()?, first.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1164,6 +1233,68 @@ mod tests {
 
     fn clean(p: &Path) {
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_refused_blob_is_not_unavailable_until_refused_often_and_for_long() {
+        let p = tmp("refused");
+        let o = Ops::open(&p).unwrap();
+        let name = "b3:00";
+        let t0 = 1_700_000_000_000u64;
+        let hour = 60 * 60 * 1000;
+
+        // Three refusals in one hour: one peer saying no while the holder
+        // sleeps. Not enough.
+        for i in 0..3 {
+            o.blob_refused(name, t0 + i * 15 * 60 * 1000).unwrap();
+        }
+        assert_eq!(o.blob_unavailable_since(name, t0 + hour).unwrap(), None);
+
+        // A day on, still refused: now it is worth saying, and from when.
+        assert_eq!(o.blob_refused(name, t0 + 25 * hour).unwrap(), 4);
+        assert_eq!(
+            o.blob_unavailable_since(name, t0 + 25 * hour).unwrap(),
+            Some(t0),
+            "the first refusal is the one a surface should date from"
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn a_day_of_one_refusal_is_not_unavailable() {
+        // Long enough, but asked only once: one round is one peer's answer.
+        let p = tmp("refused-once");
+        let o = Ops::open(&p).unwrap();
+        o.blob_refused("b3:01", 0).unwrap();
+        assert_eq!(
+            o.blob_unavailable_since("b3:01", 48 * 60 * 60 * 1000)
+                .unwrap(),
+            None
+        );
+        clean(&p);
+    }
+
+    #[test]
+    fn an_arrival_forgets_the_refusals() {
+        let p = tmp("refused-arrived");
+        let o = Ops::open(&p).unwrap();
+        for i in 0..5u64 {
+            o.blob_refused("b3:02", i * 24 * 60 * 60 * 1000).unwrap();
+        }
+        assert!(
+            o.blob_unavailable_since("b3:02", 5 * 24 * 60 * 60 * 1000)
+                .unwrap()
+                .is_some()
+        );
+        o.blob_arrived("b3:02").unwrap();
+        assert_eq!(
+            o.blob_unavailable_since("b3:02", 5 * 24 * 60 * 60 * 1000)
+                .unwrap(),
+            None
+        );
+        // And a later eviction starts the count again rather than inheriting it.
+        assert_eq!(o.blob_refused("b3:02", 6 * 24 * 60 * 60 * 1000).unwrap(), 1);
+        clean(&p);
     }
 
     #[test]

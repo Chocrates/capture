@@ -155,6 +155,12 @@ const AT: u64 = 1_700_000_100_000;
 
 /// Run one round of anti-entropy between two stores over a real socket.
 fn sync(a: &Device, b: &Device) {
+    sync_at(a, b, AT);
+}
+
+/// The same round, said to happen at a given moment — for what depends on how
+/// long something has been true rather than on whether it is.
+fn sync_at(a: &Device, b: &Device, at: u64) {
     let a_id = a.identity();
     let b_id = b.identity();
 
@@ -175,14 +181,14 @@ fn sync(a: &Device, b: &Device) {
         let stream = listener.accept().unwrap().0;
         let tcp = Tcp::new(stream).unwrap();
         let mut secure = Secure::accept(tcp, &b_secret).expect("the responder handshook");
-        capture_store::round::reconcile(&b_paths, &mut secure, AT, false, &|| false)
+        capture_store::round::reconcile(&b_paths, &mut secure, at, false, &|| false)
             .expect("the responder finished")
     });
 
     let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
     let mut secure =
         Secure::initiate(tcp, &a_id.noise_secret(), &b_id.noise_public()).expect("handshook");
-    capture_store::round::reconcile(&a.paths, &mut secure, AT, true, &|| false)
+    capture_store::round::reconcile(&a.paths, &mut secure, at, true, &|| false)
         .expect("the initiator finished");
 
     responder.join().expect("no panic");
@@ -760,6 +766,73 @@ fn a_recording_the_other_device_never_had_is_not_waited_for() {
     );
 }
 
+#[test]
+fn a_recording_nobody_has_is_eventually_said_to_be_unavailable() {
+    // SYNC 8. A refusal was counted and thrown away, so a recording whose only
+    // copy had been evicted told the person it would arrive on the next sync —
+    // on every sync, for ever. The round now records each refusal, and after
+    // enough of them over long enough the store says so.
+    let a = Device::new("a-never");
+    let b = Device::new("b-never");
+    pair(&a, &b);
+
+    let recording = vec![0x33u8; 2048];
+    let hash = capture_store::blobs::put(&a.paths.blobs, &recording).unwrap();
+    let body = capture_store::session::capture_body_with_blob(
+        "",
+        capture_core::body::BlobRef {
+            hash,
+            media_type: String::from("audio/ogg"),
+            bytes: recording.len() as u64,
+            duration_ms: None,
+        },
+    )
+    .unwrap();
+    a.session().capture(&body).unwrap();
+    capture_store::blobs::evict(&a.paths.blobs, &hash).unwrap();
+    let name = capture_store::blobs::name(&hash);
+    let hour = 60 * 60 * 1000;
+    let verdict = |d: &Device, at: u64| {
+        capture_store::ops::Ops::open(&d.paths.ops)
+            .unwrap()
+            .blob_unavailable_since(&name, at)
+            .unwrap()
+    };
+
+    // One refusal, and then two more within the hour: a peer that is merely
+    // asleep would look like this, and it is not worth alarming anybody over.
+    sync_at(&a, &b, AT);
+    sync_at(&a, &b, AT + hour / 4);
+    sync_at(&a, &b, AT + hour / 2);
+    assert_eq!(
+        verdict(&b, AT + hour),
+        None,
+        "three misses in an hour is not gone"
+    );
+
+    // A day later, still refused.
+    sync_at(&a, &b, AT + 25 * hour);
+    assert_eq!(
+        verdict(&b, AT + 25 * hour),
+        Some(AT),
+        "refused for a day, by every round: the surface may now say so"
+    );
+
+    // And the bytes turning up after all puts that right. Only the device that
+    // *fetched* them is the one whose record matters here.
+    capture_store::blobs::put(&a.paths.blobs, &recording).unwrap();
+    sync_at(&a, &b, AT + 26 * hour);
+    assert!(
+        capture_store::blobs::have(&b.paths.blobs, &hash),
+        "it arrived"
+    );
+    assert_eq!(
+        verdict(&b, AT + 26 * hour),
+        None,
+        "and is no longer called gone"
+    );
+}
+
 /// The HLC advances to what a peer has shown it.
 ///
 /// §HLC is unambiguous about this: "Causality is preserved by one thing and one
@@ -1017,4 +1090,61 @@ fn a_retired_devices_later_events_hold_their_places_and_are_not_used() {
         "the events were not stored at all, so reissuing the retirement \
          could only recover them from a peer that may be long gone"
     );
+}
+
+#[test]
+fn a_kind_corrected_on_one_device_survives_the_other_reparsing_it() {
+    // The phone is where a misparse is seen first, because the phone is where
+    // capture happens. What it says has to reach the desktop *and* survive the
+    // desktop's own sweep — a grammar bump quietly reverting somebody's
+    // correction is the failure §6 rates unrecoverable, and it would happen on
+    // the device that did not make the correction.
+    let phone = Device::new("a-kind-phone");
+    let desk = Device::new("b-kind-desk");
+    pair(&phone, &desk);
+
+    // Well over the floor, and wrong: the recognizer reads a day and a clock
+    // time and calls it an event.
+    let slug = phone.capture("dentist thursday 2pm");
+    sync(&phone, &desk);
+
+    let sweep = |d: &Device| {
+        let mut s = d.session();
+        capture_store::promote::sweep(&mut s).unwrap()
+    };
+    sweep(&phone);
+    sweep(&desk);
+
+    let kind_on = |d: &Device| {
+        let store = d.read();
+        let tgt = store.resolve(&slug).unwrap().unwrap();
+        store.promotion_of(&tgt).unwrap().map(|p| match p.as_ {
+            capture_core::body::Promoted::Note => "note",
+            capture_core::body::Promoted::Task(_) => "task",
+            capture_core::body::Promoted::Event(_) => "event",
+            capture_core::body::Promoted::Series(_) => "series",
+        })
+    };
+    assert_eq!(kind_on(&desk), Some("event"), "the recognizer's own answer");
+
+    // The phone says otherwise.
+    capture_store::promote::as_task(&phone.paths, &slug, None).unwrap();
+    assert_eq!(kind_on(&phone), Some("task"));
+
+    sync(&phone, &desk);
+    assert_eq!(kind_on(&desk), Some("task"), "the correction did not cross");
+
+    // And the desktop re-reading the text does not take it back, however many
+    // times it runs.
+    sweep(&desk);
+    sweep(&desk);
+    assert_eq!(
+        kind_on(&desk),
+        Some("task"),
+        "the other device's sweep undid a correction"
+    );
+
+    // Converged, not merely agreeing by accident on one field.
+    sync(&phone, &desk);
+    assert_eq!(kind_on(&phone), kind_on(&desk));
 }

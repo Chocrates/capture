@@ -273,6 +273,15 @@ impl capture_sync::blob::Blobs for StoreBlobs {
         let Some(h) = crate::blobs::parse(hash) else {
             return false;
         };
-        crate::blobs::take(&self.paths.blobs, &h, offset, total, data).unwrap_or(false)
+        let done = crate::blobs::take(&self.paths.blobs, &h, offset, total, data).unwrap_or(false);
+        if done {
+            // Refusals are about a blob this device does not have. Kept past
+            // its arrival, a later eviction would inherit them and be called
+            // unavailable on its first miss.
+            if let Ok(ops) = crate::ops::Ops::open(&self.paths.ops) {
+                let _ = ops.blob_arrived(hash);
+            }
+        }
+        done
     }
 }

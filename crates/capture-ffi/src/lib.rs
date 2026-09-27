@@ -355,6 +355,15 @@ pub struct Recording {
     /// still has them. A surface should say "not on this device" and offer to
     /// fetch, not report a missing recording.
     pub here: bool,
+    /// For how many whole days every device this one reached has said it does
+    /// not have the bytes — set only once that has held for enough rounds over
+    /// enough time that "the other device is asleep" has stopped being the
+    /// likely reason.
+    ///
+    /// `None` while `here`, and while a miss is still ordinary. Decided in the
+    /// store and counted in days here, so the surface only chooses words and
+    /// does no date arithmetic of its own.
+    pub unavailable_for_days: Option<u32>,
 }
 
 /// A place to watch for, as the platform needs it.
@@ -414,6 +423,64 @@ pub struct AgendaEntry {
     /// The cluster decides, not the day: a single three-way overlap at noon
     /// must not squeeze the morning into thirds.
     pub columns: u32,
+}
+
+/// Where an open task sits on a surface asking what is outstanding.
+///
+/// Mirrors `capture_store::projection::Band`. The band is decided by the store
+/// against one answer to what today is, so that a phone and a window cannot
+/// disagree about whether something is late.
+#[derive(Debug, PartialEq, uniffi::Enum)]
+pub enum TaskBand {
+    /// Due on a day that has passed.
+    Overdue,
+    /// Due today or later.
+    Due,
+    /// Open, with no due date. The ordinary case: a bare task verb is below the
+    /// confidence floor, so most tasks are named by a person, and naming one is
+    /// not saying when.
+    Undated,
+}
+
+/// One open task.
+///
+/// Finished tasks are not here at all. Nothing counts completions (§0 rates
+/// nothing that scores the user), so there is no done band to hold them.
+#[derive(Debug, uniffi::Record)]
+pub struct TaskLine {
+    pub slug: String,
+    /// What was captured, verbatim. Absent for the same reasons as elsewhere:
+    /// redacted, queued for redaction, or not yet readable.
+    pub text: Option<String>,
+    /// The projection's one-line rendering, so this surface cannot format the
+    /// fields differently from the timeline or the note page.
+    pub descriptor: String,
+    /// The due date as a floating day, `2026-09-20`, never an instant.
+    pub due: Option<String>,
+    pub band: TaskBand,
+}
+
+/// What a capture is being said to be.
+///
+/// An enum rather than the string `NoteSummary.kind` carries. That one is a
+/// rendering, where a wrong value draws badly; this one is a mutation, where a
+/// wrong value writes a pinned correction that outlives every later reparse.
+/// Kotlin should not be able to name a kind that does not exist.
+#[derive(Debug, PartialEq, uniffi::Enum)]
+pub enum NoteKind {
+    /// Explicitly neither a task nor an event. A demotion is a promotion like
+    /// any other, which is what makes a wrong type correctable rather than
+    /// something to be worked around.
+    Note,
+    /// Something to do. State, and no time of its own.
+    Task,
+    // No `Event` arm, and its absence is deliberate rather than unfinished.
+    //
+    // `Promoted::Event` carries `EventFields`, which begins with a `When` — an
+    // event is a thing that occupies time, so there is no such thing as one
+    // without a time (§3.6). A bare "make this an event" has nothing to put
+    // there. Saying when is how something becomes an event, which is what the
+    // capture text and the recognizer already do.
 }
 
 impl capture_store::calendar::Timed for AgendaEntry {
@@ -1466,6 +1533,132 @@ impl Archive {
         Ok(capture_store::promote::set_done(&self.paths, &name, done)?)
     }
 
+    /// Say what a capture is.
+    ///
+    /// A person deciding, so the promotion is pinned and no later reparse
+    /// displaces it — the one conflict rule here that is not last-write-wins,
+    /// because a grammar improvement silently reverting somebody's correction
+    /// is the failure §6 rates unrecoverable.
+    ///
+    /// Demotion to a plain note goes through the same call. A thing wrongly
+    /// promoted is as ordinary as a thing wrongly left alone, and making one of
+    /// those cheap and the other a trip to a command line is the gradient §8.4
+    /// says to avoid.
+    ///
+    /// The captured text is not touched. Promotion annotates; it never
+    /// rewrites (§3.1.3).
+    pub fn set_kind(&self, name: String, kind: NoteKind) -> Result<()> {
+        let _w = self.write_lock()?;
+        let as_ = match kind {
+            NoteKind::Note => capture_core::body::Promoted::Note,
+            // No due date on this path. Saying "this is a task" and saying when
+            // it is due are separate decisions, and `as_task` is the one that
+            // takes a day.
+            NoteKind::Task => capture_core::body::Promoted::Task(capture_core::body::TaskFields {
+                done: false,
+                due: None,
+                order: None,
+            }),
+        };
+        Ok(capture_store::promote::correct(&self.paths, &name, as_)?)
+    }
+
+    /// What the archive thinks this note might be, where it was unsure enough
+    /// not to have acted.
+    ///
+    /// A call of its own rather than a field on `NoteSummary`, because filling
+    /// it there would mean running the recognizer once per timeline row to
+    /// answer a question only the note page asks. The alternative — a field
+    /// filled by one read and left empty by another — is the divergence that
+    /// putting the descriptor in the projection was meant to end.
+    ///
+    /// `None` where the reading is confident enough to have been applied, and
+    /// where there is nothing temporal in the text at all.
+    pub fn suggestion(&self, name: String) -> Result<Option<String>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        let Some(row) = store.note(&tgt)? else {
+            return Err(CaptureError::NotFound { name });
+        };
+        let Some(text) = row.text.as_deref() else {
+            return Ok(None);
+        };
+        // Against when it was captured, as every other reading of this text is.
+        Ok(capture_store::review::suggestion_for(
+            text,
+            row.tz.as_deref(),
+            row.created.0 as i64,
+        ))
+    }
+
+    /// Take the reading the archive offered but would not act on.
+    ///
+    /// The other half of the confidence floor. Below it a recognition is shown
+    /// and applied to nothing, which is the right answer for a machine deciding
+    /// by itself and the wrong one as a final answer — the person reading the
+    /// suggestion wrote the text, and knows whether it meant Tuesday.
+    ///
+    /// Not the same as lowering the floor. The floor governs what is written
+    /// unasked; this is somebody saying yes. The result is pinned, so no later
+    /// grammar improvement undoes it.
+    ///
+    /// Answers what it became: `note`, `task`, `event` or `series`.
+    pub fn accept(&self, name: String) -> Result<String> {
+        let _w = self.write_lock()?;
+        let as_ = capture_store::promote::accept(&self.paths, &name)?;
+        Ok(String::from(match as_ {
+            capture_core::body::Promoted::Note => "note",
+            capture_core::body::Promoted::Task(_) => "task",
+            capture_core::body::Promoted::Event(_) => "event",
+            capture_core::body::Promoted::Series(_) => "series",
+        }))
+    }
+
+    /// Make something a task, with a due date or without one.
+    ///
+    /// The due date is a floating day — `2026-09-20` — and never an instant.
+    /// "Due Friday" is not 00:00 UTC on Friday (§3.6), and a malformed date is
+    /// refused here rather than stored and later found by a query that quietly
+    /// matches nothing.
+    pub fn as_task(&self, name: String, due: Option<String>) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::promote::as_task(
+            &self.paths,
+            &name,
+            due.as_deref(),
+        )?)
+    }
+
+    /// Every open task, banded into overdue, due and undated.
+    ///
+    /// Today is worked out here rather than taken from the caller, for the
+    /// reason `agenda` gives: what day it is in the reading zone is a decision
+    /// with one implementation, and a surface passing its own answer is how
+    /// `today()` and `agenda()` came to disagree about the date.
+    ///
+    /// Finished tasks are absent. Nothing counts them.
+    pub fn tasks(&self) -> Result<Vec<TaskLine>> {
+        let store = self.read()?;
+        let today = self.today();
+        let mut out = Vec::new();
+        for row in store.tasks_outstanding(&today)? {
+            out.push(TaskLine {
+                slug: store.slug_of(&row.tgt)?.unwrap_or_default(),
+                text: store.text_of(&row.tgt)?,
+                descriptor: row.descriptor,
+                due: row.due,
+                band: match row.band {
+                    capture_store::projection::Band::Overdue => TaskBand::Overdue,
+                    capture_store::projection::Band::Due => TaskBand::Due,
+                    capture_store::projection::Band::Undated => TaskBand::Undated,
+                },
+            });
+        }
+        Ok(out)
+    }
+
     /// Stop accepting what a device writes from here on.
     ///
     /// The remedy for a device that was lost or stolen. It retires the *key*,
@@ -1882,12 +2075,27 @@ impl Archive {
             return Ok(None);
         };
 
-        Ok(capture.blob.map(|b| Recording {
-            name: capture_store::blobs::name(&b.hash),
+        let Some(b) = capture.blob else {
+            return Ok(None);
+        };
+        let name = capture_store::blobs::name(&b.hash);
+        let here = capture_store::blobs::have(&self.paths.blobs, &b.hash);
+        let now = self.now_ms();
+        let unavailable_for_days = if here {
+            None
+        } else {
+            capture_store::ops::Ops::open_read(&self.paths.ops)
+                .and_then(|ops| ops.blob_unavailable_since(&name, now))
+                .unwrap_or(None)
+                .map(|since| (now.saturating_sub(since) / 86_400_000) as u32)
+        };
+        Ok(Some(Recording {
+            name,
             media_type: b.media_type,
             bytes: b.bytes,
             duration_ms: b.duration_ms,
-            here: capture_store::blobs::have(&self.paths.blobs, &b.hash),
+            here,
+            unavailable_for_days,
         }))
     }
 

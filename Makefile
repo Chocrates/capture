@@ -8,7 +8,26 @@
 # `make` on its own lists what is here. `make ci` runs everything CI runs.
 
 SHELL := /bin/sh
-CARGO ?= cargo
+
+# Each build runs in a cgroup of its own, not the terminal's.
+#
+# On 2026-09-20 a `make ci` run pushed the tmux scope it was started from to
+# 51.9G, and systemd-oomd did what it does under pressure: picked the biggest
+# cgroup and killed everything in it. That was the build, and the shell, and
+# the editor session driving it, plus most of the desktop on the way. Losing a
+# build is cheap. Losing the session that started it is not.
+#
+# `systemd-run --scope` keeps the process a child of this one — same
+# environment, same directory, same exit code — and gives it a fresh cgroup, so
+# the build is the biggest candidate and the one that goes. Where there is no
+# user systemd to ask (a container, a CI runner) this is empty and nothing
+# changes; the probe is the real call, so it cannot be wrong about which.
+#
+# This only covers what `make` starts. The job cap in `.cargo/config.toml` is
+# what covers a bare `cargo`.
+SCOPE := $(shell systemd-run --user --scope --quiet --collect true >/dev/null 2>&1 \
+	&& echo systemd-run --user --scope --quiet --collect)
+CARGO ?= $(SCOPE) cargo
 
 # Where the demo and smoke targets put their store. Never the real one at
 # ~/capture — a smoke test that writes into the archive it is testing is a smoke
@@ -73,8 +92,8 @@ android-build:
 	@sh tools/android-env.sh >/dev/null
 	@echo '--- android: building for x86_64 (emulator) and aarch64 (device)'
 	@set -e; . ./tools/android-env.sh; \
-	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API build -p capture-store; \
-	 cargo ndk -t x86_64 -P $$ANDROID_NDK_API test -p capture-store --no-run
+	 $(SCOPE) cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API build -p capture-store; \
+	 $(SCOPE) cargo ndk -t x86_64 -P $$ANDROID_NDK_API test -p capture-store --no-run
 
 ## android-kotlin: generate the Kotlin the app calls
 #
@@ -86,14 +105,14 @@ android-build:
 android-kotlin:
 	@echo '--- android: generating Kotlin from the built library'
 	@set -e; . ./tools/android-env.sh; \
-	 cargo ndk -t x86_64 -P $$ANDROID_NDK_API build -p capture-ffi; \
+	 $(SCOPE) cargo ndk -t x86_64 -P $$ANDROID_NDK_API build -p capture-ffi; \
 	 cargo run -q -p capture-ffi --bin uniffi-bindgen -- \
 	   generate --library target/x86_64-linux-android/debug/libcapture_ffi.so \
 	   --language kotlin --no-format --out-dir android/app/src/main/java
 	@echo '    android/app/src/main/java/uniffi/capture_ffi/capture_ffi.kt'
 	@echo '--- android: staging the native library for packaging'
 	@set -e; . ./tools/android-env.sh; \
-	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
+	 $(SCOPE) cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
 	   -o android/app/jniLibs/debug build -p capture-ffi
 	@find android/app/jniLibs/debug -name '*.so' | sed 's/^/    /'
 
@@ -109,7 +128,7 @@ android-decides:
 ## android-app: build the application
 android-app: android-kotlin
 	@echo '--- android: building the app'
-	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleDebug
+	@set -e; . ./tools/android-env.sh; cd android && $(SCOPE) ./gradlew --quiet assembleDebug
 
 ## android-instrumented: run the binding's tests on an emulator
 #
@@ -145,7 +164,7 @@ android-instrumented: android-kotlin
 	      [ -n "$(I_KNOW_THIS_WIPES_THE_DEVICE)" ] || exit 1 ;; \
 	 esac
 	@echo '--- android: instrumented tests'
-	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet connectedDebugAndroidTest
+	@set -e; . ./tools/android-env.sh; cd android && $(SCOPE) ./gradlew --quiet connectedDebugAndroidTest
 
 ## android-test: run the store's suite on a connected device or emulator
 #
@@ -492,7 +511,7 @@ distclean: clean
 # real processes on both ends, which is minutes rather than seconds.
 android-converge: android-app
 	@echo '--- android: converging with a desktop'
-	@cargo build -p capture-cli -p capture-syncd
+	@$(CARGO) build -p capture-cli -p capture-syncd
 	@sh tools/converge.sh
 
 ## android-accept: the milestone's acceptance run, on a connected emulator
@@ -505,7 +524,7 @@ android-converge: android-app
 # real mDNS discovery and a real geofence firing both need a physical device.
 android-accept: android-app
 	@echo '--- android: acceptance'
-	@cargo build -p capture-cli -p capture-syncd
+	@$(CARGO) build -p capture-cli -p capture-syncd
 	@set -e; . ./tools/android-env.sh; python3 tools/acceptance.py
 
 ## android-release: build the application as it would actually ship
@@ -526,8 +545,8 @@ android-accept: android-app
 android-release:
 	@echo '--- android: release library'
 	@set -e; . ./tools/android-env.sh; \
-	 cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
+	 $(SCOPE) cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API \
 	   -o android/app/jniLibs/release build -p capture-ffi --release
 	@echo '--- android: release app'
-	@set -e; . ./tools/android-env.sh; cd android && ./gradlew --quiet assembleRelease
+	@set -e; . ./tools/android-env.sh; cd android && $(SCOPE) ./gradlew --quiet assembleRelease
 	@ls -la android/app/build/outputs/apk/release/app-release.apk

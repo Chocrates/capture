@@ -1192,3 +1192,341 @@ fn nonsense_is_not_a_readmission_request() {
         );
     }
 }
+
+// ------------------------------------------------------------- kinds -------
+//
+// Saying what a capture is, and asking what is outstanding — both through the
+// binding rather than the store, because the generator, JNA and the ABI are
+// exactly the layer the Rust suite does not cover. A pinned flag lost in
+// translation looks correct on both sides of it.
+
+/// Run the sweep the way opening a session does, against an archive's store.
+fn sweep(root: &str) -> usize {
+    let paths = capture_store::paths::StorePaths::under(std::path::Path::new(root));
+    let mut s = capture_store::session::Session::open(paths).unwrap();
+    capture_store::promote::sweep(&mut s).unwrap()
+}
+
+fn kind_of(a: &Archive, slug: &str) -> String {
+    a.note(slug.to_string()).unwrap().kind
+}
+
+#[test]
+fn a_correction_through_the_binding_survives_a_later_sweep() {
+    // The recognizer would call this an event — a day and a clock time, well
+    // over the floor. A person saying it is a task has to win, and has to keep
+    // winning however many times the grammar is re-run.
+    let root = scratch("correction-sticks");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("dentist thursday 2pm".into()).unwrap() else {
+        panic!("it stored");
+    };
+    sweep(&root);
+    assert_eq!(kind_of(&a, &slug), "event", "the recognizer's own answer");
+
+    a.as_task(slug.clone(), None).unwrap();
+    assert_eq!(kind_of(&a, &slug), "task");
+
+    // Twice, because once could be a sweep that simply had nothing to do.
+    sweep(&root);
+    sweep(&root);
+    assert_eq!(
+        kind_of(&a, &slug),
+        "task",
+        "a reparse displaced somebody's correction"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn saying_what_something_is_does_not_touch_what_was_captured() {
+    // Promotion annotates; it never rewrites (§3.1.3). This is the invariant a
+    // reclassify surface is most likely to break, so it is checked on every
+    // path that writes a kind.
+    let root = scratch("text-untouched");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let text = "send sarah the migration doc";
+    let Captured::Stored { slug } = a.capture(text.into()).unwrap() else {
+        panic!("it stored");
+    };
+
+    for step in ["accept", "as_task", "set_kind_note", "as_task_due"] {
+        match step {
+            // Every path that writes a kind, including the one that takes the
+            // parser's own reading — a suggestion applied is still a promotion,
+            // and a promotion annotates rather than rewrites.
+            "accept" => {
+                a.set_kind(slug.clone(), capture_ffi::NoteKind::Note)
+                    .unwrap();
+                a.accept(slug.clone()).unwrap();
+            }
+            "as_task" => a.as_task(slug.clone(), None).unwrap(),
+            "set_kind_note" => a
+                .set_kind(slug.clone(), capture_ffi::NoteKind::Note)
+                .unwrap(),
+            _ => a.as_task(slug.clone(), Some("2026-09-20".into())).unwrap(),
+        }
+        assert_eq!(
+            a.note(slug.clone()).unwrap().text.as_deref(),
+            Some(text),
+            "the captured text changed after {step}"
+        );
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_bare_task_verb_is_only_a_task_once_somebody_says_so() {
+    // The floor refusing to guess, and the correction that makes the refusal
+    // survivable. Lowering the floor would remove the need for the second half
+    // by making the first half wrong more often.
+    let root = scratch("verb-alone");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("send sarah the migration doc".into()).unwrap()
+    else {
+        panic!("it stored");
+    };
+    sweep(&root);
+    assert_eq!(kind_of(&a, &slug), "note", "a verb alone was promoted");
+    assert!(a.tasks().unwrap().is_empty(), "a note reached the tasks");
+
+    a.as_task(slug.clone(), None).unwrap();
+    let tasks = a.tasks().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].slug, slug);
+    assert_eq!(tasks[0].band, capture_ffi::TaskBand::Undated);
+    assert!(tasks[0].due.is_none());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_finished_task_is_not_outstanding_and_a_demoted_one_is_not_a_task() {
+    let root = scratch("leaves-the-bands");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("call the dentist".into()).unwrap() else {
+        panic!("it stored");
+    };
+    a.as_task(slug.clone(), None).unwrap();
+    assert_eq!(a.tasks().unwrap().len(), 1);
+
+    a.set_done(slug.clone(), true).unwrap();
+    assert!(
+        a.tasks().unwrap().is_empty(),
+        "a finished task stayed outstanding"
+    );
+
+    // Undone, then demoted. Both directions exist because a thing wrongly
+    // promoted is as ordinary as a thing wrongly left alone.
+    a.set_done(slug.clone(), false).unwrap();
+    assert_eq!(
+        a.tasks().unwrap().len(),
+        1,
+        "un-ticking did not bring it back"
+    );
+
+    a.set_kind(slug.clone(), capture_ffi::NoteKind::Note)
+        .unwrap();
+    assert_eq!(kind_of(&a, &slug), "note");
+    assert!(a.tasks().unwrap().is_empty(), "a plain note is not a task");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_due_date_crosses_as_a_floating_day() {
+    // Never an instant. "Due Friday" is not 00:00 UTC on Friday (§3.6), and the
+    // string that comes back is the normalised day rather than an epoch.
+    let root = scratch("floating-due");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("file the accounts".into()).unwrap() else {
+        panic!("it stored");
+    };
+    // Far enough out that the test does not start failing by being old.
+    // `tasks()` bands against the real clock, deliberately: what day it is has
+    // one implementation and the caller does not get to supply its own.
+    a.as_task(slug.clone(), Some("2099-01-01".into())).unwrap();
+
+    let tasks = a.tasks().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].due.as_deref(), Some("2099-01-01"));
+    assert_eq!(tasks[0].band, capture_ffi::TaskBand::Due);
+
+    // And a day already gone is overdue rather than merely due.
+    a.as_task(slug.clone(), Some("2020-01-01".into())).unwrap();
+    assert_eq!(a.tasks().unwrap()[0].band, capture_ffi::TaskBand::Overdue);
+    a.as_task(slug.clone(), Some("2099-01-01".into())).unwrap();
+
+    // A day is padded or it is not a day. `FloatingDate::parse` is a
+    // fixed-width read, so `2026-6-1` is refused rather than normalised —
+    // which is worth pinning down, because the comment above `as_task` claims
+    // the opposite and a caller believing it would build the string wrong.
+    for not_a_date in ["2026-6-1", "the first of june", "", "2026-13-01"] {
+        assert!(
+            a.as_task(slug.clone(), Some(not_a_date.into())).is_err(),
+            "{not_a_date:?} was accepted as a date"
+        );
+    }
+
+    // Refused means refused: the task still carries the day it was given.
+    assert_eq!(
+        a.tasks().unwrap()[0].due.as_deref(),
+        Some("2099-01-01"),
+        "a rejected date disturbed the one already set"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_suggestion_is_offered_and_can_be_taken() {
+    // The floor's other half. "send sarah the migration doc" scores 40 against
+    // a floor of 75, so the recognizer will not act on it — and the person who
+    // typed it is better placed than the parser to say it was a task.
+    let root = scratch("accept-suggestion");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("send sarah the migration doc".into()).unwrap()
+    else {
+        panic!("it stored");
+    };
+    sweep(&root);
+
+    assert_eq!(
+        kind_of(&a, &slug),
+        "note",
+        "it was promoted without being asked"
+    );
+    let offered = a.suggestion(slug.clone()).unwrap();
+    assert!(
+        offered.as_deref().unwrap_or_default().contains("a task"),
+        "expected a task suggestion, got {offered:?}"
+    );
+
+    assert_eq!(a.accept(slug.clone()).unwrap(), "task");
+    assert_eq!(kind_of(&a, &slug), "task");
+
+    // Pinned, so the grammar does not take it back.
+    sweep(&root);
+    sweep(&root);
+    assert_eq!(
+        kind_of(&a, &slug),
+        "task",
+        "a sweep undid an accepted reading"
+    );
+
+    // And it is outstanding, which is the point of having accepted it.
+    let tasks = a.tasks().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].band, capture_ffi::TaskBand::Undated);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn there_is_nothing_to_accept_on_a_confident_reading_or_a_plain_note() {
+    let root = scratch("nothing-to-accept");
+    let a = Archive::open(root.clone()).unwrap();
+
+    // Well over the floor: already applied, so it was never a suggestion.
+    let Captured::Stored { slug: confident } = a.capture("dentist thursday 2pm".into()).unwrap()
+    else {
+        panic!("it stored");
+    };
+    sweep(&root);
+    assert_eq!(kind_of(&a, &confident), "event");
+    assert!(a.suggestion(confident.clone()).unwrap().is_none());
+    assert!(
+        a.accept(confident.clone()).is_err(),
+        "accepting an applied reading should refuse"
+    );
+
+    // Nothing temporal in it at all.
+    let Captured::Stored { slug: prose } =
+        a.capture("the sky was a bright cold blue".into()).unwrap()
+    else {
+        panic!("it stored");
+    };
+    sweep(&root);
+    assert!(a.suggestion(prose.clone()).unwrap().is_none());
+    assert!(
+        a.accept(prose.clone()).is_err(),
+        "there was nothing to take"
+    );
+    assert_eq!(kind_of(&a, &prose), "note");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// What the task read costs at a few hundred open tasks.
+///
+/// A measurement rather than an assertion, for the reason the timeline's
+/// version gives: a threshold in CI measures whatever else the machine was
+/// doing. The claim worth checking is the shape — one indexed query against
+/// `promotions`, banded in the store, rather than a query per row.
+///
+/// `cargo test -p capture-ffi --test surface -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, not an assertion"]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measuring how long a read takes is what a monotonic clock is for"
+)]
+fn what_the_task_read_costs() {
+    let root = scratch("task-cost");
+    let a = Archive::open(root.clone()).unwrap();
+
+    // A spread across all three bands, because banding is the work this read
+    // does that `promoted("task", n)` does not.
+    let mut slugs = Vec::new();
+    for i in 0..300 {
+        let Captured::Stored { slug } = a.capture(format!("a thing to do, number {i}")).unwrap()
+        else {
+            panic!("spooled");
+        };
+        slugs.push(slug);
+    }
+    a.settle().unwrap();
+
+    for (i, slug) in slugs.iter().enumerate() {
+        let due = match i % 3 {
+            0 => None,
+            1 => Some(String::from("2020-01-01")),
+            _ => Some(String::from("2099-01-01")),
+        };
+        a.as_task(slug.clone(), due).unwrap();
+    }
+    a.settle().unwrap();
+
+    // Warm, so this is the read rather than the first open of the database.
+    let _ = a.tasks().unwrap();
+
+    let runs = 20;
+    let began = std::time::Instant::now();
+    for _ in 0..runs {
+        assert_eq!(a.tasks().unwrap().len(), 300);
+    }
+    let each = began.elapsed() / runs;
+
+    let rows = a.tasks().unwrap();
+    let overdue = rows
+        .iter()
+        .filter(|r| r.band == capture_ffi::TaskBand::Overdue)
+        .count();
+    let undated = rows
+        .iter()
+        .filter(|r| r.band == capture_ffi::TaskBand::Undated)
+        .count();
+
+    println!("\n  300 open tasks ({overdue} overdue, {undated} undated): {each:?} per read\n");
+
+    std::fs::remove_dir_all(&root).ok();
+}

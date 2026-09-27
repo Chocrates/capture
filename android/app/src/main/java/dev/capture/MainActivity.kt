@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Favorite
@@ -74,7 +75,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         model = Model(Store.of(this))
-        model.go(Screen.Timeline)
+        // Opens on what is outstanding, not on the log. See the first entry
+        // in TABS for why.
+        model.go(Screen.Tasks)
 
         // Asked for once and then owned by the platform. A phone cannot keep a
         // daemon, so the scheduling `capture-syncd` does with a timer is done
@@ -291,7 +294,15 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                     onOpen = { model.go(Screen.Note(it)) },
                     onTick = model::tick,
                 )
-                is Screen.Agenda -> Agenda(screen.day, model.agenda)
+                is Screen.Agenda -> Agenda(screen.day, model.agenda) {
+                    model.go(Screen.Tasks)
+                }
+                is Screen.Tasks -> Tasks(
+                    tasks = model.tasks,
+                    onOpen = { model.go(Screen.Note(it)) },
+                    onDone = model::setDone,
+                    onAgenda = { model.go(Screen.Agenda(model.today())) },
+                )
                 is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
                 is Screen.Health -> Health(
                     model.conditions,
@@ -416,6 +427,29 @@ private class Tab(
  * use rather than mine now.
  */
 private val TABS = listOf(
+    // First, and the application opens here.
+    //
+    // The timeline held this place and should not have. It is the log with
+    // everything in it, in the order things were written — which is the right
+    // shape for an archive and the wrong one for a landing surface, because
+    // "what have I got outstanding" is not answerable by scrolling what you
+    // happened to write most recently.
+    //
+    // One tab for both halves of §3.6, opening on the half asked more often.
+    // Not an eighth tab: the row is already one past what this width holds and
+    // the note below says what that costs. The agenda is one tap from this
+    // screen's header, and cannot answer for anything undated anyway — an
+    // undated task has no day to appear on.
+    //
+    // They stay separate screens. Folding one into the other re-conflates what
+    // occupies time with what merely has state, which is what §3.6's table
+    // exists to keep apart.
+    Tab(
+        "Tasks",
+        Icons.Filled.CheckCircle,
+        { it is Screen.Tasks || it is Screen.Agenda },
+        { Screen.Tasks },
+    ),
     Tab(
         // "Timeline" rather than "Notes" everywhere else, and "Notes" here.
         //
@@ -430,7 +464,6 @@ private val TABS = listOf(
         { it is Screen.Timeline || it is Screen.Note },
         { Screen.Timeline },
     ),
-    Tab("Agenda", Icons.Filled.DateRange, { it is Screen.Agenda }, { Screen.Agenda(it.today()) }),
     Tab("Pages", Icons.Filled.Menu, { it is Screen.Wiki }, { Screen.Wiki }),
     Tab("Search", Icons.Filled.Search, { it is Screen.Search }, { Screen.Search }),
     Tab("Plans", Icons.Filled.Place, { it is Screen.Plans }, { Screen.Plans }),

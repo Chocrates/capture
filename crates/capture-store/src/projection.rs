@@ -631,6 +631,44 @@ pub struct ListEntry {
     pub task: Option<EventId>,
 }
 
+/// Where an open task sits when a surface asks what is outstanding.
+///
+/// Decided here rather than by each surface. "Overdue" is a comparison against
+/// today in a named zone, and a phone and a window working that out separately
+/// is two answers on the same day — the same argument that put the descriptor
+/// in the projection rather than in each renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Band {
+    /// Due on a day that has passed.
+    Overdue,
+    /// Due on today or a day still to come.
+    Due,
+    /// Open, with no due date at all.
+    ///
+    /// The ordinary case rather than the exception. A bare task verb is below
+    /// the confidence floor, so most tasks arrive by somebody saying one is a
+    /// task — and somebody saying "send sarah the migration doc" is not saying
+    /// when.
+    Undated,
+}
+
+/// One open task, with the band it belongs to.
+///
+/// Finished tasks are absent entirely. §0 rates nothing that scores the user,
+/// so there is no completed band to keep them for, and a surface asking what is
+/// outstanding is not asking what was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRow {
+    pub tgt: EventId,
+    /// The one-line rendering the projection already keeps, so this surface
+    /// cannot format the fields differently from any other.
+    pub descriptor: String,
+    /// The floating due date as stored — never an instant. "due Friday" is not
+    /// 00:00 UTC on Friday (§3.6).
+    pub due: Option<String>,
+    pub band: Band,
+}
+
 #[derive(Clone, Debug)]
 pub struct NoteRow {
     pub tgt: EventId,
@@ -1202,6 +1240,54 @@ impl Store {
             if let Some(id) = id_from(r?) {
                 out.push(id);
             }
+        }
+        Ok(out)
+    }
+
+    /// Every open task, banded into overdue, due and undated.
+    ///
+    /// One query rather than three. `tasks_overdue` and `tasks_due_on` both
+    /// require `due IS NOT NULL`, so between them they cannot reach a task with
+    /// no due date — which is most of them, and the reason this exists. Asking
+    /// three times would also give three chances to disagree about what today
+    /// is, since each call would carry its own.
+    ///
+    /// `today` is a floating date in the reading zone, compared as a string.
+    /// Both sides are ISO-8601 days, where lexical and chronological order are
+    /// the same thing, and neither is an instant — comparing against one would
+    /// make a due date an appointment nobody made.
+    ///
+    /// Dated tasks come first in due order, undated ones after in capture
+    /// order, newest first.
+    pub fn tasks_outstanding(&self, today: &str) -> Result<Vec<TaskRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT p.tgt, p.descriptor, p.due
+             FROM promotions p JOIN notes n ON n.tgt = p.tgt
+             WHERE p.kind = 'task' AND COALESCE(p.done, 0) = 0
+             ORDER BY (p.due IS NULL) ASC, p.due ASC, n.created_wall DESC",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, descriptor, due) = r?;
+            let Some(tgt) = id_from(id) else { continue };
+            let band = match due.as_deref() {
+                None => Band::Undated,
+                Some(d) if d < today => Band::Overdue,
+                Some(_) => Band::Due,
+            };
+            out.push(TaskRow {
+                tgt,
+                descriptor,
+                due,
+                band,
+            });
         }
         Ok(out)
     }

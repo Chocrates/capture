@@ -59,13 +59,39 @@ pub fn promoted_from(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> 
         return None;
     }
 
+    // A verb with nothing else stays a suggestion. `clears_floor` has already
+    // refused it — it scores 0.40 — and this second refusal is here so that
+    // raising a confidence band later cannot promote one by accident.
+    if matches!(r.shape, Shape::Task { due: None }) {
+        return None;
+    }
+
+    shape_as(r, zone, now)
+}
+
+/// What a recognition describes, with no floor applied.
+///
+/// Separated from `promoted_from` so that a *person* can take a reading the
+/// parser would not act on alone. That is not the same as lowering the floor:
+/// the floor decides what the machine may write unasked, and this decides what
+/// somebody may confirm. §3.1.3 rates a wrong promotion as costing a calendar
+/// entry where a wrong suggestion costs a glance — and a confirmed suggestion
+/// is neither, because the person reading it is the one who wrote the text.
+///
+/// Unlike `promoted_from`, a bare task verb answers here: "send sarah the
+/// migration doc" is exactly the reading somebody would want to accept, and
+/// refusing it would make the one shape the floor is most cautious about the
+/// one shape confirming cannot reach.
+pub fn shape_as(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
     match &r.shape {
         Shape::Nothing => None,
 
-        // A verb with nothing else stays a suggestion. It is below the floor
-        // and `clears_floor` has already refused it; the arm is here so that
-        // adding a band later cannot promote one by accident.
-        Shape::Task { due: None } => None,
+        // Something to do, with no day attached.
+        Shape::Task { due: None } => Some(Promoted::Task(TaskFields {
+            done: false,
+            due: None,
+            order: None,
+        })),
 
         // Something to do, due on a day. A floating date and never an instant:
         // "due Friday" is not 00:00 UTC on Friday, and §3.6 makes that the
@@ -331,6 +357,80 @@ pub fn as_task(paths: &StorePaths, name: &str, due: Option<&str>) -> Result<()> 
             order: None,
         }),
     )
+}
+
+/// Take the reading the recognizer offered but would not act on.
+///
+/// The other half of the floor. A recognition under it is shown as a
+/// suggestion and applied to nothing, which is right for a machine deciding
+/// alone and wrong as a final answer: the person reading the suggestion is the
+/// one who wrote the text, and they are better placed than the parser to say
+/// whether it meant Tuesday.
+///
+/// The result is pinned like any other correction, so a later grammar bump does
+/// not quietly undo it.
+///
+/// Read against the moment the note was captured, never against now — the same
+/// property `sweep` is arranged around. "Meeting at 14:00" written on Tuesday
+/// means Tuesday however long it sits there before somebody confirms it, and
+/// accepting a suggestion must not become a way to reschedule by reading.
+///
+/// Refuses where there is nothing to take: a note the recognizer finds nothing
+/// temporal in, and one whose reading already clears the floor and is therefore
+/// not a suggestion at all. Both are refusals rather than silent successes,
+/// because a surface offering "accept" on a note that has nothing to accept has
+/// asked the wrong question.
+pub fn accept(paths: &StorePaths, name: &str) -> Result<Promoted> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = crate::mutate::find(&s, name)?;
+
+    let row = s
+        .state
+        .note(&tgt)?
+        .ok_or_else(|| Error::NotFound(name.to_string()))?;
+    let text = row
+        .text
+        .ok_or_else(|| Error::Usage(String::from("that note has no readable text")))?;
+
+    // UTC where no zone was recorded, for the reason the sweep gives: reading
+    // it in this machine's zone would make one note parse differently on two
+    // devices.
+    let zone = row
+        .tz
+        .as_deref()
+        .and_then(Zone::new)
+        .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"));
+    let captured = row.created.0 as i64;
+
+    let r = capture_parse::recognize(&text, captured, zone);
+    if r.confidence == 0 {
+        return Err(Error::Usage(String::from(
+            "there is nothing in that note to accept",
+        )));
+    }
+    if clears_floor(&r) {
+        return Err(Error::Usage(String::from(
+            "that reading was not a suggestion; it has already been applied",
+        )));
+    }
+
+    let as_ = shape_as(&r, zone, captured)
+        .ok_or_else(|| Error::Usage(String::from("there is nothing in that note to accept")))?;
+
+    s.append(Kind::PROMOTE, Some(tgt), None, |nonce| {
+        encode(&PromoteBody {
+            nonce,
+            as_: as_.clone(),
+            pinned: true,
+            // A person did this, even though a parser proposed it. Recording a
+            // grammar version here would let the next sweep treat it as its own
+            // work and reparse over it.
+            grammar: None,
+            confidence: None,
+        })
+    })?;
+
+    Ok(as_)
 }
 
 fn alloc_string(d: capture_time::FloatingDate) -> String {

@@ -22,6 +22,8 @@ import uniffi.capture_ffi.Resurfaced
 import uniffi.capture_ffi.Watching
 import uniffi.capture_ffi.Pending
 import uniffi.capture_ffi.Ticked
+import uniffi.capture_ffi.TaskLine
+import uniffi.capture_ffi.NoteKind
 
 /** Which surface is showing. */
 sealed interface Screen {
@@ -34,6 +36,16 @@ sealed interface Screen {
     data object Pairing : Screen
     data object Review : Screen
     data object Plans : Screen
+    /**
+     * What is outstanding.
+     *
+     * A route of its own rather than a band inside the agenda. §3.6 separates
+     * time from state — an event occupies time and has none, a task has state
+     * and occupies no time — and folding tasks into the day's view would
+     * re-conflate exactly what that table exists to keep apart. An undated
+     * task has no day to be folded onto at all, and it is the ordinary case.
+     */
+    data object Tasks : Screen
     /**
      * A list, by its tag.
      *
@@ -59,10 +71,25 @@ sealed interface Screen {
  */
 class Model(private val archive: Archive) : ViewModel() {
 
-    var screen by mutableStateOf<Screen>(Screen.Timeline)
+    // Tasks rather than the timeline, matching where the application opens.
+    // A first frame drawn on one surface and replaced by another is a flicker
+    // somebody has to look past on every launch.
+    var screen by mutableStateOf<Screen>(Screen.Tasks)
         private set
 
     var timeline by mutableStateOf<List<NoteSummary>>(emptyList())
+        private set
+
+    /** Open tasks, banded by the archive rather than by this screen. */
+    var tasks by mutableStateOf<List<TaskLine>>(emptyList())
+        private set
+
+    /**
+     * What the archive thinks the open note might be, where it was unsure
+     * enough not to have acted. Read only on the note page, because answering
+     * it costs a parse.
+     */
+    var suggestion by mutableStateOf<String?>(null)
         private set
     var hits by mutableStateOf<List<NoteSummary>>(emptyList())
         private set
@@ -218,6 +245,7 @@ class Model(private val archive: Archive) : ViewModel() {
         screen = to
         when (to) {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
+            is Screen.Tasks -> load { tasks = archive.tasks() }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load { pages = archive.named() }
             is Screen.ListOf -> load { list = archive.list(to.tag) }
@@ -231,6 +259,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 note = archive.note(to.name)
                 pending = archive.pendingRedaction(to.name)
                 recording = archive.recordingOf(to.name)
+                suggestion = archive.suggestion(to.name)
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
@@ -285,6 +314,22 @@ class Model(private val archive: Archive) : ViewModel() {
 
     fun setDone(name: String, done: Boolean) = after(name) { archive.setDone(name, done) }
 
+    /**
+     * Say what a capture is.
+     *
+     * Pinned by the archive, so no later reparse takes it back. Offered on the
+     * note page and deliberately nowhere else: a control on a scrolling row is
+     * a mis-tap away from writing a correction that outlives every future
+     * grammar.
+     */
+    fun setKind(name: String, kind: NoteKind) = after(name) { archive.setKind(name, kind) }
+
+    /** Make something a task, with a due date or without one. */
+    fun asTask(name: String, due: String?) = after(name) { archive.asTask(name, due) }
+
+    /** Take the reading the archive offered but would not act on by itself. */
+    fun accept(name: String) = after(name) { archive.accept(name) }
+
     fun redact(name: String) = after(name) { archive.redact(name) }
 
     /**
@@ -303,6 +348,9 @@ class Model(private val archive: Archive) : ViewModel() {
         work()
         note = archive.note(name)
         pending = archive.pendingRedaction(name)
+        // A kind that just changed is a kind the recognizer is no longer
+        // suggesting, so the offer has to be re-asked rather than left up.
+        suggestion = archive.suggestion(name)
         // The lists behind this note are now stale in a way that is visible
         // the moment the back gesture happens.
         timeline = archive.timeline(100u)
@@ -447,6 +495,7 @@ class Model(private val archive: Archive) : ViewModel() {
     private suspend fun reread() {
         when (val here = screen) {
             is Screen.Timeline -> timeline = archive.timeline(100u)
+            is Screen.Tasks -> tasks = archive.tasks()
             is Screen.Agenda -> agenda = archive.agenda(here.day)
             is Screen.ListOf -> list = archive.list(here.tag)
             is Screen.Wiki -> pages = archive.named()

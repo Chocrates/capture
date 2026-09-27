@@ -321,16 +321,24 @@ pub fn reconcile<T: capture_sync::transport::Transport>(
     // awaiting its own, and a stall in one direction would be
     // indistinguishable from a stall in the other.
     let mut mine = StoreBlobs::new(paths.clone());
-    if dialled {
-        capture_sync::blob::fetch(secure, &mut mine, spent)
+    let moved = if dialled {
+        let moved = capture_sync::blob::fetch(secure, &mut mine, spent)
             .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
         capture_sync::blob::serve(secure, &mine)
             .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
+        moved
     } else {
         capture_sync::blob::serve(secure, &mine)
             .map_err(|e| Error::Usage(format!("serving blobs failed: {e:?}")))?;
         capture_sync::blob::fetch(secure, &mut mine, spent)
-            .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?;
+            .map_err(|e| Error::Usage(format!("fetching blobs failed: {e:?}")))?
+    };
+
+    // What the peer did not have. Thrown away, this was the reason a recording
+    // whose only copy had been evicted said "it will arrive on the next sync"
+    // for ever: nothing ever learned that every device asked had said no.
+    for name in &moved.missing {
+        ops.blob_refused(name, now)?;
     }
 
     // Last, because it needs the session back — the gate borrowed its log and

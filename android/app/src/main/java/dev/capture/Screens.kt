@@ -8,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -47,6 +48,8 @@ import uniffi.capture_ffi.NoteSummary
 import uniffi.capture_ffi.Peer
 import uniffi.capture_ffi.Pending
 import uniffi.capture_ffi.Recording
+import uniffi.capture_ffi.TaskBand
+import uniffi.capture_ffi.TaskLine
 
 /**
  * The timeline: everything, newest first, grouped by the day it belongs to.
@@ -264,6 +267,18 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 Text("Muted.", style = MaterialTheme.typography.labelMedium)
             }
             if (note.pinned) Text("Pinned.", style = MaterialTheme.typography.labelMedium)
+            // A reading the archive was not confident enough to act on.
+            //
+            // Offered rather than applied, which is what the confidence floor
+            // is for: below it the guesses are the ones most likely to be
+            // wrong, and a wrong promotion costs a calendar entry where a
+            // wrong suggestion costs a glance. Accepting is the other half of
+            // that bargain — the person reading this wrote the text, and is
+            // better placed than the parser to say whether it meant Tuesday.
+            model.suggestion?.let { offered ->
+                Text(offered, style = MaterialTheme.typography.labelMedium)
+                TextButton({ model.accept(note.slug) }) { Text("Yes, that's what it is") }
+            }
             recording?.let { Listen(it, model) }
         }
         HorizontalDivider()
@@ -293,7 +308,19 @@ private fun Listen(recording: Recording, model: Model) {
                 ?: "A recording",
             style = MaterialTheme.typography.labelMedium,
         )
-        if (!recording.here) {
+        val gone = recording.unavailableForDays
+        if (!recording.here && gone != null) {
+            // Not "no device has it": only that none this phone has reached
+            // does. A laptop shut for a week holding the only copy looks
+            // exactly like this, so the words leave room for it.
+            Text(
+                "Not on any device this phone has reached in " +
+                    (if (gone <= 1u) "the last day" else "$gone days") +
+                    ". If the device that recorded it no longer has it, it " +
+                    "will not arrive.",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        } else if (!recording.here) {
             Text(
                 "Not on this device yet. It will arrive on the next sync with " +
                     "a device that has it.",
@@ -351,9 +378,23 @@ fun Search(
  * *due* on a day is a third thing again (§4.4, §3.6).
  */
 @Composable
-fun Agenda(day: String, entries: List<AgendaEntry>) {
+fun Agenda(day: String, entries: List<AgendaEntry>, onTasks: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        Text(day, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(day, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.weight(1f))
+            // The other half of §3.6, one tap away. What occupies time is
+            // here; what is merely owed is there, including everything with no
+            // day at all — which this screen has no way to show.
+            Text(
+                "Outstanding",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.clickable { onTasks() },
+            )
+        }
         if (entries.isEmpty()) {
             Empty("Nothing on this day.")
             return@Column
@@ -378,6 +419,97 @@ fun Agenda(day: String, entries: List<AgendaEntry>) {
             if (timed.isNotEmpty()) {
                 item { Band("During the day") }
                 item { Hours(timed) }
+            }
+        }
+    }
+}
+
+/**
+ * What is outstanding.
+ *
+ * Three bands, and the third is the one this screen exists for. A task with no
+ * due date reaches no other surface — the timeline carries it in capture order
+ * among everything else, and the agenda is a view of time, which §3.6 says is
+ * the one thing a task does not occupy.
+ *
+ * The bands arrive decided. Whether a day has passed is a comparison against
+ * today in the reading zone, and this screen working that out for itself would
+ * be a second answer to a question the archive has already answered.
+ *
+ * Finished tasks are not here at all: nothing counts them, and a surface asking
+ * what is outstanding is not asking what was.
+ */
+@Composable
+fun Tasks(
+    tasks: List<TaskLine>,
+    onOpen: (String) -> Unit,
+    onDone: (String, Boolean) -> Unit,
+    onAgenda: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Outstanding", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.weight(1f))
+        Text(
+            "Agenda",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.clickable { onAgenda() },
+        )
+    }
+    if (tasks.isEmpty()) {
+        // Plainly, and as a fact rather than an achievement. §0: nothing here
+        // scores the user, so this is not congratulation and not an error.
+        Empty("Nothing outstanding.")
+        return
+    }
+
+    val overdue = tasks.filter { it.band == TaskBand.OVERDUE }
+    val due = tasks.filter { it.band == TaskBand.DUE }
+    val undated = tasks.filter { it.band == TaskBand.UNDATED }
+
+    LazyColumn(Modifier.fillMaxSize()) {
+        if (overdue.isNotEmpty()) {
+            item { Band("Overdue") }
+            items(overdue) { TaskRow(it, onOpen, onDone) }
+        }
+        if (due.isNotEmpty()) {
+            item { Band("Due") }
+            items(due) { TaskRow(it, onOpen, onDone) }
+        }
+        if (undated.isNotEmpty()) {
+            // Labelled even when it is the only band on screen. It is the
+            // ordinary case rather than a leftover: the recognizer refuses to
+            // promote a bare task verb, so most tasks are named by a person,
+            // and naming one is not saying when.
+            item { Band("No date") }
+            items(undated) { TaskRow(it, onOpen, onDone) }
+        }
+    }
+}
+
+@Composable
+private fun TaskRow(task: TaskLine, onOpen: (String) -> Unit, onDone: (String, Boolean) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onOpen(task.slug) }
+            .padding(16.dp, 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Ticking is the same `setDone` the note page and the command line
+        // write. A second path to completion would be a second answer about
+        // what done means.
+        Checkbox(checked = false, onCheckedChange = { onDone(task.slug, true) })
+        Column(Modifier.padding(start = 8.dp)) {
+            Text(
+                task.text ?: "A capture with no readable text",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            // The archive's own rendering of the fields, not this screen's.
+            if (task.descriptor.isNotEmpty()) {
+                Text(task.descriptor, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
