@@ -577,10 +577,29 @@ pub fn mentioning(sigil: String, value: String) -> std::result::Result<Vec<Note>
             .next()
             .ok_or_else(|| Error::Usage("a mention needs its sigil".into()))?;
         let s = read_only()?;
-        s.mentioning(c, &value, now_ms())?
-            .into_iter()
-            .map(|n| rendered(&s, n))
-            .collect()
+        let kind = entity_kind(c)?;
+
+        // Through the entity rather than the string, which is the difference
+        // this change makes here. `mentioning` answers for one exact spelling;
+        // after a merge a page holds what *either* spelling named, and after a
+        // rename it is called something neither of them says.
+        //
+        // Falls back to the string where no entity has been derived for it,
+        // which should not happen for `@`, `^` or `#` — but a page that came
+        // back empty because an index was stale would look exactly like a page
+        // with nothing on it, and those are different facts.
+        match s.entity(kind, &value)? {
+            Some(ent) => s
+                .entity_notes(&ent.ent, now_ms())?
+                .into_iter()
+                .map(|n| rendered(&s, n))
+                .collect(),
+            None => s
+                .mentioning(c, &value, now_ms())?
+                .into_iter()
+                .map(|n| rendered(&s, n))
+                .collect(),
+        }
     })())
 }
 
@@ -701,24 +720,111 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
             })
             .collect();
 
+        // Entities rather than distinct strings. The difference shows up in two
+        // places somebody would otherwise report as bugs: a renamed person is
+        // listed under the name they chose, and a merged-away spelling is gone
+        // from the sidebar instead of sitting there with a page holding nothing.
         let listed = |sigil: char| -> Result<Vec<Entry>> {
-            Ok(s.distinct_mentions(sigil)?
+            let kind = entity_kind(sigil)?;
+            let mut rows = s.entities_of_kind(kind, now_ms())?;
+            rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.display.cmp(&b.display)));
+            Ok(rows
                 .into_iter()
-                .map(|(name, count)| Entry {
-                    name,
+                .map(|e| Entry {
+                    name: e.display,
                     slug: None,
                     parent: None,
-                    count: Some(count),
+                    count: Some(e.count as u32),
                 })
                 .collect())
         };
+
+        // Tags keep the older path deliberately. `distinct_mentions('#')` unions
+        // the `#` written in text with the OR-Set a `tag` event maintains, and
+        // an entity is derived from text alone — so listing tags as entities
+        // would silently drop every tag added by hand.
+        //
+        // That is also the non-goal this change declared: tags already have a
+        // surface and a membership set of their own, and giving them a second
+        // identity with renaming and merging is a separate argument.
+        let tags = s
+            .distinct_mentions('#')?
+            .into_iter()
+            .map(|(name, count)| Entry {
+                name,
+                slug: None,
+                parent: None,
+                count: Some(count),
+            })
+            .collect();
 
         Ok(Index {
             pages,
             people: listed('@')?,
             projects: listed('^')?,
-            tags: listed('#')?,
+            tags,
         })
+    })())
+}
+
+/// Which kind of entity a sigil names.
+///
+/// One mapping, shared by every command here, so the window cannot decide that
+/// `^` means something different from what the store thinks it means.
+fn entity_kind(sigil: char) -> Result<&'static str> {
+    match sigil {
+        '@' => Ok("person"),
+        '^' => Ok("project"),
+        '#' => Ok("tag"),
+        other => Err(Error::Usage(format!(
+            "'{other}' is not a mention sigil; use @, ^ or #"
+        ))),
+    }
+}
+
+/// Give an entity a name of your choosing.
+///
+/// §8.4 makes the window the first-party surface, so identity is correctable
+/// here and not only from a command line. Extraction cannot know that two
+/// spellings are one person, and the person reading the page can.
+#[tauri::command]
+pub fn rename_entity(
+    sigil: String,
+    value: String,
+    display: String,
+) -> std::result::Result<(), String> {
+    wire((|| {
+        let kind = entity_kind(sigil.chars().next().unwrap_or(' '))?;
+        capture_store::mutate::rename_entity(&paths()?, kind, &value, &display)
+    })())
+}
+
+/// Say that two entities were one all along.
+///
+/// A redirection and not a rewrite: nothing moves, and either name then reaches
+/// one page.
+#[tauri::command]
+pub fn merge_entities(
+    sigil: String,
+    from: String,
+    into: String,
+) -> std::result::Result<(), String> {
+    wire((|| {
+        let kind = entity_kind(sigil.chars().next().unwrap_or(' '))?;
+        capture_store::mutate::merge_entities(&paths()?, kind, &from, &into)
+    })())
+}
+
+/// Bind the note that *is* an entity, or unbind it.
+#[tauri::command]
+pub fn bind_backing(
+    sigil: String,
+    value: String,
+    note: Option<String>,
+) -> std::result::Result<(), String> {
+    wire((|| {
+        let kind = entity_kind(sigil.chars().next().unwrap_or(' '))?;
+        capture_store::mutate::bind_backing(&paths()?, kind, &value, note.as_deref())
     })())
 }
 

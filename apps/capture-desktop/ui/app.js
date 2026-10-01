@@ -1219,6 +1219,7 @@ async function showMentions(sigil, value, into = view) {
   }
 
   into.append(el("h2", null, `${sigil}${value}`));
+  entityActions(sigil, value, into);
 
   // One page for three sigils, from two tables. A tag is an OR-Set with its own
   // events and a mention is part of the text — a real difference underneath,
@@ -1241,6 +1242,61 @@ async function showMentions(sigil, value, into = view) {
     el("p", "hint", `${notes.length} note${notes.length === 1 ? "" : "s"}`),
   );
   for (const n of notes) into.append(noteRow(n, openNote));
+}
+
+/// Renaming, merging and binding, on the page they are about.
+///
+/// §8.4 makes the window the first-party surface, and identity is the one thing
+/// extraction cannot get right on its own: two spellings are indistinguishable
+/// from two people by phrasing alone, so somebody has to say. A correction that
+/// needed a command line would be the gradient §8.4 refuses.
+///
+/// Tags are left out. They have no identity of their own here — the sidebar
+/// lists them from the OR-Set as well as from the text — so renaming or merging
+/// one would be a different operation wearing the same word.
+function entityActions(sigil, value, into) {
+  if (sigil === "#") return;
+
+  const bar = el("div", "row");
+
+  const rename = el("button", "act", "rename");
+  rename.addEventListener("click", async () => {
+    const display = prompt(
+      `What to call ${sigil}${value}.\n\n` +
+        "The notes are unchanged, and every spelling still reaches this page.",
+    );
+    if (!display) return;
+    await call("rename_entity", { sigil, value, display });
+    showMentions(sigil, value, into);
+  });
+
+  const merge = el("button", "act", "merge into…");
+  merge.addEventListener("click", async () => {
+    const into_name = prompt(
+      `Merge ${sigil}${value} into which one?\n\n` +
+        "As written, without the sigil. Nothing moves: both names reach one\n" +
+        "page, and every note still says exactly what it said.",
+    );
+    if (!into_name) return;
+    await call("merge_entities", { sigil, from: value, into: into_name });
+    // The survivor is the page to land on, which is the one just named.
+    openMentions(sigil, into_name);
+  });
+
+  const bind = el("button", "act", "backing note…");
+  bind.addEventListener("click", async () => {
+    const note = prompt(
+      `The note that *is* ${sigil}${value}, by name.\n\n` +
+        "Blank unbinds. It keeps being whatever it already was — a task stays\n" +
+        "a task, and stays wherever tasks appear.",
+    );
+    if (note === null) return;
+    await call("bind_backing", { sigil, value, note: note || null });
+    showMentions(sigil, value, into);
+  });
+
+  bar.append(rename, merge, bind);
+  into.append(bar);
 }
 
 // ------------------------------------------------------------------- wiki ---

@@ -23,12 +23,14 @@
 //! the previous one's write-ahead log. Generations avoid the question entirely —
 //! readers notice the pointer moved and reopen.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use capture_core::{
     Dev, EventId,
     envelope::Envelope,
     fold::{Held, Names, Projection},
+    id::{EntId, casefold},
     roster::Roster,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -54,11 +56,18 @@ use crate::{Result, db};
 /// existed becomes a list on this rebuild, which is what an additive
 /// recognizer (§3.1.3) means and is intended.
 ///
+/// Version 8 adds `entities` and `entity_names`, which give the names in
+/// `mentions` an identity that survives being renamed (§4.3). Every existing
+/// note has to be re-read: the entities are derived from the sigils in the
+/// text and have never been stored, so there is nothing for a migration to
+/// fill them from. The same rebuild also applies entity-scoped mutes for the
+/// first time.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 7;
+pub const PROJECTION_SCHEMA: u32 = 8;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -186,6 +195,46 @@ CREATE TABLE IF NOT EXISTS mentions (
 -- An entity page is this query and nothing else, so it is the one that has to
 -- be fast.
 CREATE INDEX IF NOT EXISTS mentions_value ON mentions(sigil, value);
+
+-- Who the names in `mentions` turned out to be (§4.3).
+--
+-- Separate from `mentions` on purpose, and §1.4 draws it the other way — with
+-- `mentions` keyed by `ent_id` rather than by the string. Keeping the
+-- extraction keyed by what the text says has two consequences worth the
+-- divergence: a merge stays a redirection that touches no mention row, and the
+-- fast index above keeps its shape.
+--
+-- `ent_id` is derived rather than minted, so a row here is a cache of a
+-- computation and never the truth. `display` is the spelling somebody chose if
+-- they have, and otherwise the earliest one written — which is why this table
+-- is recomputed whole rather than patched per note.
+CREATE TABLE IF NOT EXISTS entities (
+  ent_id      BLOB PRIMARY KEY,
+  -- person | project | tag, from the sigil that named it.
+  kind        TEXT NOT NULL,
+  display     TEXT NOT NULL,
+  -- The note that *is* this entity, where one is bound.
+  note_tgt    BLOB,
+  -- The entity this one turned out to be. Resolution follows it.
+  merged_into BLOB
+) STRICT;
+
+-- Which written spellings reach which entity.
+--
+-- More than one row per entity is the ordinary case after a merge: `@sarah` and
+-- `@sarah-chen` both land here pointing at whichever survived. Without this an
+-- entity page could only ever be the notes carrying one exact string, which is
+-- the limitation the whole change exists to remove.
+--
+-- `name` is case-folded, matching what `EntId::derive` hashes, so a lookup does
+-- not have to guess which spelling to try.
+CREATE TABLE IF NOT EXISTS entity_names (
+  kind   TEXT NOT NULL,
+  name   TEXT NOT NULL,
+  ent_id BLOB NOT NULL,
+  PRIMARY KEY (kind, name)
+) STRICT;
+CREATE INDEX IF NOT EXISTS entity_names_ent ON entity_names(ent_id);
 
 CREATE TABLE IF NOT EXISTS tags (
   tgt BLOB NOT NULL,
@@ -669,6 +718,28 @@ pub struct TaskRow {
     pub band: Band,
 }
 
+/// An entity, as a surface reads it.
+///
+/// Assembled here rather than by each surface. A page is a display name, a
+/// backing note and a count, and three surfaces computing those separately is
+/// three answers to one question — the same argument that put the descriptor in
+/// the projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityRow {
+    pub ent: EntId,
+    /// person | project | tag.
+    pub kind: String,
+    /// What to call it: the name somebody chose, or the earliest spelling.
+    pub display: String,
+    /// The note that *is* this entity, where one is bound.
+    pub backing: Option<EventId>,
+    /// Every spelling that reaches it, folded. More than one after a merge.
+    pub names: Vec<String>,
+    /// How many notes name it. Filled by the index; zero from a single read,
+    /// which is cheaper and is what a page showing the notes does not need.
+    pub count: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct NoteRow {
     pub tgt: EventId,
@@ -858,7 +929,8 @@ impl Store {
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM promotion_at; DELETE FROM held;
              DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
-             DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;",
+             DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;
+             DELETE FROM entities; DELETE FROM entity_names;",
         )?;
         write_into(&tx, p, now)?;
         tx.commit()?;
@@ -1749,6 +1821,219 @@ impl Store {
         Ok(out)
     }
 
+    /// Which entity a written spelling reaches, after every merge.
+    ///
+    /// Case-folded before the lookup, matching what the id was derived from, so
+    /// `@Sarah` and `@sarah` ask the same question.
+    pub fn entity_id(&self, kind: &str, name: &str) -> Result<Option<EntId>> {
+        let got: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT ent_id FROM entity_names WHERE kind = ?1 AND name = ?2",
+                params![kind, casefold(name)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(got.and_then(|b| b.try_into().ok()).map(EntId))
+    }
+
+    /// An entity, by a spelling that reaches it.
+    ///
+    /// `None` means no note has ever named it — which is an ordinary answer, not
+    /// a missing record. §3.7's whole claim is that this axis populates without
+    /// anybody creating anything, so there is nothing here to have failed.
+    pub fn entity(&self, kind: &str, name: &str) -> Result<Option<EntityRow>> {
+        let Some(ent) = self.entity_id(kind, name)? else {
+            return Ok(None);
+        };
+        self.entity_by_id(&ent)
+    }
+
+    /// An entity by its identity.
+    pub fn entity_by_id(&self, ent: &EntId) -> Result<Option<EntityRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT kind, display, note_tgt FROM entities WHERE ent_id = ?1",
+                params![ent.0.to_vec()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((kind, display, backing)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(EntityRow {
+            ent: *ent,
+            kind,
+            display,
+            backing: backing.and_then(id_from),
+            names: self.spellings_of(ent)?,
+            count: 0,
+        }))
+    }
+
+    /// Every written spelling that reaches an entity, so a page can say what it
+    /// has been called as well as what it is called.
+    fn spellings_of(&self, ent: &EntId) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT name FROM entity_names WHERE ent_id = ?1 ORDER BY name")?;
+        let rows = st.query_map(params![ent.0.to_vec()], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The notes naming an entity, newest first.
+    ///
+    /// The union §4.3 needs and `mentioning` could not do: every spelling that
+    /// reaches this entity, not the one string somebody happened to type. A
+    /// backing note is left out, because the page it belongs to already shows it
+    /// above this list and a row appearing twice reads as two notes.
+    ///
+    /// Muted notes are excluded on the same terms as everywhere else, and a
+    /// redacted note is absent because it has no text and so names nobody.
+    pub fn entity_notes(&self, ent: &EntId, now: u64) -> Result<Vec<NoteRow>> {
+        let backing = self
+            .entity_by_id(ent)?
+            .and_then(|e| e.backing)
+            .map(|b| b.0.to_vec());
+        // `mentions.value` keeps the spelling as written and `entity_names.name`
+        // is folded, so the join folds the mention side to match. `lower` rather
+        // than anything cleverer, because `EntId::derive` folds ASCII only and
+        // the two have to agree exactly or a name reaches no entity.
+        let sql = format!(
+            "SELECT DISTINCT {NOTE_COLUMNS}
+             FROM notes n
+             JOIN mentions m ON m.tgt = n.tgt
+             JOIN entity_names en
+               ON en.kind = CASE m.sigil
+                              WHEN '@' THEN 'person'
+                              WHEN '^' THEN 'project'
+                              WHEN '#' THEN 'tag'
+                            END
+              AND en.name = lower(m.value)
+             WHERE en.ent_id = ?1
+               AND (n.muted_until IS NULL
+                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
+             ORDER BY n.created_wall DESC"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![ent.0.to_vec(), now as i64], note_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let row: NoteRow = r?;
+            if backing.as_deref() == Some(row.tgt.0.as_slice()) {
+                continue;
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// Every entity of a kind, with how many notes name it.
+    ///
+    /// Merged-away entities are absent: only the survivor of a chain has a row,
+    /// so a merge takes a name out of this index without anything having to
+    /// remove it.
+    pub fn entities_of_kind(&self, kind: &str, now: u64) -> Result<Vec<EntityRow>> {
+        // Three grouped queries rather than three per entity.
+        //
+        // The first version asked `entity_notes` once per row, and each of those
+        // brought its own `entity_by_id` and `spellings_of` with it. Measured at
+        // 301 people it took **486ms** — worse than the 66ms per-row read that
+        // `read_as` was rewritten for, and on a surface somebody opens to
+        // browse. The shape was the bug rather than the volume, which is why the
+        // measurement is kept as a test.
+        let mut st = self.conn.prepare(
+            "SELECT ent_id, display, note_tgt FROM entities
+              WHERE kind = ?1 ORDER BY lower(display)",
+        )?;
+        let rows = st.query_map(params![kind], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })?;
+        let mut out: Vec<EntityRow> = Vec::new();
+        for row in rows {
+            let (id, display, backing) = row?;
+            let Some(ent) = ent_from(id) else { continue };
+            out.push(EntityRow {
+                ent,
+                kind: kind.to_string(),
+                display,
+                backing: backing.and_then(id_from),
+                names: Vec::new(),
+                count: 0,
+            });
+        }
+        drop(st);
+
+        // Every spelling, in one pass.
+        let mut st = self
+            .conn
+            .prepare("SELECT ent_id, name FROM entity_names WHERE kind = ?1 ORDER BY name")?;
+        let spellings = st.query_map(params![kind], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut by_ent: BTreeMap<EntId, Vec<String>> = BTreeMap::new();
+        for sp in spellings {
+            let (id, name) = sp?;
+            if let Some(ent) = ent_from(id) {
+                by_ent.entry(ent).or_default().push(name);
+            }
+        }
+        drop(st);
+
+        // And every count, grouped. The backing note is excluded here as it is
+        // in `entity_notes`, so the number matches the list somebody then sees.
+        let mut st = self.conn.prepare(
+            "SELECT en.ent_id, COUNT(DISTINCT n.tgt)
+               FROM notes n
+               JOIN mentions m ON m.tgt = n.tgt
+               JOIN entity_names en
+                 ON en.kind = CASE m.sigil
+                                WHEN '@' THEN 'person'
+                                WHEN '^' THEN 'project'
+                                WHEN '#' THEN 'tag'
+                              END
+                AND en.name = lower(m.value)
+               JOIN entities e ON e.ent_id = en.ent_id
+              WHERE en.kind = ?1
+                AND (e.note_tgt IS NULL OR n.tgt != e.note_tgt)
+                AND (n.muted_until IS NULL
+                     OR (n.muted_until != 0 AND n.muted_until <= ?2))
+              GROUP BY en.ent_id",
+        )?;
+        let counts = st.query_map(params![kind, now as i64], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut count_of: BTreeMap<EntId, u64> = BTreeMap::new();
+        for c in counts {
+            let (id, n) = c?;
+            if let Some(ent) = ent_from(id) {
+                count_of.insert(ent, n.max(0) as u64);
+            }
+        }
+        drop(st);
+
+        for row in &mut out {
+            row.names = by_ent.remove(&row.ent).unwrap_or_default();
+            row.count = count_of.get(&row.ent).copied().unwrap_or(0);
+        }
+        Ok(out)
+    }
+
     /// Every moment this archive names that has come due, oldest first.
     ///
     /// Asking does not deliver. Three surfaces and the tests all ask this, and
@@ -2369,6 +2654,22 @@ impl Store {
             params![t, capture_core::slug::derive_redacted(tgt).text, at as i64],
         )?;
         tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
+
+        // Everything else derived from the text, and this was missing.
+        //
+        // `write_into` refuses to extract mentions from a note with no readable
+        // text, and the comment above it says why: an entity page must not
+        // become a way to read what redaction removed. But that guard only runs
+        // on a fold, and a purge is not one — it edits the projection in place.
+        // So a destroyed note went on naming every person, project and tag it
+        // had mentioned, on every one of their pages, for ever. No text was
+        // readable, which is why nothing looked wrong; what survived was the
+        // fact of the mention, which is the part §1.1 is about.
+        //
+        // `list_items` is the same story. An expanded list kept its items after
+        // the capture they came from was destroyed.
+        tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
+        tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
         tx.commit()?;
         Ok(())
     }
@@ -3034,6 +3335,176 @@ fn write_intent(
     Ok(())
 }
 
+/// How long this note is suppressed for, entity-scoped mutes included.
+///
+/// The fold settles the other three scopes and hands entity ones over whole,
+/// because deciding which notes name an entity needs the text and
+/// `capture_parse` already depends on `capture-core`. This is where that rule
+/// gets carried out — the one place that has both the mute and the mentions.
+///
+/// `muted_at` is why this can be done here rather than having to be done there.
+/// Newest-wins inside the fold is iteration order, so without a recorded
+/// timestamp an entity mute applied at this point would beat every note-scoped
+/// mute simply by being later in the code.
+fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
+    let Some(text) = n.text.as_deref() else {
+        // No readable text names nobody, so no entity mute can reach it — the
+        // same guard that keeps a destroyed note off every entity page.
+        return n.muted_until;
+    };
+    let named = entities_named(p, text);
+    if named.is_empty() {
+        return n.muted_until;
+    }
+
+    let mut until = n.muted_until;
+    let mut at = n.muted_at;
+    for (ent, value, when) in &p.entity_mutes {
+        if !named.contains(&p.entity_of(*ent)) {
+            continue;
+        }
+        if at.is_none_or(|had| *when > had) {
+            until = *value;
+            at = Some(*when);
+        }
+    }
+    until
+}
+
+/// Which kind of entity a sigil names.
+///
+/// `>`, `!` and `~` are absent and that is the division: a date, a priority and
+/// a duration are properties of the note itself, where a person, a project and a
+/// tag are things a note can be *about*. A page of "everything urgent" is a
+/// query over a field that is not even stored; a page of everything naming
+/// somebody is the axis §3.7 is describing.
+fn entity_kind(sigil: char) -> Option<&'static str> {
+    match sigil {
+        '@' => Some("person"),
+        '^' => Some("project"),
+        '#' => Some("tag"),
+        _ => None,
+    }
+}
+
+/// The entities a note's text names, already resolved through any merges.
+///
+/// Computed from the text rather than read back from `mentions`, because the
+/// caller needs it while deciding what to write about the note and the row is
+/// not there yet.
+fn entities_named(p: &Projection, text: &str) -> Vec<EntId> {
+    let mut out = Vec::new();
+    for (sigil, value) in capture_parse::mentions(text) {
+        if let Some(kind) = entity_kind(sigil) {
+            let ent = p.entity_of(EntId::derive(kind, &value));
+            if !out.contains(&ent) {
+                out.push(ent);
+            }
+        }
+    }
+    out
+}
+
+/// Recompute `entities` and `entity_names` from the mentions now stored.
+///
+/// Whole rather than per note, and that is not laziness. An entity's displayed
+/// name, where nobody has chosen one, is the earliest spelling written for it
+/// anywhere in the archive — so a single note arriving can change what an entity
+/// is called, and a partial update would leave the answer depending on which
+/// notes happened to be re-folded.
+///
+/// Derived twice over: from `mentions`, which is derived from note text, and
+/// from the fold's entity state. Nothing here is truth, which is why deleting
+/// both tables and rebuilding them is safe at any point.
+fn write_entities(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<()> {
+    tx.execute_batch("DELETE FROM entities; DELETE FROM entity_names;")?;
+
+    // Earliest first, so the first spelling seen for a name wins the display and
+    // every later one is ignored by `INSERT OR IGNORE`. Ordered by the same
+    // `(created, tgt)` the fold uses, so two devices choose the same spelling.
+    let mut st = tx.prepare(
+        "SELECT m.sigil, m.value
+           FROM mentions m JOIN notes n ON n.tgt = m.tgt
+          ORDER BY n.created_wall ASC, n.created_counter ASC, m.tgt ASC, m.value ASC",
+    )?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+
+    // ent_id -> the display to use, and the kind it came from.
+    let mut display: BTreeMap<EntId, (String, String)> = BTreeMap::new();
+    // Every written spelling, so a lookup by either reaches the entity.
+    let mut names: Vec<(String, String, EntId)> = Vec::new();
+
+    for row in rows {
+        let (sigil, value) = row?;
+        let Some(kind) = sigil.chars().next().and_then(entity_kind) else {
+            continue;
+        };
+        let ent = p.entity_of(EntId::derive(kind, &value));
+        // The spelling points at the entity it *ends up* being, not the one it
+        // derives. A merge is followed here, once, rather than at every read —
+        // and `entities` only ever holds the survivors, so a lookup that landed
+        // on a merged-away id would find no row at all.
+        names.push((kind.to_string(), casefold(&value), ent));
+        display
+            .entry(ent)
+            .or_insert_with(|| (value.clone(), kind.to_string()));
+    }
+    drop(st);
+
+    for (ent, (shown, kind)) in &display {
+        // A name somebody chose beats the earliest spelling. It is the one thing
+        // here that is not derived from the text.
+        let shown = p.entity_name(*ent).unwrap_or(shown.as_str());
+        tx.execute(
+            "INSERT OR REPLACE INTO entities (ent_id, kind, display, note_tgt, merged_into)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                ent.0.to_vec(),
+                kind,
+                shown,
+                p.entity_backing_of(*ent).map(|n| n.0.to_vec()),
+                // Always null on a surviving row: a merge edge points *away*
+                // from an entity, and only the entity at the end of the chain
+                // gets a row here. The column is §1.4's, kept so the schema
+                // matches the design it came from.
+                None::<Vec<u8>>,
+            ],
+        )?;
+    }
+
+    for (kind, name, raw) in &names {
+        tx.execute(
+            "INSERT OR IGNORE INTO entity_names (kind, name, ent_id) VALUES (?1,?2,?3)",
+            params![kind, name, raw.0.to_vec()],
+        )?;
+    }
+
+    // An entity that only exists because somebody renamed or merged it — every
+    // note naming it has since been edited or destroyed — still gets a row, so
+    // that the rename is not silently lost if a note names it again later.
+    for ent in p.entity_display.keys().chain(p.entity_backing.keys()) {
+        let ent = p.entity_of(*ent);
+        if display.contains_key(&ent) {
+            continue;
+        }
+        if let Some(shown) = p.entity_name(ent) {
+            tx.execute(
+                "INSERT OR IGNORE INTO entities (ent_id, kind, display, note_tgt, merged_into)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    ent.0.to_vec(),
+                    "person",
+                    shown,
+                    p.entity_backing_of(ent).map(|n| n.0.to_vec()),
+                    None::<Vec<u8>>,
+                ],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Result<()> {
     for (id, i) in &p.intents {
         write_intent(tx, id, i)?;
@@ -3105,7 +3576,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 n.updated.counter as i64,
                 n.tz,
                 n.pinned as i64,
-                n.muted_until.map(|v| v as i64),
+                muted_for(p, n).map(|v| v as i64),
                 n.redacted_at.map(|h| h.wall as i64),
                 n.credential as i64,
             ],
@@ -3243,6 +3714,13 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
         )?;
     }
 
+    // Last, because it reads the `mentions` rows the loop above just wrote.
+    //
+    // Whole rather than per note: an entity's displayed name is the earliest
+    // spelling written for it anywhere, so one arriving note can change what an
+    // entity is called.
+    write_entities(tx, p)?;
+
     Ok(())
 }
 
@@ -3336,6 +3814,11 @@ pub fn discard_generation(base: &Path, generation: u64) -> Result<()> {
 
 fn id_from(b: Vec<u8>) -> Option<EventId> {
     <[u8; 32]>::try_from(b.as_slice()).ok().map(EventId)
+}
+
+/// The same, for an entity id.
+fn ent_from(b: Vec<u8>) -> Option<EntId> {
+    <[u8; 32]>::try_from(b.as_slice()).ok().map(EntId)
 }
 
 /// Reads a row selected by [`NOTE_COLUMNS`], in that order.

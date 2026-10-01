@@ -1148,3 +1148,82 @@ fn a_kind_corrected_on_one_device_survives_the_other_reparsing_it() {
     sync(&phone, &desk);
     assert_eq!(kind_on(&phone), kind_on(&desk));
 }
+
+#[test]
+fn an_entity_rename_crosses_and_does_not_fork_the_page() {
+    // 4.2 and the cross-device half of the change. An entity event names no
+    // note, so it arrives at the other device as something `referenced()` can
+    // say nothing about — which is why it is global. Before that it was ingested
+    // and then had no effect, and a page simply went on showing the old name
+    // with nothing anywhere saying why.
+    let phone = Device::new("a-ent-phone");
+    let desk = Device::new("b-ent-desk");
+    pair(&phone, &desk);
+
+    phone.capture("ask @sarah about the invoice");
+    desk.capture("@Sarah replied");
+    sync(&phone, &desk);
+
+    let ent = capture_core::id::EntId::derive("person", "sarah");
+    let page_on = |d: &Device| -> (Option<String>, usize) {
+        let store = d.read();
+        let row = store.entity_by_id(&ent).unwrap();
+        (
+            row.map(|r| r.display),
+            store.entity_notes(&ent, 1_900_000_000_000).unwrap().len(),
+        )
+    };
+
+    // Case folded on both sides, so one person with both notes.
+    assert_eq!(page_on(&phone).1, 2, "case forked her on the phone");
+    assert_eq!(page_on(&desk).1, 2, "case forked her on the desktop");
+
+    // The phone renames her.
+    capture_store::mutate::rename_entity(&phone.paths, "person", "sarah", "Sarah Chen").unwrap();
+    assert_eq!(page_on(&phone).0.as_deref(), Some("Sarah Chen"));
+
+    sync(&phone, &desk);
+    assert_eq!(
+        page_on(&desk).0.as_deref(),
+        Some("Sarah Chen"),
+        "the rename did not cross"
+    );
+    assert_eq!(page_on(&desk).1, 2, "the rename forked the page");
+}
+
+#[test]
+fn a_merge_crosses_and_either_spelling_arrives_at_the_survivor() {
+    let phone = Device::new("a-merge-phone");
+    let desk = Device::new("b-merge-desk");
+    pair(&phone, &desk);
+
+    phone.capture("ask @sarah about the invoice");
+    desk.capture("@sarah-chen sent the contract");
+    sync(&phone, &desk);
+
+    capture_store::mutate::merge_entities(&phone.paths, "person", "sarah", "sarah-chen").unwrap();
+    sync(&phone, &desk);
+
+    for d in [&phone, &desk] {
+        let store = d.read();
+        for spelling in ["sarah", "sarah-chen"] {
+            let ent = store
+                .entity_id("person", spelling)
+                .unwrap()
+                .expect("resolves");
+            assert_eq!(
+                store.entity_notes(&ent, 1_900_000_000_000).unwrap().len(),
+                2,
+                "{spelling} did not reach the merged page"
+            );
+        }
+        assert_eq!(
+            store
+                .entities_of_kind("person", 1_900_000_000_000)
+                .unwrap()
+                .len(),
+            1,
+            "a merged-away entity is still listed"
+        );
+    }
+}

@@ -894,3 +894,154 @@ fn the_date_in_a_name_is_the_same_everywhere_for_ever() {
     assert_eq!(utc_date(86_399_999), "1970-01-01");
     assert_eq!(utc_date(86_400_000), "1970-01-02");
 }
+
+// ----------------------------------------------------------- entities -------
+//
+// Frozen before anything writes one, which for these is the whole point: an
+// `ent_id` is derived rather than minted, so the derivation is load-bearing in a
+// way a minted id would not be. If `casefold` or the domain tag changed, every
+// entity in every archive would silently become a different entity, every
+// `entity_rename` already written would point at nothing, and the only symptom
+// would be pages that had quietly emptied.
+
+#[test]
+fn an_entity_id_derives_the_same_way_for_ever() {
+    use capture_core::id::EntId;
+
+    // The derivation, pinned. `blake3("entity" ‖ kind ‖ 0x00 ‖ casefold(name))`.
+    assert_eq!(
+        hex(&EntId::derive("person", "sarah").0),
+        "234d36238abd9b9dd1e699365adfe14cd005bd71871fb1ef542b2f10538db21a"
+    );
+
+    // Case folds into identity. §4.3 wants one person here, not two, and this
+    // is the assertion that says so in bytes rather than in prose.
+    assert_eq!(
+        EntId::derive("person", "Sarah"),
+        EntId::derive("person", "sarah"),
+        "case forked an entity"
+    );
+    assert_eq!(
+        EntId::derive("project", "MIGRATION"),
+        EntId::derive("project", "migration")
+    );
+
+    // The kind is in the hash, so a project and a person sharing a word are two
+    // entities. They routinely do share one — a client, and the account named
+    // after them — and merging those because of the spelling would be the
+    // system deciding something nobody said.
+    assert_ne!(
+        EntId::derive("person", "sarah"),
+        EntId::derive("project", "sarah")
+    );
+    assert_eq!(
+        hex(&EntId::derive("project", "sarah").0),
+        "34187d34a1f64e2b9bc7ff655654f58161d410c590a86d872ee03fe11be3354a"
+    );
+    assert_eq!(
+        hex(&EntId::derive("tag", "work").0),
+        "22f99c5b51d4d671f692387a3674594e2c915506980e241d00aadc2d044b589a"
+    );
+
+    // The separator earns its byte: without it these two would hash the same,
+    // and a person called `b` would be a persona called nothing.
+    assert_ne!(EntId::derive("person", "ab"), EntId::derive("persona", "b"));
+
+    // Non-ASCII keeps its spelling exactly. Unicode folding is locale- and
+    // version-dependent, and this value is hashed into the log — a folding rule
+    // that shifted on a dependency bump would split every entity whose name
+    // contained a character it treated differently.
+    assert_ne!(EntId::derive("person", "İ"), EntId::derive("person", "i̇"));
+}
+
+#[test]
+fn an_entity_rename_encodes_the_same_way_for_ever() {
+    use capture_core::body::EntityRenameBody;
+    use capture_core::id::EntId;
+
+    let rename = EntityRenameBody {
+        nonce: [0x99; 16],
+        ent: EntId([0x22; 32]),
+        display: "Sarah Chen".to_string(),
+    };
+    assert_eq!(
+        hex(&canonical_of(&rename)),
+        "835099999999999999999999999999999999582022222222222222222222222222222222222222222222222222222222222222226a5361726168204368656e"
+    );
+}
+
+#[test]
+fn an_entity_merge_encodes_the_same_way_for_ever() {
+    use capture_core::body::EntityMergeBody;
+    use capture_core::id::EntId;
+
+    // Two ids and nothing else. A merge is a redirection, so there is no list
+    // of notes to reassign in here — which is exactly what makes it survivable
+    // in a log that cannot take anything back.
+    let merge = EntityMergeBody {
+        nonce: [0x99; 16],
+        from: EntId([0x22; 32]),
+        into: EntId([0x33; 32]),
+    };
+    assert_eq!(
+        hex(&canonical_of(&merge)),
+        "8350999999999999999999999999999999995820222222222222222222222222222222222222222222222222222222222222222258203333333333333333333333333333333333333333333333333333333333333333"
+    );
+}
+
+#[test]
+fn an_entity_bind_encodes_the_same_way_for_ever() {
+    use capture_core::body::EntityBindBody;
+    use capture_core::id::{EntId, EventId};
+
+    let bound = EntityBindBody {
+        nonce: [0x99; 16],
+        ent: EntId([0x22; 32]),
+        note: Some(EventId([0x11; 32])),
+    };
+    assert_eq!(
+        hex(&canonical_of(&bound)),
+        "8350999999999999999999999999999999995820222222222222222222222222222222222222222222222222222222222222222258201111111111111111111111111111111111111111111111111111111111111111"
+    );
+
+    // Unbinding, and the same elision `ParentBody`'s vector documents: a
+    // trailing `None` disappears, so this is a two-element array rather than a
+    // three-element one ending in null.
+    //
+    // Safe for the same specific reason. The meaning is in the kind — an
+    // `entity_bind` carrying no note says "backed by nothing", because there is
+    // nothing else such an event could say — so it decodes back to `None` and
+    // still beats an earlier bind by last-write-wins.
+    let unbound = EntityBindBody {
+        nonce: [0x99; 16],
+        ent: EntId([0x22; 32]),
+        note: None,
+    };
+    let bytes = canonical_of(&unbound);
+    assert_eq!(
+        hex(&bytes),
+        "82509999999999999999999999999999999958202222222222222222222222222222222222222222222222222222222222222222"
+    );
+    assert_eq!(
+        minicbor::decode::<EntityBindBody>(&bytes).unwrap().note,
+        None,
+        "unbinding did not survive the round trip"
+    );
+}
+
+#[test]
+fn muting_an_entity_encodes_the_same_way_for_ever() {
+    use capture_core::id::EntId;
+
+    // A fourth variant on a frozen enum. The three that exist keep their
+    // numbers, so every mute already written decodes as it did.
+    let mute = MuteBody {
+        nonce: [0x99; 16],
+        scope: MuteScope::Entity(EntId([0x22; 32])),
+        until: Some(1_760_000_000_000),
+    };
+    assert_eq!(
+        hex(&canonical_of(&mute)),
+        "835099999999999999999999999999999999820381582022222222222222222222222222222222222222222222222222222222222222221b00000199c82cc000"
+    );
+}

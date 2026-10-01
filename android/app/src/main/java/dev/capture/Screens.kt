@@ -5,6 +5,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,6 +40,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.ClickableText
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -50,6 +58,7 @@ import uniffi.capture_ffi.Pending
 import uniffi.capture_ffi.Recording
 import uniffi.capture_ffi.TaskBand
 import uniffi.capture_ffi.TaskLine
+import uniffi.capture_ffi.Entity
 
 /**
  * The timeline: everything, newest first, grouped by the day it belongs to.
@@ -227,14 +236,24 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 )
             }
 
-            Text(
-                note.text ?: when {
-                    note.redacted -> "Destroyed. The content is gone."
-                    note.redactionQueued -> "Withheld while the destruction is pending."
-                    else -> "(no readable text)"
-                },
-                style = MaterialTheme.typography.bodyLarge,
-            )
+            val body = note.text
+            if (body == null) {
+                Text(
+                    when {
+                        note.redacted -> "Destroyed. The content is gone."
+                        note.redactionQueued -> "Withheld while the destruction is pending."
+                        else -> "(no readable text)"
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            } else {
+                // The mentions in it lead to their pages. §4.3 calls the entity
+                // link the one that carries the load — it exists without anybody
+                // having linked anything — and rendering it as inert text here
+                // while the window makes it a link would make one note mean two
+                // different things depending on where it is read.
+                MentionedText(body, model)
+            }
             // The items this capture names, drawn here rather than behind a
             // tap. The button that used to stand in this place existed because
             // the row could not render itself; a row that can does not need
@@ -608,13 +627,40 @@ private const val MINUTE = 1
 private const val UNWRITTEN_MS = 15L * 60 * 1000
 
 @Composable
-fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
-    if (pages.isEmpty()) {
-        Empty("No named pages yet. A name is what makes a note a page.")
+fun Wiki(
+    pages: List<Named>,
+    people: List<Entity>,
+    projects: List<Entity>,
+    onOpen: (String) -> Unit,
+    onEntity: (String) -> Unit,
+) {
+    if (pages.isEmpty() && people.isEmpty() && projects.isEmpty()) {
+        // Three empty sections rather than one, and it is worth saying which
+        // fills itself. A named page is something somebody does; a person or a
+        // project appears because a note mentioned one (§3.7).
+        Empty(
+            "Nothing named yet.\n\n" +
+                "A page is a note you gave a name to. People and projects are " +
+                "not made at all — write @somebody or ^something in a capture " +
+                "and they appear here on their own."
+        )
         return
     }
     val known = pages.mapNotNull { it.alias }.toSet()
     LazyColumn(Modifier.fillMaxSize()) {
+        // People and projects first, because they populate without anybody
+        // doing anything and so are the sections that have something in them.
+        if (people.isNotEmpty()) {
+            item { Band("People") }
+            items(people) { EntityLine(it, "@", onEntity) }
+        }
+        if (projects.isNotEmpty()) {
+            item { Band("Projects") }
+            items(projects) { EntityLine(it, "^", onEntity) }
+        }
+        if (pages.isNotEmpty() && (people.isNotEmpty() || projects.isNotEmpty())) {
+            item { Band("Pages") }
+        }
         items(pages) { page ->
             Column(
                 Modifier.fillMaxWidth().clickable { onOpen(page.alias ?: page.slug) }
@@ -628,6 +674,233 @@ fun Wiki(pages: List<Named>, onOpen: (String) -> Unit) {
             }
             HorizontalDivider()
         }
+    }
+}
+
+/**
+ * A note's text, with its mentions leading to their pages.
+ *
+ * The runs come from the archive. What counts as a mention is a rule the store
+ * owns, and a second implementation of it here would disagree about an email
+ * address today and about whatever the rule becomes tomorrow.
+ *
+ * Built as one `AnnotatedString` rather than a row of separate `Text`s so that
+ * the paragraph wraps as a paragraph — pieces laid side by side break lines at
+ * the mentions instead of at the words.
+ */
+@Composable
+private fun MentionedText(text: String, model: Model) {
+    val pieces = remember(text) { model.pieces(text) }
+    if (pieces.none { it.mention != null }) {
+        Text(text, style = MaterialTheme.typography.bodyLarge)
+        return
+    }
+
+    // Offsets are accumulated as the string is built, which is arithmetic rather
+    // than a decision: the archive said which runs are mentions and this only
+    // records where each one landed.
+    // Read outside `remember`: the theme is a composable lookup and cannot be
+    // done inside one.
+    val accent = MaterialTheme.colorScheme.primary
+    val spans = remember(text) { mutableListOf<Triple<Int, Int, String>>() }
+    val annotated = remember(text) {
+        spans.clear()
+        buildAnnotatedString {
+            for (piece in pieces) {
+                val at = length
+                val mention = piece.mention
+                if (mention != null) {
+                    withStyle(
+                        SpanStyle(color = accent, textDecoration = TextDecoration.Underline)
+                    ) { append(piece.text) }
+                    spans.add(Triple(at, length, mention))
+                } else {
+                    append(piece.text)
+                }
+            }
+        }
+    }
+
+    ClickableText(
+        annotated,
+        style = MaterialTheme.typography.bodyLarge.copy(
+            color = MaterialTheme.colorScheme.onSurface,
+        ),
+    ) { offset ->
+        spans.firstOrNull { offset >= it.first && offset < it.second }?.let {
+            model.go(Screen.Entity(it.third))
+        }
+    }
+}
+
+@Composable
+private fun EntityLine(entity: Entity, sigil: String, onOpen: (String) -> Unit) {
+    // Opened by the mention as written, not by the display name: a renamed
+    // entity is still reached by what the notes actually say.
+    val mention = sigil + (entity.names.firstOrNull() ?: entity.display)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onOpen(mention) }
+            .padding(16.dp, 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(entity.display, style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${entity.notes.size}",
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+        // What else reaches it, after a merge. Shown because a page that quietly
+        // answers to three names is one somebody will think has lost notes.
+        if (entity.names.size > 1) {
+            Text(
+                "also ${entity.names.joinToString(", ")}",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+    HorizontalDivider()
+}
+
+/**
+ * A person, a project or a tag: what backs it, and what names it.
+ *
+ * The backing note sits above the list and is absent from it — §4.3's "the note
+ * that *is* the project, rather than one that mentions it". A row appearing in
+ * both places reads as two notes.
+ *
+ * The page is handed over whole by the archive. Nothing here composes it from a
+ * query and a count, because two surfaces assembling a page separately is two
+ * answers to one question.
+ */
+@Composable
+fun EntityPage(
+    mention: String,
+    entity: Entity?,
+    onOpen: (String) -> Unit,
+    model: Model,
+) {
+    if (entity == null) {
+        // Not an error and not a missing record. An entity exists because a note
+        // names one, so there is nothing here to have failed.
+        Empty(
+            "Nothing names $mention.\n\n" +
+                "Pages are not created — they exist for whatever your notes say. " +
+                "Write $mention in a capture and this one fills itself in."
+        )
+        return
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(entity.display, style = MaterialTheme.typography.titleMedium)
+            Text(
+                "${entity.kind} · ${entity.notes.size} note(s)",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            if (entity.names.size > 1) {
+                Text(
+                    "also ${entity.names.joinToString(", ")}",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+
+        entity.backing?.let { note ->
+            Text(
+                "the note that is this ${entity.kind}",
+                Modifier.padding(start = 16.dp, top = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            // Not tickable from here. A backing note's list items belong on its
+            // own page; a tick on this one would be a gesture nobody aimed at.
+            NoteRow(note, onOpen = onOpen, onTick = { _, _, _ -> })
+            HorizontalDivider()
+        }
+
+        EntityActions(mention, entity, model)
+        HorizontalDivider()
+
+        if (entity.notes.isEmpty()) {
+            Empty("Nothing else names it now.")
+            return@Column
+        }
+        for (note in entity.notes) {
+            NoteRow(note, onOpen = onOpen, onTick = model::tick)
+        }
+    }
+}
+
+/**
+ * Renaming, merging and binding, where the page is.
+ *
+ * §8.4's gradient: a correction that needs a different machine than the one that
+ * found the problem is the wrong way round, and the phone is where a duplicated
+ * person is first noticed because the phone is where captures are made.
+ *
+ * Merging asks, because it is the one operation here that makes two pages one.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun EntityActions(mention: String, entity: Entity, model: Model) {
+    var asking by remember { mutableStateOf<String?>(null) }
+    var answer by remember { mutableStateOf("") }
+
+    FlowRow(
+        Modifier.fillMaxWidth().padding(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        TextButton({
+            answer = entity.display
+            asking = "rename"
+        }) { Text("Rename") }
+        TextButton({
+            answer = ""
+            asking = "merge"
+        }) { Text("Merge into") }
+        if (entity.backing == null) {
+            TextButton({
+                answer = ""
+                asking = "bind"
+            }) { Text("Backing note") }
+        } else {
+            TextButton({ model.bindBacking(mention, null) }) { Text("Unbind") }
+        }
+    }
+
+    asking?.let { what ->
+        val (title, hint) = when (what) {
+            "rename" -> "Rename" to "What to call it. The notes are unchanged."
+            "merge" -> "Merge into" to
+                "The other one, as written — @sarah-chen. Nothing moves: both " +
+                    "names reach one page and every note still says what it said."
+            else -> "Backing note" to "The note that *is* this ${entity.kind}, by name."
+        }
+        AlertDialog(
+            onDismissRequest = { asking = null },
+            title = { Text(title) },
+            text = {
+                Column {
+                    Text(hint, style = MaterialTheme.typography.labelSmall)
+                    TextField(answer, { answer = it }, Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                Button({
+                    when (what) {
+                        "rename" -> model.renameEntity(mention, answer)
+                        // `from` is the other one and `into` is this page, so the
+                        // surface somebody is looking at is the one that survives.
+                        "merge" -> model.mergeEntities(answer, mention)
+                        else -> model.bindBacking(mention, answer.ifBlank { null })
+                    }
+                    asking = null
+                }) { Text(title) }
+            },
+            dismissButton = { TextButton({ asking = null }) { Text("Cancel") } },
+        )
     }
 }
 

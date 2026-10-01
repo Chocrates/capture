@@ -138,8 +138,27 @@ fn referenced(events: &[Envelope]) -> BTreeSet<String> {
 /// A mute carrying a note's identity in `tgt` is ordinary. One that does not is
 /// a rule over a set — every note with a tag, every note from a fortnight — and
 /// the set is not knowable from the event.
+///
+/// The entity kinds are all three of them global, and none of them names a note
+/// at all:
+///
+/// - A **merge** changes which page every note naming either spelling belongs
+///   to. That set is not derivable from the event without walking the mentions
+///   table, which is the projection this fold is about to write.
+/// - A **rename** changes the display on every one of those pages.
+/// - A **bind** looks local and is not: the note it names has to be *present* in
+///   the fold for the binding to apply at all, and a partial fold covering only
+///   the arriving events does not hold it. Held as `NoTarget`, the bind would
+///   then be silently dropped and the page would show no backing note, with
+///   nothing anywhere saying why.
+///
+/// That last one is why this is not an optimisation question. The cheap path is
+/// not merely slower to converge, it is wrong.
 fn is_global(e: &Envelope) -> bool {
-    matches!(e.header.kind, Kind::MUTE if e.header.tgt.is_none())
+    matches!(
+        e.header.kind,
+        Kind::ENTITY_RENAME | Kind::ENTITY_MERGE | Kind::ENTITY_BIND
+    ) || matches!(e.header.kind, Kind::MUTE if e.header.tgt.is_none())
 }
 
 /// Which notes a batch of events touches.

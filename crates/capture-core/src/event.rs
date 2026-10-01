@@ -169,12 +169,49 @@ impl Kind {
     /// device that caused the lockout.
     pub const DEVICE_READMIT: Kind = Kind(27);
 
+    /// Gives an entity a name of somebody's choosing.
+    ///
+    /// Keyed by `ent_id`, never by a spelling. An entity's id comes from the
+    /// first spelling seen for it and is never recomputed (§4.3), so an event
+    /// naming the word instead would be orphaned by the very rename it
+    /// describes.
+    ///
+    /// Only the displayed name changes. §4.3 spends a paragraph on why: a bare
+    /// name as identity means renaming a person silently forks their page into
+    /// two, and the half of their history written under the old spelling stays
+    /// behind on a page nobody visits again.
+    pub const ENTITY_RENAME: Kind = Kind(30);
+    /// Says that two entities were one all along.
+    ///
+    /// Extraction cannot know that `@sarah` and `@sarah-chen` are one person —
+    /// by phrasing alone that is indistinguishable from two people — so this is
+    /// somebody deciding, and nothing infers it. The same argument §3.6 makes
+    /// about `carries_forward`.
+    ///
+    /// A redirection rather than a rewrite. Nothing is moved, nothing is
+    /// deleted, and no mention row changes: resolution follows the pointer.
+    /// That is what makes a merge survivable in a log that cannot take
+    /// anything back.
+    pub const ENTITY_MERGE: Kind = Kind(31);
+    /// Binds the note that *is* the project, rather than one that mentions it.
+    ///
+    /// `None` unbinds, and is a decision rather than an absence — the same
+    /// reason `PARENT` carries an `Option`. "No longer backed by anything" has
+    /// to be able to beat an earlier bind, and an event of this kind with no
+    /// note in it can mean nothing else.
+    ///
+    /// Binding does not retype the note. §4.3 is explicit that this sets a
+    /// field on the entity rather than adding a value to what a note can be,
+    /// which enumerates `note | task | event | series` and has no entity in it.
+    /// A backing note may be a task, and stays one.
+    pub const ENTITY_BIND: Kind = Kind(32);
+
     /// Whether this build understands the kind.
     ///
     /// An unknown kind is quarantined — stored, verified, relayed, not folded —
     /// and re-evaluated after an upgrade.
     pub fn is_known(&self) -> bool {
-        (1..=29).contains(&self.0)
+        (1..=32).contains(&self.0)
     }
 }
 
@@ -258,6 +295,9 @@ mod m2_kinds {
             Kind::ITEM_UNDONE,
             Kind::OCC_UNDONE,
             Kind::PARENT,
+            Kind::ENTITY_RENAME,
+            Kind::ENTITY_MERGE,
+            Kind::ENTITY_BIND,
         ] {
             assert!(k.is_known(), "{k:?} was added and not admitted");
         }
@@ -282,6 +322,9 @@ mod m2_kinds {
         assert_eq!(Kind::DEVICE_READMIT.0, 27);
         assert_eq!(Kind::ITEM_DONE.0, 28);
         assert_eq!(Kind::ITEM_UNDONE.0, 29);
+        assert_eq!(Kind::ENTITY_RENAME.0, 30);
+        assert_eq!(Kind::ENTITY_MERGE.0, 31);
+        assert_eq!(Kind::ENTITY_BIND.0, 32);
     }
 
     #[test]
@@ -289,7 +332,9 @@ mod m2_kinds {
         // The boundary has to keep working after it moves. An event written by
         // a build that knows one more kind than this one must be held rather
         // than discarded or misread as something it knows.
-        assert!(!Kind(30).is_known());
+        // 33 rather than 30: the boundary moved when the entity kinds landed,
+        // and a test pinned to the old edge would pass while asserting nothing.
+        assert!(!Kind(33).is_known());
         assert!(!Kind(0).is_known(), "zero is not a kind");
     }
 }

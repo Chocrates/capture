@@ -23,6 +23,7 @@ import uniffi.capture_ffi.Watching
 import uniffi.capture_ffi.Pending
 import uniffi.capture_ffi.Ticked
 import uniffi.capture_ffi.TaskLine
+import uniffi.capture_ffi.Entity
 import uniffi.capture_ffi.NoteKind
 
 /** Which surface is showing. */
@@ -46,6 +47,14 @@ sealed interface Screen {
      * task has no day to be folded onto at all, and it is the ordinary case.
      */
     data object Tasks : Screen
+    /**
+     * A person, a project or a tag, and the notes naming it.
+     *
+     * Addressed by the mention as written — `@sarah`, `^acme` — because that is
+     * what a reader taps, and what the sigil means is decided in the store
+     * rather than here.
+     */
+    data class Entity(val mention: String) : Screen
     /**
      * A list, by its tag.
      *
@@ -82,6 +91,16 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /** Open tasks, banded by the archive rather than by this screen. */
     var tasks by mutableStateOf<List<TaskLine>>(emptyList())
+        private set
+
+    /** Everyone and every project the archive knows, for the index. */
+    var people by mutableStateOf<List<Entity>>(emptyList())
+        private set
+    var projects by mutableStateOf<List<Entity>>(emptyList())
+        private set
+
+    /** The entity page being read, whole. */
+    var entity by mutableStateOf<Entity?>(null)
         private set
 
     /**
@@ -247,7 +266,12 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
             is Screen.Tasks -> load { tasks = archive.tasks() }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
-            is Screen.Wiki -> load { pages = archive.named() }
+            is Screen.Wiki -> load {
+                pages = archive.named()
+                people = archive.people()
+                projects = archive.projects()
+            }
+            is Screen.Entity -> load { entity = archive.entity(to.mention) }
             is Screen.ListOf -> load { list = archive.list(to.tag) }
             is Screen.Health -> load {
                 conditions = archive.health()
@@ -285,6 +309,15 @@ class Model(private val archive: Archive) : ViewModel() {
     }
 
     fun today(): String = archive.today()
+
+    /**
+     * A note's text, split into ordinary runs and mentions.
+     *
+     * Asked of the archive rather than worked out here. Which runs are mentions
+     * is a rule the store owns — `sarah@example.com` names nobody, and a phone
+     * scanning for sigils itself would get that wrong and then drift.
+     */
+    fun pieces(text: String): List<uniffi.capture_ffi.TextPiece> = archive.pieces(text)
 
     // --- mutations -----------------------------------------------------------
     //
@@ -329,6 +362,30 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /** Take the reading the archive offered but would not act on by itself. */
     fun accept(name: String) = after(name) { archive.accept(name) }
+
+    // --- entities ------------------------------------------------------------
+    //
+    // Re-read the page rather than patching it. A merge changes which notes the
+    // page holds and a rename changes what every other page calls it, so a
+    // locally-edited copy would show the request instead of the result.
+
+    fun renameEntity(mention: String, display: String) = afterEntity(mention) {
+        archive.renameEntity(mention, display)
+    }
+
+    /** Join two entities. The surviving page is the one this stays on. */
+    fun mergeEntities(from: String, into: String) = afterEntity(into) {
+        archive.mergeEntities(from, into)
+    }
+
+    fun bindBacking(mention: String, note: String?) = afterEntity(mention) {
+        archive.bindBacking(mention, note)
+    }
+
+    private fun afterEntity(mention: String, work: suspend () -> Unit) = load {
+        work()
+        entity = archive.entity(mention)
+    }
 
     fun redact(name: String) = after(name) { archive.redact(name) }
 
@@ -498,7 +555,12 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Tasks -> tasks = archive.tasks()
             is Screen.Agenda -> agenda = archive.agenda(here.day)
             is Screen.ListOf -> list = archive.list(here.tag)
-            is Screen.Wiki -> pages = archive.named()
+            is Screen.Wiki -> {
+                pages = archive.named()
+                people = archive.people()
+                projects = archive.projects()
+            }
+            is Screen.Entity -> entity = archive.entity(here.mention)
             is Screen.Note -> note = archive.note(here.name)
             is Screen.Plans -> plans = archive.intents()
             else -> {}
@@ -531,6 +593,17 @@ class Model(private val archive: Archive) : ViewModel() {
         }
     }
 
+    /**
+     * What an error says, without the generator's punctuation.
+     *
+     * uniffi renders an error variant's message as `field=value`, so every
+     * refusal this application has ever shown began with `reason=` — a Rust
+     * field name, on a phone screen, in front of a sentence written for a
+     * person. The wording still comes from Rust; this only undoes the prefix.
+     */
+    private fun said(e: Exception): String =
+        (e.message ?: e.toString()).replaceFirst(Regex("^[a-z_]+="), "")
+
     private fun load(work: suspend () -> Unit) {
         viewModelScope.launch {
             busy = true
@@ -541,7 +614,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 // Said, not swallowed. A blank screen where a list should be
                 // is indistinguishable from an empty archive, and one of those
                 // is a bug.
-                trouble = e.message ?: e.toString()
+                trouble = said(e)
             } finally {
                 busy = false
             }

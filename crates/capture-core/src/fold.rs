@@ -38,14 +38,15 @@ use minicbor::{Decode, Encode};
 
 use crate::{
     body::{
-        AliasBody, CaptureBody, EditBody, ItemBody, MuteBody, MuteScope, OccBody, OccEditBody,
-        OccMoveBody, Outcome, ParentBody, PinBody, PromoteBody, RedactBody, RedactCancelBody,
-        ResolveBody, ReviewBody, SettingBody, TagBody, UntagBody,
+        AliasBody, CaptureBody, EditBody, EntityBindBody, EntityMergeBody, EntityRenameBody,
+        ItemBody, MuteBody, MuteScope, OccBody, OccEditBody, OccMoveBody, Outcome, ParentBody,
+        PinBody, PromoteBody, RedactBody, RedactCancelBody, ResolveBody, ReviewBody, SettingBody,
+        TagBody, UntagBody,
     },
     envelope::Envelope,
     event::Kind,
     hlc::Hlc,
-    id::{Dev, EventId},
+    id::{Dev, EntId, EventId},
     link::{self, Link},
     slug,
 };
@@ -197,6 +198,16 @@ pub struct Note {
     /// Suppressed from surfacing until this time. Zero means indefinitely.
     #[n(9)]
     pub muted_until: Option<u64>,
+    /// When the mute that decided [`Note::muted_until`] was written.
+    ///
+    /// Here so that a mute resolved outside this crate can be ordered against
+    /// the ones resolved inside it. An entity-scoped mute needs the note's
+    /// text to know whether it applies, which this crate cannot read, so it is
+    /// applied where mentions are computed — and without a timestamp to compare
+    /// against it would win over every note-scoped mute simply by being applied
+    /// later.
+    #[n(26)]
+    pub muted_at: Option<Hlc>,
     /// When its content was actually destroyed, if it has been.
     ///
     /// Set from the *absence of the body*, not from the existence of a
@@ -431,9 +442,76 @@ pub struct Projection {
     /// abandoning the note abandon the plan.
     #[n(3)]
     pub intents: BTreeMap<EventId, Intent>,
+    /// Entity-scoped mutes, carried out whole because this crate cannot decide
+    /// which notes they cover.
+    ///
+    /// Which notes name an entity is a question about their text, and answering
+    /// it needs `capture_parse::mentions` — which depends on this crate. So the
+    /// rule travels with the moment it was written, and is applied where
+    /// mentions are already computed.
+    ///
+    /// A `Vec` rather than a map, and in event order: two mutes of one entity
+    /// resolve newest-wins the same way every other scope does, which needs the
+    /// order kept rather than the key deduplicated.
+    #[n(4)]
+    pub entity_mutes: Vec<(EntId, Option<u64>, Hlc)>,
+    /// Names somebody chose for an entity, by identity rather than by spelling.
+    ///
+    /// Absent means nobody has renamed it, and the spelling written first is
+    /// shown instead — which is decided where mentions are computed, since that
+    /// is the only place that knows what the text says.
+    #[n(5)]
+    pub entity_display: BTreeMap<EntId, (String, Hlc)>,
+    /// Which entity another turned out to be.
+    ///
+    /// A chain, not a single hop: A into B and B into C leaves both edges here,
+    /// and resolution walks to the end. Cycles are broken after the main pass
+    /// for the same reason parent cycles are.
+    #[n(6)]
+    pub entity_merged: BTreeMap<EntId, (EntId, Hlc)>,
+    /// The note that *is* this entity, where one has been bound.
+    ///
+    /// `Option` inside the value because unbinding is a decision that has to be
+    /// able to beat an earlier bind, and the `Hlc` is what decides between them.
+    #[n(7)]
+    pub entity_backing: BTreeMap<EntId, (Option<EventId>, Hlc)>,
 }
 
 impl Projection {
+    /// Which entity a name's id ends up being, after every merge.
+    ///
+    /// Walks the chain to its end. The bound is the number of edges: cycles are
+    /// broken during the fold, so one cannot be reached here, and the bound is
+    /// what makes that a guarantee rather than a hope — a caller holding a
+    /// projection assembled some other way still terminates.
+    pub fn entity_of(&self, ent: EntId) -> EntId {
+        let mut at = ent;
+        for _ in 0..=self.entity_merged.len() {
+            match self.entity_merged.get(&at) {
+                Some((next, _)) => at = *next,
+                None => return at,
+            }
+        }
+        at
+    }
+
+    /// What to show for an entity, where somebody has chosen a name.
+    ///
+    /// `None` means nobody has, and the spelling as written is what to use —
+    /// which this crate cannot know, because it is in the note's text.
+    pub fn entity_name(&self, ent: EntId) -> Option<&str> {
+        self.entity_display
+            .get(&self.entity_of(ent))
+            .map(|(d, _)| d.as_str())
+    }
+
+    /// The note bound as an entity's backing note, if one is.
+    pub fn entity_backing_of(&self, ent: EntId) -> Option<EventId> {
+        self.entity_backing
+            .get(&self.entity_of(ent))
+            .and_then(|(n, _)| *n)
+    }
+
     /// Canonical bytes. Two folds of the same events encode identically.
     pub fn canonical(&self) -> Vec<u8> {
         let mut b = Vec::new();
@@ -495,7 +573,7 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
     // applied after `resolve`, because a divergence does not exist until every
     // version is known.
     let mut dismissed: BTreeSet<EventId> = BTreeSet::new();
-    let mut mutes: Vec<(MuteScope, Option<u64>)> = Vec::new();
+    let mut mutes: Vec<(MuteScope, Option<u64>, Hlc)> = Vec::new();
 
     // Redactions are collected first and applied last, because a redaction must
     // take effect whether it arrives before or after the thing it destroys. If
@@ -578,6 +656,9 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::PROMOTE => apply_promote(&mut proj, e),
             Kind::REVIEW => apply_review(&mut proj, e),
             Kind::PARENT => apply_parent(&mut proj, e),
+            Kind::ENTITY_RENAME => apply_entity_rename(&mut proj, e),
+            Kind::ENTITY_MERGE => apply_entity_merge(&mut proj, e),
+            Kind::ENTITY_BIND => apply_entity_bind(&mut proj, e),
             Kind::OCC_MOVE => apply_occ_move(&mut proj, e),
             Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
             Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
@@ -607,6 +688,7 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
     // time, so the loop only exists once both are folded — which is exactly
     // where it can be broken identically on every replica.
     break_parent_cycles(&mut proj);
+    break_merge_cycles(&mut proj);
 
     resolve(&mut proj, &texts);
 
@@ -731,6 +813,7 @@ fn apply_capture(
             occurrences: BTreeMap::new(),
             items: BTreeMap::new(),
             muted_until: None,
+            muted_at: None,
             redacted_at: None,
             redaction_pending: None,
             divergences: Vec::new(),
@@ -1182,6 +1265,137 @@ fn break_parent_cycles(proj: &mut Projection) {
     }
 }
 
+/// Give an entity a name somebody chose.
+///
+/// Ordinary last-write-wins on the display, and nothing else. Identity is a
+/// function of the written spelling (see [`EntId`]), so a rename cannot move an
+/// entity — which is the whole reason §4.3 wanted an id in the first place.
+///
+/// An empty name is refused rather than stored. A page with no name is one
+/// nothing can point at, and clearing a name is not a thing this event means:
+/// the fallback is the spelling somebody wrote, which is always there.
+fn apply_entity_rename(proj: &mut Projection, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(r) = minicbor::decode::<EntityRenameBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if r.display.trim().is_empty() {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    }
+    match proj.entity_display.get(&r.ent) {
+        Some((_, at)) if *at >= e.header.hlc => {}
+        _ => {
+            proj.entity_display.insert(r.ent, (r.display, e.header.hlc));
+        }
+    }
+}
+
+/// Record that two entities were one.
+///
+/// Stored as an edge rather than applied, so a chain stays a chain and
+/// resolution walks it. Merging an entity into itself is dropped: it says
+/// nothing and would be a one-element cycle for the pass below to clean up.
+fn apply_entity_merge(proj: &mut Projection, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(m) = minicbor::decode::<EntityMergeBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if m.from == m.into {
+        return;
+    }
+    match proj.entity_merged.get(&m.from) {
+        Some((_, at)) if *at >= e.header.hlc => {}
+        _ => {
+            proj.entity_merged.insert(m.from, (m.into, e.header.hlc));
+        }
+    }
+}
+
+/// Bind the note that *is* this entity, or unbind it.
+///
+/// A bind naming a note this replica does not hold is held rather than applied,
+/// as `apply_alias` does for the same situation: the note may simply not have
+/// arrived yet, and guessing would bind the page to nothing.
+///
+/// Unbinding carries `None` and is applied, not skipped — "backed by nothing"
+/// has to be able to beat an earlier bind.
+fn apply_entity_bind(proj: &mut Projection, e: &Envelope) {
+    let Some(body) = e.body.as_ref() else { return };
+    let Ok(b) = minicbor::decode::<EntityBindBody>(body) else {
+        proj.held.insert(e.header.id(), Held::Malformed);
+        return;
+    };
+    if let Some(note) = b.note
+        && !proj.notes.contains_key(&note)
+    {
+        proj.held.insert(e.header.id(), Held::NoTarget);
+        return;
+    }
+    match proj.entity_backing.get(&b.ent) {
+        Some((_, at)) if *at >= e.header.hlc => {}
+        _ => {
+            proj.entity_backing.insert(b.ent, (b.note, e.header.hlc));
+        }
+    }
+}
+
+/// Break merge cycles, so resolution terminates and no entity is lost.
+///
+/// Two devices can merge A into B and B into A while partitioned, and neither is
+/// wrong from where it stands. `break_parent_cycles` already solves this exact
+/// shape and this is deliberately the same: find the loop, drop its newest edge
+/// by `(at, id)`, and do it identically on every device so both agree.
+///
+/// Dropping the newest rather than refusing the merge matters. A refusal would
+/// leave both entities pointing at each other, and every read that followed the
+/// pointer would either spin or give up — so an entity somebody merged would
+/// become unreachable, which is losing it.
+fn break_merge_cycles(proj: &mut Projection) {
+    let ids: Vec<EntId> = proj.entity_merged.keys().copied().collect();
+
+    for start in ids {
+        // A chain longer than the number of edges has to have repeated one, and
+        // the bound is what stops a malformed set spinning here for ever.
+        let mut seen: Vec<EntId> = Vec::new();
+        let mut at = start;
+        loop {
+            if seen.contains(&at) {
+                break;
+            }
+            seen.push(at);
+            let Some((next, _)) = proj.entity_merged.get(&at) else {
+                // Reached an entity that is nobody else's: no loop this way.
+                seen.clear();
+                break;
+            };
+            at = *next;
+        }
+
+        if seen.is_empty() {
+            continue;
+        }
+
+        let Some(from) = seen.iter().position(|x| *x == at) else {
+            continue;
+        };
+        let loop_members = &seen[from..];
+        let Some(newest) = loop_members
+            .iter()
+            .max_by_key(|id| {
+                let (_, at) = proj.entity_merged[*id];
+                (at, **id)
+            })
+            .copied()
+        else {
+            continue;
+        };
+        proj.entity_merged.remove(&newest);
+    }
+}
+
 /// Move one occurrence, leaving the rule alone.
 fn apply_occ_move(proj: &mut Projection, e: &Envelope) {
     let Some(tgt) = e.header.tgt else { return };
@@ -1346,13 +1560,17 @@ fn collect_resolve(proj: &mut Projection, dismissed: &mut BTreeSet<EventId>, e: 
 /// every tag and untag, and what day each note belongs to. Applying it as it
 /// arrives would mute whatever happened to exist at that moment and silently
 /// miss anything that qualified later.
-fn collect_mute(proj: &mut Projection, mutes: &mut Vec<(MuteScope, Option<u64>)>, e: &Envelope) {
+fn collect_mute(
+    proj: &mut Projection,
+    mutes: &mut Vec<(MuteScope, Option<u64>, Hlc)>,
+    e: &Envelope,
+) {
     let Some(body) = e.body.as_ref() else { return };
     let Ok(m) = minicbor::decode::<MuteBody>(body) else {
         proj.held.insert(e.header.id(), Held::Malformed);
         return;
     };
-    mutes.push((m.scope, m.until));
+    mutes.push((m.scope, m.until, e.header.hlc));
 }
 
 /// Work out which notes are suppressed.
@@ -1361,8 +1579,8 @@ fn collect_mute(proj: &mut Projection, mutes: &mut Vec<(MuteScope, Option<u64>)>
 /// touching a note wins. A mute is not a property of the note it was written
 /// against — it is a rule, and the notes it covers are whichever ones match
 /// when the question is asked.
-fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>)]) {
-    for (scope, until) in mutes {
+fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>, Hlc)]) {
+    for (scope, until, at) in mutes {
         // Zero means indefinite, which is distinct from absent: a note muted
         // forever and a note that was never muted look the same otherwise.
         let value = Some(until.unwrap_or(0));
@@ -1371,12 +1589,14 @@ fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>)]) {
             MuteScope::Note(tgt) => {
                 if let Some(n) = proj.notes.get_mut(tgt) {
                     n.muted_until = value;
+                    n.muted_at = Some(*at);
                 }
             }
             MuteScope::Tag(tag) => {
                 for n in proj.notes.values_mut() {
                     if n.tags.contains(tag) {
                         n.muted_until = value;
+                        n.muted_at = Some(*at);
                     }
                 }
             }
@@ -1389,8 +1609,25 @@ fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>)]) {
                     let day = capture_day(n);
                     if day.as_str() >= from.as_str() && day.as_str() <= to.as_str() {
                         n.muted_until = value;
+                        n.muted_at = Some(*at);
                     }
                 }
+            }
+            // Left unresolved here, and it is the one scope that cannot be
+            // settled in this crate.
+            //
+            // Which notes name an entity is a question about their text, and
+            // answering it needs `capture_parse::mentions` — which depends on
+            // this crate, so this crate cannot call it without a cycle. The
+            // rule is therefore carried out whole, with the timestamp that
+            // decides it, and applied where mentions are already computed.
+            //
+            // `muted_at` above exists for that hand-off. Without it a mute
+            // resolved later would beat every note-scoped mute regardless of
+            // when either was written, because newest-wins here is iteration
+            // order rather than a comparison.
+            MuteScope::Entity(ent) => {
+                proj.entity_mutes.push((*ent, value, *at));
             }
         }
     }
@@ -3253,5 +3490,338 @@ mod tests {
         let absent = EventId([0xAB; 32]);
         parented(&mut set, &mut d, a, Some(absent), 1_700_000_100_000);
         assert_eq!(fold(&set).notes[&a].parent, Some(absent));
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+    use crate::body::{EntityBindBody, EntityMergeBody, EntityRenameBody};
+    use crate::testing;
+
+    fn enc<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
+        let mut b = Vec::new();
+        minicbor::encode(v, &mut b).unwrap();
+        b
+    }
+
+    fn sarah() -> EntId {
+        EntId::derive("person", "sarah")
+    }
+    fn chen() -> EntId {
+        EntId::derive("person", "sarah-chen")
+    }
+
+    #[test]
+    fn identity_does_not_depend_on_which_spelling_or_what_order() {
+        // The property the whole design rests on, and it holds by construction
+        // rather than by a rule applied carefully: the hashed input is the
+        // case-folded spelling, so nothing about when a name was seen can reach
+        // the id.
+        assert_eq!(EntId::derive("person", "SARAH"), sarah());
+        assert_eq!(EntId::derive("person", "Sarah"), sarah());
+        assert_ne!(
+            sarah(),
+            chen(),
+            "a different spelling is a different entity"
+        );
+    }
+
+    #[test]
+    fn a_rename_changes_the_name_and_nothing_else() {
+        let mut d = testing::Origin::new(0);
+        let e = d.author(
+            Kind::ENTITY_RENAME,
+            None,
+            None,
+            enc(&EntityRenameBody {
+                nonce: [1; 16],
+                ent: sarah(),
+                display: "Sarah Chen".into(),
+            }),
+            1_700_000_000_000,
+        );
+        let p = fold(&[e]);
+        assert_eq!(p.entity_name(sarah()), Some("Sarah Chen"));
+        // Identity untouched: the entity is still the one the spelling derives.
+        assert_eq!(p.entity_of(sarah()), sarah());
+    }
+
+    #[test]
+    fn a_later_rename_wins_and_an_earlier_one_does_not() {
+        let mut d = testing::Origin::new(0);
+        let first = d.author(
+            Kind::ENTITY_RENAME,
+            None,
+            None,
+            enc(&EntityRenameBody {
+                nonce: [1; 16],
+                ent: sarah(),
+                display: "Sarah".into(),
+            }),
+            1_700_000_000_000,
+        );
+        let second = d.author(
+            Kind::ENTITY_RENAME,
+            None,
+            None,
+            enc(&EntityRenameBody {
+                nonce: [2; 16],
+                ent: sarah(),
+                display: "Sarah Chen".into(),
+            }),
+            1_700_000_100_000,
+        );
+        // Both orders of delivery, because a phone reconnecting hands over the
+        // older one second as a matter of course.
+        assert_eq!(
+            fold(&[first.clone(), second.clone()]).entity_name(sarah()),
+            Some("Sarah Chen")
+        );
+        assert_eq!(
+            fold(&[second, first]).entity_name(sarah()),
+            Some("Sarah Chen"),
+            "the older rename won when it arrived second"
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_refused_rather_than_shown() {
+        let mut d = testing::Origin::new(0);
+        let e = d.author(
+            Kind::ENTITY_RENAME,
+            None,
+            None,
+            enc(&EntityRenameBody {
+                nonce: [1; 16],
+                ent: sarah(),
+                display: "   ".into(),
+            }),
+            1_700_000_000_000,
+        );
+        let id = e.header.id();
+        let p = fold(&[e]);
+        assert_eq!(p.entity_name(sarah()), None);
+        assert_eq!(p.held.get(&id), Some(&Held::Malformed));
+    }
+
+    #[test]
+    fn a_merge_chain_resolves_to_its_end() {
+        // A into B into C. Both edges stay, and resolution walks them — which is
+        // why this is stored as a chain rather than applied on the way in.
+        let a = EntId::derive("person", "s");
+        let b = EntId::derive("person", "sarah");
+        let c = EntId::derive("person", "sarah-chen");
+
+        let mut d = testing::Origin::new(0);
+        let mut events = Vec::new();
+        for (i, (from, into)) in [(a, b), (b, c)].into_iter().enumerate() {
+            events.push(d.author(
+                Kind::ENTITY_MERGE,
+                None,
+                None,
+                enc(&EntityMergeBody {
+                    nonce: [i as u8; 16],
+                    from,
+                    into,
+                }),
+                1_700_000_000_000 + i as u64 * 1000,
+            ));
+        }
+        let p = fold(&events);
+        assert_eq!(p.entity_of(a), c);
+        assert_eq!(p.entity_of(b), c);
+        assert_eq!(p.entity_of(c), c, "the end of a chain is itself");
+    }
+
+    #[test]
+    fn merging_is_idempotent_and_order_independent() {
+        let mut d = testing::Origin::new(0);
+        let once = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [1; 16],
+                from: sarah(),
+                into: chen(),
+            }),
+            1_700_000_000_000,
+        );
+        let twice = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [2; 16],
+                from: sarah(),
+                into: chen(),
+            }),
+            1_700_000_100_000,
+        );
+
+        assert_eq!(fold(&[once.clone()]).entity_of(sarah()), chen());
+        assert_eq!(
+            fold(&[once.clone(), twice.clone()]).entity_of(sarah()),
+            chen(),
+            "the same merge twice is not the same as merging once"
+        );
+        assert_eq!(fold(&[twice, once]).entity_of(sarah()), chen());
+    }
+
+    #[test]
+    fn merging_an_entity_into_itself_says_nothing() {
+        let mut d = testing::Origin::new(0);
+        let e = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [1; 16],
+                from: sarah(),
+                into: sarah(),
+            }),
+            1_700_000_000_000,
+        );
+        let p = fold(&[e]);
+        assert!(p.entity_merged.is_empty());
+        assert_eq!(p.entity_of(sarah()), sarah());
+    }
+
+    #[test]
+    fn a_merge_cycle_leaves_every_entity_reachable() {
+        // Two devices, partitioned, each merging the other way. Neither is wrong
+        // from where it stands, and refusing both would leave every read that
+        // follows the pointer spinning or giving up — so an entity somebody
+        // merged would become unreachable, which is losing it.
+        let mut d = testing::Origin::new(0);
+        let there = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [1; 16],
+                from: sarah(),
+                into: chen(),
+            }),
+            1_700_000_000_000,
+        );
+        let back = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [2; 16],
+                from: chen(),
+                into: sarah(),
+            }),
+            1_700_000_100_000,
+        );
+
+        let p = fold(&[there.clone(), back.clone()]);
+        // Terminates, and lands somewhere real.
+        let a = p.entity_of(sarah());
+        let b = p.entity_of(chen());
+        assert!(a == sarah() || a == chen());
+        assert!(b == sarah() || b == chen());
+
+        // And both devices agree, whichever order they saw them in.
+        let q = fold(&[back, there]);
+        assert_eq!(p.entity_of(sarah()), q.entity_of(sarah()));
+        assert_eq!(p.entity_of(chen()), q.entity_of(chen()));
+    }
+
+    #[test]
+    fn a_bind_needs_the_note_and_unbinding_does_not() {
+        let mut d = testing::Origin::new(0);
+        let note = d.author(
+            Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the acme migration, as a project"),
+            1_700_000_000_000,
+        );
+        let note_id = note.header.id();
+
+        // Binding a note nobody holds is held, not guessed at — it may simply
+        // not have arrived yet.
+        let mut e = testing::Origin::new(1);
+        let orphan = e.author(
+            Kind::ENTITY_BIND,
+            None,
+            None,
+            enc(&EntityBindBody {
+                nonce: [1; 16],
+                ent: sarah(),
+                note: Some(EventId([0x77; 32])),
+            }),
+            1_700_000_001_000,
+        );
+        let orphan_id = orphan.header.id();
+        let p = fold(&[note.clone(), orphan]);
+        assert_eq!(p.held.get(&orphan_id), Some(&Held::NoTarget));
+        assert_eq!(p.entity_backing_of(sarah()), None);
+
+        // Binding one it does hold.
+        let bound = e.author(
+            Kind::ENTITY_BIND,
+            None,
+            None,
+            enc(&EntityBindBody {
+                nonce: [2; 16],
+                ent: sarah(),
+                note: Some(note_id),
+            }),
+            1_700_000_002_000,
+        );
+        let p = fold(&[note.clone(), bound.clone()]);
+        assert_eq!(p.entity_backing_of(sarah()), Some(note_id));
+
+        // And unbinding, which carries `None` and must beat the earlier bind
+        // rather than being skipped as an absence.
+        let unbound = e.author(
+            Kind::ENTITY_BIND,
+            None,
+            None,
+            enc(&EntityBindBody {
+                nonce: [3; 16],
+                ent: sarah(),
+                note: None,
+            }),
+            1_700_000_003_000,
+        );
+        let p = fold(&[note, bound, unbound]);
+        assert_eq!(p.entity_backing_of(sarah()), None, "unbinding was skipped");
+    }
+
+    #[test]
+    fn a_renamed_entity_answers_through_its_merge() {
+        // The two mechanisms together: B is renamed, A is merged into B, and
+        // asking A for a name has to walk the merge before reading the display.
+        let mut d = testing::Origin::new(0);
+        let rename = d.author(
+            Kind::ENTITY_RENAME,
+            None,
+            None,
+            enc(&EntityRenameBody {
+                nonce: [1; 16],
+                ent: chen(),
+                display: "Sarah Chen".into(),
+            }),
+            1_700_000_000_000,
+        );
+        let merge = d.author(
+            Kind::ENTITY_MERGE,
+            None,
+            None,
+            enc(&EntityMergeBody {
+                nonce: [2; 16],
+                from: sarah(),
+                into: chen(),
+            }),
+            1_700_000_100_000,
+        );
+        let p = fold(&[rename, merge]);
+        assert_eq!(p.entity_name(sarah()), Some("Sarah Chen"));
     }
 }

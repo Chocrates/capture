@@ -460,6 +460,43 @@ pub struct TaskLine {
     pub band: TaskBand,
 }
 
+/// A person, a project or a tag, and everything its page shows.
+///
+/// Whole rather than in parts. A page is a display name, the spellings that
+/// reach it, the note that *is* it and the notes naming it — and three surfaces
+/// assembling those separately is three answers to one question, which is the
+/// argument that put the descriptor in the projection.
+#[derive(Debug, uniffi::Record)]
+pub struct Entity {
+    /// What to call it: the name somebody chose, or the earliest spelling.
+    pub display: String,
+    /// person | project | tag.
+    pub kind: String,
+    /// Every written spelling that reaches it, folded. More than one after a
+    /// merge, which is how a page says what it has also been called.
+    pub names: Vec<String>,
+    /// The note that *is* this entity, where one is bound. Shown above the rest
+    /// and absent from them.
+    pub backing: Option<NoteSummary>,
+    /// The notes naming it, newest first.
+    pub notes: Vec<NoteSummary>,
+}
+
+/// One run of a note's text: ordinary words, or a mention that leads somewhere.
+///
+/// The split is done here rather than on the surface. Which runs are mentions is
+/// the same question `mentions` answers for the projection, and a phone scanning
+/// for sigils itself would be a second implementation of it — one that would
+/// drift the first time the rule changed, and would disagree about
+/// `sarah@example.com` long before that.
+#[derive(Debug, uniffi::Record)]
+pub struct TextPiece {
+    /// The text of this run, exactly as written.
+    pub text: String,
+    /// The mention it is, as written — `@sarah`. `None` for ordinary text.
+    pub mention: Option<String>,
+}
+
 /// What a capture is being said to be.
 ///
 /// An enum rather than the string `NoteSummary.kind` carries. That one is a
@@ -1631,6 +1668,143 @@ impl Archive {
         )?)
     }
 
+    /// A note's text, split into ordinary runs and mentions.
+    ///
+    /// Given the text rather than a note name, because the caller already has it
+    /// and a second read to fetch it again could disagree with what is on screen.
+    ///
+    /// A mention that cannot be found again in the text is left as ordinary
+    /// words, which is the safe direction: the reader sees exactly what was
+    /// written, and the worst case is a tap that is not offered.
+    pub fn pieces(&self, text: String) -> Vec<TextPiece> {
+        let found = capture_parse::mentions(&text);
+        if found.is_empty() {
+            return vec![TextPiece {
+                text,
+                mention: None,
+            }];
+        }
+
+        let mut out = Vec::new();
+        let mut rest = text.as_str();
+        for (sigil, value) in found {
+            let whole = format!("{sigil}{value}");
+            let Some(at) = rest.find(&whole) else {
+                continue;
+            };
+            if at > 0 {
+                out.push(TextPiece {
+                    text: rest[..at].to_string(),
+                    mention: None,
+                });
+            }
+            out.push(TextPiece {
+                text: whole.clone(),
+                mention: Some(whole.clone()),
+            });
+            rest = &rest[at + whole.len()..];
+        }
+        if !rest.is_empty() {
+            out.push(TextPiece {
+                text: rest.to_string(),
+                mention: None,
+            });
+        }
+        out
+    }
+
+    /// Everyone the archive knows.
+    ///
+    /// An entity exists because a note named it, so this needs nothing created
+    /// and is empty only when nothing has been named (§3.7).
+    pub fn people(&self) -> Result<Vec<Entity>> {
+        self.entities_of("person")
+    }
+
+    /// Every project it knows.
+    pub fn projects(&self) -> Result<Vec<Entity>> {
+        self.entities_of("project")
+    }
+
+    /// One entity's page, by a mention as it is written: `@sarah`, `^acme`.
+    ///
+    /// The sigil is read here rather than by the caller. A phone deciding that
+    /// `@` means a person is a phone deciding something the store owns — the
+    /// same reason `lists` refused to expose a general `mentioning`, and what
+    /// `make android-decides` exists to catch.
+    ///
+    /// `None` where no note names it, which is an ordinary answer.
+    pub fn entity(&self, mention: String) -> Result<Option<Entity>> {
+        let (kind, value) = split_mention(&mention)?;
+        let store = self.read()?;
+        let Some(row) = store.entity(kind, &value)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.entity_page(&store, row)?))
+    }
+
+    /// Give an entity a name of your choosing.
+    ///
+    /// Pinned, like every correction: no later reparse displaces it, and the id
+    /// it is written against does not change, so the page does not fork.
+    pub fn rename_entity(&self, mention: String, display: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        let (kind, value) = split_mention(&mention)?;
+        Ok(capture_store::mutate::rename_entity(
+            &self.paths,
+            kind,
+            &value,
+            &display,
+        )?)
+    }
+
+    /// Say that two entities were one all along.
+    ///
+    /// A redirection: nothing is moved, no capture changes, and either spelling
+    /// then reaches the same page. Refused across kinds — a person and a project
+    /// sharing a word is the ordinary case, not a mistake.
+    pub fn merge_entities(&self, from: String, into: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        let (into_kind, into_value) = split_mention(&into)?;
+        // The one being merged *in* may be written bare. It is being joined to
+        // an entity whose kind is already known, so demanding the sigil again
+        // asks somebody to restate what the surface they are looking at already
+        // says — and getting it wrong is then their error rather than the
+        // question's. Driving this on a phone is what surfaced it.
+        let (from_kind, from_value) = split_mention_or(&from, into_kind)?;
+        if from_kind != into_kind {
+            return Err(CaptureError::Refused {
+                reason: format!(
+                    "{from} and {into} are not the same kind of thing; \
+                     a {from_kind} and a {into_kind} stay separate"
+                ),
+            });
+        }
+        Ok(capture_store::mutate::merge_entities(
+            &self.paths,
+            from_kind,
+            &from_value,
+            &into_value,
+        )?)
+    }
+
+    /// Bind the note that *is* an entity, or unbind it with `None`.
+    ///
+    /// The note keeps being whatever it was. §4.3 puts this on the entity rather
+    /// than on the note so that what a note can be stays `note | task | event |
+    /// series` — a backing note may be a task, and goes on appearing wherever
+    /// tasks appear.
+    pub fn bind_backing(&self, mention: String, note: Option<String>) -> Result<()> {
+        let _w = self.write_lock()?;
+        let (kind, value) = split_mention(&mention)?;
+        Ok(capture_store::mutate::bind_backing(
+            &self.paths,
+            kind,
+            &value,
+            note.as_deref(),
+        )?)
+    }
+
     /// Every open task, banded into overdue, due and undated.
     ///
     /// Today is worked out here rather than taken from the caller, for the
@@ -2426,6 +2600,42 @@ impl Archive {
             .unwrap_or(0)
     }
 
+    /// Every entity of a kind, as pages.
+    fn entities_of(&self, kind: &str) -> Result<Vec<Entity>> {
+        let store = self.read()?;
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        let mut out = Vec::new();
+        for row in store.entities_of_kind(kind, now)? {
+            out.push(self.entity_page(&store, row)?);
+        }
+        Ok(out)
+    }
+
+    /// Fill in a page from its row: the backing note, then the notes naming it.
+    fn entity_page(
+        &self,
+        store: &capture_store::projection::Store,
+        row: capture_store::projection::EntityRow,
+    ) -> Result<Entity> {
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        let backing = match row.backing {
+            Some(tgt) => store.note(&tgt)?.map(summarise),
+            None => None,
+        };
+        let notes = store
+            .entity_notes(&row.ent, now)?
+            .into_iter()
+            .map(summarise)
+            .collect();
+        Ok(Entity {
+            display: row.display,
+            kind: row.kind,
+            names: row.names,
+            backing,
+            notes,
+        })
+    }
+
     fn read(&self) -> Result<capture_store::projection::Store> {
         Ok(capture_store::projection::current(&self.paths)?)
     }
@@ -2603,6 +2813,40 @@ fn short_key(k: &[u8; 32]) -> String {
 
 fn hexed(b: &[u8]) -> String {
     capture_core::id::hexed(b)
+}
+
+/// Split `@sarah` into the kind it names and the name itself.
+///
+/// In Rust rather than in Kotlin, so that what `@` means is decided once and in
+/// the place that owns it.
+fn split_mention(mention: &str) -> Result<(&'static str, String)> {
+    split_mention_or(mention, "")
+}
+
+/// The same, accepting a bare name where the kind is already known.
+///
+/// `default_kind` empty means a sigil is required.
+fn split_mention_or(mention: &str, default_kind: &'static str) -> Result<(&'static str, String)> {
+    let mut chars = mention.chars();
+    let sigil = chars.next().unwrap_or(' ');
+    let value: String = chars.collect();
+    let (kind, value) = match sigil {
+        '@' => ("person", value),
+        '^' => ("project", value),
+        '#' => ("tag", value),
+        _ if !default_kind.is_empty() => (default_kind, mention.to_string()),
+        _ => {
+            return Err(CaptureError::Refused {
+                reason: format!("'{mention}' is not a mention; use @person, ^project or #tag"),
+            });
+        }
+    };
+    if value.is_empty() {
+        return Err(CaptureError::Refused {
+            reason: format!("'{mention}' names nothing"),
+        });
+    }
+    Ok((kind, value))
 }
 
 fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {

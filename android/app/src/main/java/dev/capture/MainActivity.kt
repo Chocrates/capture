@@ -303,7 +303,19 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                     onDone = model::setDone,
                     onAgenda = { model.go(Screen.Agenda(model.today())) },
                 )
-                is Screen.Wiki -> Wiki(model.pages) { model.go(Screen.Note(it)) }
+                is Screen.Wiki -> Wiki(
+                    pages = model.pages,
+                    people = model.people,
+                    projects = model.projects,
+                    onOpen = { model.go(Screen.Note(it)) },
+                    onEntity = { model.go(Screen.Entity(it)) },
+                )
+                is Screen.Entity -> EntityPage(
+                    mention = screen.mention,
+                    entity = model.entity,
+                    onOpen = { model.go(Screen.Note(it)) },
+                    model = model,
+                )
                 is Screen.Health -> Health(
                     model.conditions,
                     model.peers,
@@ -464,7 +476,14 @@ private val TABS = listOf(
         { it is Screen.Timeline || it is Screen.Note },
         { Screen.Timeline },
     ),
-    Tab("Pages", Icons.Filled.Menu, { it is Screen.Wiki }, { Screen.Wiki }),
+    // Pages holds people and projects too, so an entity page keeps this tab
+    // selected rather than appearing to have navigated away from it.
+    Tab(
+        "Pages",
+        Icons.Filled.Menu,
+        { it is Screen.Wiki || it is Screen.Entity },
+        { Screen.Wiki },
+    ),
     Tab("Search", Icons.Filled.Search, { it is Screen.Search }, { Screen.Search }),
     Tab("Plans", Icons.Filled.Place, { it is Screen.Plans }, { Screen.Plans }),
     Tab("Review", Icons.Filled.Refresh, { it is Screen.Review }, { Screen.Review }),

@@ -369,6 +369,165 @@ pub fn mentions(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Split `@sarah` into the kind it names and the name itself.
+///
+/// The sigil is required rather than guessed. `capture entity sarah` would have
+/// to pick between a person, a project and a tag, and picking wrong means
+/// answering a question nobody asked.
+fn split_mention(name: &str) -> Result<(&'static str, String)> {
+    let mut chars = name.chars();
+    let sigil = chars.next().unwrap_or(' ');
+    let value: String = chars.collect();
+    let kind = match sigil {
+        '@' => "person",
+        '^' => "project",
+        '#' => "tag",
+        _ => {
+            return Err(Error::Usage(format!(
+                "'{name}' is not a mention; use @person, ^project or #tag"
+            )));
+        }
+    };
+    if value.is_empty() {
+        return Err(Error::Usage(format!(
+            "'{name}' names nothing after the sigil"
+        )));
+    }
+    Ok((kind, value))
+}
+
+/// Everyone, or every project, the archive knows.
+///
+/// The index `distinct_mentions` could answer and nothing ever asked for. Sorted
+/// by how much is said about each, because that is the order somebody scanning
+/// for a name they half-remember is scanning in.
+pub fn entities(paths: &StorePaths, kind: &str, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let mut rows = store.entities_of_kind(kind, now_ms() as u64)?;
+    rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.display.cmp(&b.display)));
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|e| {
+                format!(
+                    "{{\"display\":{},\"count\":{},\"names\":[{}]}}",
+                    quote(&e.display),
+                    e.count,
+                    e.names
+                        .iter()
+                        .map(|n| quote(n))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        let (what, sigil) = if kind == "person" {
+            ("people", "@")
+        } else {
+            ("projects", "^")
+        };
+        say!("No {what} yet.");
+        say!();
+        say!("They are not created — one exists as soon as a note names it.");
+        say!("Write {sigil}somebody in a capture and it appears here.");
+        return Ok(());
+    }
+
+    for e in &rows {
+        let also = if e.names.len() > 1 {
+            format!("   (also {})", e.names.join(", "))
+        } else {
+            String::new()
+        };
+        say!("  {:<30}  {:>4} note(s){}", e.display, e.count, also);
+    }
+    Ok(())
+}
+
+/// One entity's page.
+///
+/// What it is called, every spelling that reaches it, the note that *is* it
+/// where one is bound, and then the notes naming it. The backing note is printed
+/// above rather than in the list, because a row appearing twice reads as two
+/// notes.
+pub fn entity(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
+    let store = open(paths)?;
+    let (kind, value) = split_mention(name)?;
+    let Some(ent) = store.entity(kind, &value)? else {
+        if json {
+            say!("null");
+            return Ok(());
+        }
+        say!("Nothing names {name}.");
+        say!();
+        say!("Pages are not created — they exist for whatever your notes say.");
+        say!("Write {name} in a capture and this one fills itself in.");
+        return Ok(());
+    };
+    let rows = store.entity_notes(&ent.ent, now_ms() as u64)?;
+    let backing = match ent.backing {
+        Some(tgt) => store.slug_of(&tgt)?,
+        None => None,
+    };
+
+    if json {
+        say!(
+            "{{\"display\":{},\"kind\":{},\"backing\":{},\"names\":[{}],\"notes\":[{}]}}",
+            quote(&ent.display),
+            quote(&ent.kind),
+            backing
+                .as_deref()
+                .map(quote)
+                .unwrap_or_else(|| "null".into()),
+            ent.names
+                .iter()
+                .map(|n| quote(n))
+                .collect::<Vec<_>>()
+                .join(","),
+            rows.iter()
+                .map(|n| format!(
+                    "{{\"slug\":{},\"text\":{}}}",
+                    quote(&n.slug),
+                    n.text
+                        .as_deref()
+                        .map(quote)
+                        .unwrap_or_else(|| "null".into())
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        return Ok(());
+    }
+
+    say!("{}", ent.display);
+    if ent.names.len() > 1 || ent.names.first().map(|n| n.as_str()) != Some(value.as_str()) {
+        say!("  also: {}", ent.names.join(", "));
+    }
+    if let Some(slug) = &backing {
+        say!();
+        say!("  the note that is this {}: {slug}", ent.kind);
+    }
+    say!();
+    if rows.is_empty() {
+        say!("  Nothing else names it now.");
+        return Ok(());
+    }
+    for n in &rows {
+        say!(
+            "  {:<40}  {}",
+            n.slug,
+            n.text.as_deref().map(first_line).unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 /// A bounded review session.
 ///
 /// Five items, then it is over and says so. An unbounded queue is a backlog and

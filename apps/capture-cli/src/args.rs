@@ -61,6 +61,34 @@ pub enum Command {
         name: String,
         json: bool,
     },
+    /// Everyone the archive knows, by how much is said about them.
+    People {
+        json: bool,
+    },
+    /// Every project the archive knows.
+    Projects {
+        json: bool,
+    },
+    /// An entity's page: what it is called, what backs it, what names it.
+    Entity {
+        name: String,
+        json: bool,
+    },
+    /// Give an entity a name of your choosing.
+    EntityRename {
+        name: String,
+        display: String,
+    },
+    /// Say that two entities were one all along.
+    EntityMerge {
+        from: String,
+        into: String,
+    },
+    /// Bind the note that *is* this entity, or unbind it.
+    EntityBind {
+        name: String,
+        note: Option<String>,
+    },
     List {
         tag: String,
         json: bool,
@@ -506,6 +534,55 @@ where
             name,
             json,
         }),
+        // `capture people`, `capture projects`. The index the desktop sidebar
+        // has always drawn and no command could answer — `distinct_mentions`
+        // existed with no caller at all.
+        "people" => json_only(&args[1..], "people", |json| Command::People { json }),
+        "projects" => json_only(&args[1..], "projects", |json| Command::Projects { json }),
+        // `capture entity @sarah`. The page, rather than only the notes on it:
+        // what it is called, every spelling that reaches it, and the note that
+        // *is* it where one is bound.
+        "entity" => one_name(&args[1..], "entity", |name, json| Command::Entity {
+            name,
+            json,
+        }),
+        // Correcting what extraction could not know. §8.4's gradient is the
+        // reason these are here rather than only in the window: a misparse seen
+        // on one surface must be fixable from it.
+        "entity-rename" => match &args[1..] {
+            [name, display] => Ok(Command::EntityRename {
+                name: name.clone(),
+                display: display.clone(),
+            }),
+            _ => Err(Bad::Value {
+                command: "entity-rename".into(),
+                problem: "expected entity-rename <@name> <display>".into(),
+            }),
+        },
+        "entity-merge" => match &args[1..] {
+            [from, into] => Ok(Command::EntityMerge {
+                from: from.clone(),
+                into: into.clone(),
+            }),
+            _ => Err(Bad::Value {
+                command: "entity-merge".into(),
+                problem: "expected entity-merge <@from> <@into>".into(),
+            }),
+        },
+        "entity-bind" => match &args[1..] {
+            [name] => Ok(Command::EntityBind {
+                name: name.clone(),
+                note: None,
+            }),
+            [name, note] => Ok(Command::EntityBind {
+                name: name.clone(),
+                note: Some(note.clone()),
+            }),
+            _ => Err(Bad::Value {
+                command: "entity-bind".into(),
+                problem: "expected entity-bind <@name> [note]   (no note unbinds)".into(),
+            }),
+        },
         // `capture list groceries`. The tag without its sigil, because a
         // leading `#` is a comment to most shells and quoting it is a thing to
         // remember at exactly the wrong moment.
@@ -941,6 +1018,18 @@ fn has_json(rest: &[String]) -> bool {
 }
 
 /// Commands shaped `brain <verb> <name> [--json]`.
+/// Commands shaped `capture <verb> [--json]` and nothing else.
+fn json_only(rest: &[String], verb: &str, build: impl Fn(bool) -> Command) -> Result<Command, Bad> {
+    let json = has_json(rest);
+    match rest.iter().find(|a| *a != "--json") {
+        Some(extra) => Err(Bad::UnknownFlag {
+            command: verb.into(),
+            flag: extra.clone(),
+        }),
+        None => Ok(build(json)),
+    }
+}
+
 fn one_name(
     rest: &[String],
     verb: &str,
@@ -1032,6 +1121,13 @@ TIME AND TASKS
   capture tick <tag> <item>      tick one off; untick puts it back
   capture mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)
+  capture people                 everyone the archive knows, most-said first
+  capture projects               every project it knows
+  capture entity @sarah          the page: names, backing note, and the notes
+  capture entity-rename @sarah "Sarah Chen"    show a name of your choosing
+  capture entity-merge @sarah-chen @sarah      say the two were one all along
+  capture entity-bind ^acme <note>             the note that *is* the project
+  capture entity-bind ^acme                    unbind it again
   capture forget <id>            abandon a plan, by its id from capture intents
   capture parent <page> <under>  put a page under another in the wiki
   capture parent <page>          put it back at the top
@@ -1132,6 +1228,62 @@ mod tests {
             Ok(Command::Capture(Source::Words(w))) => w,
             other => panic!("expected captured words, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_entity_commands_parse() {
+        assert!(matches!(
+            p(&["people"]),
+            Ok(Command::People { json: false })
+        ));
+        assert!(matches!(
+            p(&["people", "--json"]),
+            Ok(Command::People { json: true })
+        ));
+        assert!(matches!(
+            p(&["projects"]),
+            Ok(Command::Projects { json: false })
+        ));
+        match p(&["entity", "@sarah"]) {
+            Ok(Command::Entity { name, json: false }) => assert_eq!(name, "@sarah"),
+            other => panic!("expected an entity page, got {other:?}"),
+        }
+        match p(&["entity-rename", "@sarah", "Sarah Chen"]) {
+            Ok(Command::EntityRename { name, display }) => {
+                assert_eq!(name, "@sarah");
+                // One argument, not the rest of the line joined: a display name
+                // with a space in it has to be quoted, which is what a shell is
+                // for, and joining would swallow a second name silently.
+                assert_eq!(display, "Sarah Chen");
+            }
+            other => panic!("expected a rename, got {other:?}"),
+        }
+        match p(&["entity-merge", "@a", "@b"]) {
+            Ok(Command::EntityMerge { from, into }) => {
+                assert_eq!((from.as_str(), into.as_str()), ("@a", "@b"));
+            }
+            other => panic!("expected a merge, got {other:?}"),
+        }
+        // Binding with a note, and unbinding without one. The absent argument is
+        // the whole gesture, so it cannot be an error.
+        match p(&["entity-bind", "^acme", "some-note"]) {
+            Ok(Command::EntityBind { name, note }) => {
+                assert_eq!(name, "^acme");
+                assert_eq!(note.as_deref(), Some("some-note"));
+            }
+            other => panic!("expected a bind, got {other:?}"),
+        }
+        match p(&["entity-bind", "^acme"]) {
+            Ok(Command::EntityBind { note: None, .. }) => {}
+            other => panic!("expected an unbind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entity_command_with_the_wrong_arity_is_refused() {
+        assert!(p(&["entity-rename", "@sarah"]).is_err());
+        assert!(p(&["entity-merge", "@sarah"]).is_err());
+        assert!(p(&["people", "extra"]).is_err());
     }
 
     #[test]

@@ -138,6 +138,88 @@ pub struct EventId(#[cbor(n(0), with = "minicbor::bytes")] pub [u8; 32]);
 #[cbor(transparent)]
 pub struct BodyHash(#[cbor(n(0), with = "minicbor::bytes")] pub [u8; 32]);
 
+/// A person, project or tag, by identity rather than by spelling.
+///
+/// `ent_id = blake3("entity" ‖ kind ‖ 0x00 ‖ casefold(name))`.
+///
+/// **Derived, not minted.** §3.7 makes entities one of four axes that populate
+/// without anybody doing anything, so an entity has to exist the moment a note
+/// names one — before any event could have been written about it. An id that
+/// needed an event would make every mention a write, and would give two
+/// partitioned devices two ids for one name with nothing to say they belong
+/// together.
+///
+/// **A rename does not reach this.** §4.3 requires the id to survive one, and it
+/// does, because the id is a function of the written spelling rather than of the
+/// displayed name. `entity_rename` changes what is shown and touches nothing
+/// here — which is what keeps a correction from forking a page and leaving half
+/// a history behind under the old word.
+///
+/// The consequence, worth being plain about: a genuinely *new* spelling is a new
+/// entity. `@sarah` and `@sarah-chen` are two, because nothing can tell that
+/// from two people sharing a first name. Joining them is `entity_merge`, and
+/// resolution follows the pointer.
+///
+/// Case folds here and nowhere else, so `@Sarah` and `@sarah` are one person.
+/// Which spelling is *displayed* is decided outside this type, by whichever
+/// capture naming it is earliest in the fold's order — that choice affects only
+/// what is shown, never identity, and a rename overrides it.
+///
+/// **Frozen**, like everything else in this file: these values go into the log
+/// inside `entity_rename`, `entity_merge` and `entity_bind` bodies, so changing
+/// the derivation would orphan every event already written about an entity.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Encode, Decode)]
+#[cbor(transparent)]
+pub struct EntId(#[cbor(n(0), with = "minicbor::bytes")] pub [u8; 32]);
+
+impl EntId {
+    /// Derive an entity id from its kind and a written spelling.
+    ///
+    /// `kind` is the sigil's meaning — `person`, `project`, `tag` — and is in
+    /// the hash so that `@acme` and `^acme` are two entities. A project and the
+    /// person who runs it routinely share a word, and merging them because of
+    /// that would be the system deciding something nobody said.
+    pub fn derive(kind: &str, first_spelling: &str) -> Self {
+        let mut h = blake3::Hasher::new();
+        // A domain tag, so that no other derivation in this file can ever
+        // collide with this one by accident.
+        h.update(b"entity");
+        h.update(kind.as_bytes());
+        // A separator, or ("person", "ab") and ("persona", "b") would hash the
+        // same. Zero cannot appear in either input's meaningful content.
+        h.update(&[0]);
+        h.update(casefold(first_spelling).as_bytes());
+        EntId(*h.finalize().as_bytes())
+    }
+
+    /// Short form for display. Never used for identity.
+    pub fn short(&self) -> alloc::string::String {
+        hexed(&self.0[..SHOWN_KEY_BYTES])
+    }
+}
+
+/// How a spelling is reduced before it becomes identity.
+///
+/// ASCII lowercase only, deliberately. Unicode case folding is locale-dependent
+/// and version-dependent — Turkish dotless i is the standard example — and this
+/// value is hashed into the log, so a folding rule that changes with an
+/// `unicode-ident` bump would silently split every entity whose name contains a
+/// character it treats differently. A non-ASCII name therefore keeps its
+/// spelling exactly, and two case variants of one remain two entities, which a
+/// merge fixes. That is a worse outcome than folding them and a far better one
+/// than an archive that forks itself on a dependency upgrade.
+pub fn casefold(s: &str) -> alloc::string::String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 impl BodyHash {
     /// Commit to already-canonical body bytes.
     pub fn of(canonical_body: &[u8]) -> Self {

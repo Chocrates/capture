@@ -1530,3 +1530,194 @@ fn what_the_task_read_costs() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+// ---------------------------------------------------------- entities -------
+//
+// Through the binding rather than the store, because the generator, JNA and the
+// ABI are precisely what the Rust suite does not cover — and identity crossing
+// that boundary wrong looks correct on both sides of it.
+
+#[test]
+fn case_does_not_make_two_people_through_the_binding() {
+    let root = scratch("ent-case");
+    let a = Archive::open(root.clone()).unwrap();
+
+    a.capture("ask @sarah about the invoice".into()).unwrap();
+    a.capture("@Sarah replied".into()).unwrap();
+
+    let people = a.people().unwrap();
+    assert_eq!(people.len(), 1, "case forked a person");
+    assert_eq!(people[0].notes.len(), 2);
+    assert_eq!(people[0].display, "sarah", "the folded key was shown");
+
+    // Either spelling asks the same question.
+    assert_eq!(
+        a.entity("@SARAH".into()).unwrap().map(|e| e.notes.len()),
+        Some(2)
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_rename_does_not_fork_the_page_through_the_binding() {
+    let root = scratch("ent-rename");
+    let a = Archive::open(root.clone()).unwrap();
+
+    a.capture("ask @sarah about the invoice".into()).unwrap();
+    a.capture("@sarah sent it".into()).unwrap();
+
+    a.rename_entity("@sarah".into(), "Sarah Chen".into())
+        .unwrap();
+
+    let page = a.entity("@sarah".into()).unwrap().expect("still there");
+    assert_eq!(page.display, "Sarah Chen");
+    assert_eq!(page.notes.len(), 2, "a rename forked the page");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_merge_is_followed_through_the_binding() {
+    let root = scratch("ent-merge");
+    let a = Archive::open(root.clone()).unwrap();
+
+    a.capture("ask @sarah about the invoice".into()).unwrap();
+    a.capture("@sarah-chen sent the contract".into()).unwrap();
+    assert_eq!(a.people().unwrap().len(), 2, "two spellings start as two");
+
+    a.merge_entities("@sarah-chen".into(), "@sarah".into())
+        .unwrap();
+
+    let people = a.people().unwrap();
+    assert_eq!(people.len(), 1, "a merged-away entity is still listed");
+    assert_eq!(people[0].notes.len(), 2);
+    assert_eq!(people[0].names.len(), 2, "both spellings should reach it");
+
+    // Either name arrives at the survivor.
+    for name in ["@sarah", "@sarah-chen"] {
+        assert_eq!(
+            a.entity(name.into()).unwrap().map(|e| e.notes.len()),
+            Some(2),
+            "{name} did not reach the merged page"
+        );
+    }
+
+    // And merging across kinds is refused rather than quietly joining a person
+    // to the project named after them.
+    a.capture("the ^sarah-chen migration".into()).unwrap();
+    assert!(
+        a.merge_entities("@sarah".into(), "^sarah-chen".into())
+            .is_err(),
+        "a person was merged into a project"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_bind_does_not_retype_the_note_through_the_binding() {
+    let root = scratch("ent-bind");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a
+        .capture("the ^acme migration, everything about it".into())
+        .unwrap()
+    else {
+        panic!("it stored");
+    };
+    a.capture("^acme slipped a week".into()).unwrap();
+
+    // A task deliberately: §4.3 says binding must not change what a note is.
+    a.as_task(slug.clone(), None).unwrap();
+    a.bind_backing("^acme".into(), Some(slug.clone())).unwrap();
+
+    let page = a.entity("^acme".into()).unwrap().unwrap();
+    assert_eq!(
+        page.backing.as_ref().map(|b| b.slug.clone()),
+        Some(slug.clone())
+    );
+    assert_eq!(page.notes.len(), 1, "the backing note appeared twice");
+    assert_eq!(kind_of(&a, &slug), "task", "binding retyped the note");
+    assert_eq!(a.tasks().unwrap().len(), 1, "it stopped being outstanding");
+
+    // Unbinding puts it back among the notes.
+    a.bind_backing("^acme".into(), None).unwrap();
+    let page = a.entity("^acme".into()).unwrap().unwrap();
+    assert!(page.backing.is_none(), "unbinding was skipped");
+    assert_eq!(page.notes.len(), 2);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_name_nobody_wrote_is_not_an_error() {
+    let root = scratch("ent-nobody");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("an ordinary thought naming nobody".into())
+        .unwrap();
+
+    assert!(a.entity("@nobody".into()).unwrap().is_none());
+    assert!(a.people().unwrap().is_empty());
+    assert!(a.projects().unwrap().is_empty());
+
+    // A mention that is not one is refused, rather than guessed at.
+    assert!(a.entity("sarah".into()).is_err());
+    assert!(a.entity("@".into()).is_err());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn note_text_splits_into_runs_and_mentions() {
+    let root = scratch("pieces");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let pieces = a.pieces("ask @sarah about ^acme today".into());
+    let mentions: Vec<String> = pieces.iter().filter_map(|p| p.mention.clone()).collect();
+    assert_eq!(mentions, vec!["@sarah", "^acme"]);
+
+    // Reassembles to exactly what was written. A splitter that dropped or
+    // duplicated a character would show the reader something they did not type.
+    let rejoined: String = pieces.iter().map(|p| p.text.as_str()).collect();
+    assert_eq!(rejoined, "ask @sarah about ^acme today");
+
+    // An address is not a person, and the guard is structural rather than a
+    // special case: a sigil has to open a token.
+    let pieces = a.pieces("mail sarah@example.com".into());
+    assert!(pieces.iter().all(|p| p.mention.is_none()));
+
+    // Text with nothing in it comes back as one ordinary run.
+    let pieces = a.pieces("an ordinary thought".into());
+    assert_eq!(pieces.len(), 1);
+    assert!(pieces[0].mention.is_none());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn merging_accepts_the_other_name_written_bare() {
+    // Found by driving a phone: the page being looked at already says it is a
+    // person, so demanding the sigil again asks somebody to restate what is on
+    // screen — and typing it without was the first thing that happened.
+    let root = scratch("ent-bare");
+    let a = Archive::open(root.clone()).unwrap();
+
+    a.capture("ask @sarah about the invoice".into()).unwrap();
+    a.capture("@sarah-chen sent the contract".into()).unwrap();
+
+    a.merge_entities("sarah-chen".into(), "@sarah".into())
+        .unwrap();
+
+    assert_eq!(a.people().unwrap().len(), 1, "the bare name did not merge");
+    assert_eq!(
+        a.entity("@sarah-chen".into()).unwrap().unwrap().notes.len(),
+        2
+    );
+
+    // The one being merged *into* still needs its sigil: nothing else on that
+    // side says what kind it is.
+    assert!(a.merge_entities("@a".into(), "b".into()).is_err());
+
+    std::fs::remove_dir_all(&root).ok();
+}

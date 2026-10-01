@@ -121,9 +121,33 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::DEVICE_ADD => "device-add",
         Kind::ORIGIN_CLAIM => "origin-claim",
         Kind::SETTING => "setting",
+        Kind::UNFLAG => "unflag",
+        Kind::PROMOTE => "promote",
+        Kind::INTENT => "intent",
+        Kind::REVIEW => "review",
+        Kind::OCC_MOVE => "occ-move",
+        Kind::OCC_EDIT => "occ-edit",
+        Kind::OCC_CANCEL => "occ-cancel",
+        Kind::OCC_DONE => "occ-done",
+        Kind::OCC_UNDONE => "occ-undone",
+        Kind::ITEM_DONE => "item-done",
+        Kind::ITEM_UNDONE => "item-undone",
+        Kind::PARENT => "parent",
+        Kind::ROSTER_KEY => "roster-key",
+        Kind::DEVICE_RETIRE => "device-retire",
+        Kind::DEVICE_READMIT => "device-readmit",
+        Kind::ENTITY_RENAME => "entity-rename",
+        Kind::ENTITY_MERGE => "entity-merge",
+        Kind::ENTITY_BIND => "entity-bind",
         // A kind this build has never heard of. Named as such rather than
         // rendered blank: it is almost certainly a newer client, which is a
         // different fact from a corrupt event.
+        //
+        // Every kind this build *does* know is named above. Fifteen of them
+        // were missing and printed "unknown" here — `promote`, `intent`,
+        // `review`, every `occ_*`, `parent`, both `item_*` and the roster
+        // kinds — so `capture log` reported a newer client for events this
+        // build had written itself.
         _ => "unknown",
     }
 }
@@ -758,6 +782,30 @@ mod tests {
     fn known_kinds_are_named_rather_than_numbered() {
         assert_eq!(kind_name(Kind::CAPTURE), "capture");
         assert_eq!(kind_name(Kind::ALIAS), "alias");
+        assert_eq!(kind_name(Kind::ENTITY_RENAME), "entity-rename");
+        assert_eq!(kind_name(Kind::ENTITY_MERGE), "entity-merge");
+        assert_eq!(kind_name(Kind::ENTITY_BIND), "entity-bind");
+    }
+
+    #[test]
+    fn every_kind_this_build_knows_has_a_name() {
+        // The gap this closes was silent and wide: fifteen kinds this build
+        // writes itself — `promote`, `intent`, `review`, every `occ_*`,
+        // `parent`, both `item_*`, the roster kinds — fell through to
+        // "unknown", so `capture log` blamed a newer client for events it had
+        // authored.
+        //
+        // Over the range rather than a list, so a kind added later fails here
+        // instead of quietly joining them.
+        for n in 1..=32u16 {
+            let k = Kind(n);
+            assert!(k.is_known(), "Kind({n}) should be known to this build");
+            assert_ne!(
+                kind_name(k),
+                "unknown",
+                "Kind({n}) is known but has no name"
+            );
+        }
     }
 
     #[test]

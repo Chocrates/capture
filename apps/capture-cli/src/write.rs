@@ -327,6 +327,78 @@ pub fn parent(paths: StorePaths, name: &str, under: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// Give an entity a name of your choosing.
+///
+/// The entity is named by a spelling, and what is written is its identity — so
+/// the rename holds however many more spellings later reach the same entity.
+pub fn entity_rename(paths: StorePaths, name: &str, display: &str) -> Result<()> {
+    let (kind, value) = split_mention(name)?;
+    capture_store::mutate::rename_entity(&paths, kind, &value, display)?;
+    say!("{name} is now shown as {display}.");
+    Ok(())
+}
+
+/// Say that two entities were one all along.
+///
+/// Nothing is moved and nothing is deleted: resolution follows a pointer, so
+/// both pages become one page holding what either held.
+pub fn entity_merge(paths: StorePaths, from: &str, into: &str) -> Result<()> {
+    let (from_kind, from_value) = split_mention(from)?;
+    let (into_kind, into_value) = split_mention(into)?;
+    if from_kind != into_kind {
+        return Err(Error::Usage(format!(
+            "{from} and {into} are not the same kind of thing; \
+             a {from_kind} and a {into_kind} stay separate"
+        )));
+    }
+    capture_store::mutate::merge_entities(&paths, from_kind, &from_value, &into_value)?;
+    say!("{from} and {into} are one {from_kind} now.");
+    say!();
+    say!("Nothing moved. Either name reaches the same page, and every note");
+    say!("that mentioned either still says exactly what it said.");
+    Ok(())
+}
+
+/// Bind the note that *is* an entity, or unbind it.
+pub fn entity_bind(paths: StorePaths, name: &str, note: Option<&str>) -> Result<()> {
+    let (kind, value) = split_mention(name)?;
+    capture_store::mutate::bind_backing(&paths, kind, &value, note)?;
+    match note {
+        Some(n) => {
+            say!("{n} is the note that is {name}.");
+            say!();
+            // §4.3 puts the binding on the entity rather than on the note for
+            // exactly this reason, and saying so here saves somebody checking.
+            say!("It is still whatever it already was — a task stays a task.");
+        }
+        None => say!("{name} is no longer backed by a note."),
+    }
+    Ok(())
+}
+
+/// Split `@sarah` into the kind it names and the name itself.
+fn split_mention(name: &str) -> Result<(&'static str, String)> {
+    let mut chars = name.chars();
+    let sigil = chars.next().unwrap_or(' ');
+    let value: String = chars.collect();
+    let kind = match sigil {
+        '@' => "person",
+        '^' => "project",
+        '#' => "tag",
+        _ => {
+            return Err(Error::Usage(format!(
+                "'{name}' is not a mention; use @person, ^project or #tag"
+            )));
+        }
+    };
+    if value.is_empty() {
+        return Err(Error::Usage(format!(
+            "'{name}' names nothing after the sigil"
+        )));
+    }
+    Ok((kind, value))
+}
+
 /// Say that missing an instance of a series leaves something owed.
 ///
 /// Only ever set by a person. §3.6 is explicit that the recognizer must not

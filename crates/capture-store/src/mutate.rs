@@ -22,10 +22,11 @@
 use capture_core::{
     EventId,
     body::{
-        AliasBody, EditBody, MuteBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody,
-        UntagBody,
+        AliasBody, EditBody, EntityBindBody, EntityMergeBody, EntityRenameBody, MuteBody,
+        MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody, UntagBody,
     },
     event::Kind,
+    id::EntId,
 };
 
 use crate::{Error, Result, StorePaths, session::Session};
@@ -250,6 +251,106 @@ pub fn mute_scope(paths: &StorePaths, scope: MuteScope, until: Option<u64>) -> R
         })
     })?;
     Ok(())
+}
+
+/// Give an entity a name somebody chose.
+///
+/// The entity is named by a spelling, resolved through any merge, and the event
+/// carries the `ent_id` — never the word. A rename written against a spelling
+/// would be undone by the next rename, since the word it named has changed.
+///
+/// Refused where no note has ever used that spelling. §3.7's claim is that this
+/// axis populates without curation, and the other side of that is that there is
+/// nothing to name before something names it — a rename that created an entity
+/// would be the filing step the axis exists to avoid.
+pub fn rename_entity(paths: &StorePaths, kind: &str, name: &str, display: &str) -> Result<()> {
+    if display.trim().is_empty() {
+        return Err(crate::Error::Usage(String::from(
+            "a name has to be something; use the spelling as written to clear it",
+        )));
+    }
+    let ent = resolve_entity(paths, kind, name)?;
+    let mut s = Session::open(paths.clone())?;
+    s.append(Kind::ENTITY_RENAME, None, None, |nonce| {
+        encode(&EntityRenameBody {
+            nonce,
+            ent,
+            display: display.to_string(),
+        })
+    })?;
+    Ok(())
+}
+
+/// Say that two entities were one.
+///
+/// Both are named by spelling and both are resolved first, so merging something
+/// that has already been merged joins the chains rather than creating a second
+/// answer.
+///
+/// Refused where the two resolve to the same entity: that is either a spelling
+/// typed twice or a merge already done, and writing it would be an event that
+/// says nothing.
+pub fn merge_entities(paths: &StorePaths, kind: &str, from: &str, into: &str) -> Result<()> {
+    let from_ent = resolve_entity(paths, kind, from)?;
+    let into_ent = resolve_entity(paths, kind, into)?;
+    if from_ent == into_ent {
+        return Err(crate::Error::Usage(format!(
+            "'{from}' and '{into}' are already the same {kind}",
+        )));
+    }
+    let mut s = Session::open(paths.clone())?;
+    s.append(Kind::ENTITY_MERGE, None, None, |nonce| {
+        encode(&EntityMergeBody {
+            nonce,
+            from: from_ent,
+            into: into_ent,
+        })
+    })?;
+    Ok(())
+}
+
+/// Bind the note that *is* an entity, or unbind it.
+///
+/// `None` unbinds. The note is named the way every other command names one, so
+/// an alias works, and it is resolved here so that the event carries an id — a
+/// bind naming a slug would break the moment somebody renamed the note.
+pub fn bind_backing(paths: &StorePaths, kind: &str, name: &str, note: Option<&str>) -> Result<()> {
+    let ent = resolve_entity(paths, kind, name)?;
+    let mut s = Session::open(paths.clone())?;
+    let note = match note {
+        Some(n) => Some(find(&s, n)?),
+        None => None,
+    };
+    s.append(Kind::ENTITY_BIND, None, None, |nonce| {
+        encode(&EntityBindBody { nonce, ent, note })
+    })?;
+    Ok(())
+}
+
+/// Suppress every note naming an entity.
+///
+/// A thin wrapper over [`mute_scope`], here so that callers name an entity the
+/// way they name one everywhere else rather than deriving an id themselves.
+pub fn mute_entity(paths: &StorePaths, kind: &str, name: &str, until: Option<u64>) -> Result<()> {
+    let ent = resolve_entity(paths, kind, name)?;
+    mute_scope(paths, MuteScope::Entity(ent), until)
+}
+
+/// The entity a spelling reaches, refusing where nothing has named it.
+///
+/// A pre-flight check with a prose refusal, in the shape `set_alias` uses. The
+/// fold would decline a rename of an entity it has never seen by simply having
+/// nothing to show it against — which is correct and is invisible, so the
+/// refusal happens here where somebody is waiting for an answer.
+fn resolve_entity(paths: &StorePaths, kind: &str, name: &str) -> Result<EntId> {
+    let store = crate::projection::current(paths)?;
+    match store.entity_id(kind, name)? {
+        Some(ent) => Ok(ent),
+        None => Err(crate::Error::NotFound(format!(
+            "no {kind} called '{name}' — an entity exists because a note names it, \
+             so write one first",
+        ))),
+    }
 }
 
 /// Dismiss a note's divergence.

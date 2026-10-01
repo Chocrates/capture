@@ -18,7 +18,10 @@ use alloc::vec::Vec;
 
 use minicbor::{Decode, Encode};
 
-use crate::{Dev, Nonce, id::EventId};
+use crate::{
+    Dev, Nonce,
+    id::{EntId, EventId},
+};
 
 /// Raw captured input. Never rejected, never validated.
 #[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
@@ -196,6 +199,17 @@ pub enum MuteScope {
     /// Every note captured in a date range, as floating dates.
     #[n(2)]
     DateRange(#[n(0)] String, #[n(1)] String),
+    /// Every note naming a person, project or tag.
+    ///
+    /// Required by §2.6's gradient and deferred until there were entities to
+    /// scope to. Suppressing has to stay cheaper than destroying, and an entity
+    /// somebody does not want to be reminded of is the case where the only
+    /// other thing on offer would have been redaction — which is irreversible,
+    /// and would take the notes rather than the reminders.
+    ///
+    /// By `ent_id`, so a rename does not silently un-mute what somebody muted.
+    #[n(3)]
+    Entity(#[n(0)] EntId),
 }
 
 /// Destroy content on every replica. The only irreversible operation.
@@ -270,6 +284,70 @@ pub struct AliasBody {
     /// The chosen name. `None` removes whatever alias the note had.
     #[n(1)]
     pub alias: Option<String>,
+}
+
+/// Give an entity a name somebody chose.
+///
+/// Only the display changes. The `ent_id` came from the first spelling seen and
+/// is never recomputed (§4.3), which is what keeps a rename from forking the
+/// page and leaving half a history behind under the old word.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct EntityRenameBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// Which entity. Never a spelling — see [`EntId`].
+    #[n(1)]
+    pub ent: EntId,
+    /// What to show. Empty is refused by the fold rather than displayed, since
+    /// an entity with no name is one nothing can point at.
+    #[n(2)]
+    pub display: String,
+}
+
+/// Say that two entities were one all along.
+///
+/// A redirection, not a rewrite: nothing is moved, nothing is deleted, and no
+/// mention row changes. Resolution follows the pointer, which is what makes a
+/// merge survivable in a log that cannot take anything back — and is why this
+/// carries two ids rather than a list of notes to reassign.
+///
+/// Never inferred. Two spellings are indistinguishable from two people by
+/// phrasing alone, the same argument §3.6 makes for `carries_forward`.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct EntityMergeBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// The entity that stops being its own.
+    #[n(1)]
+    pub from: EntId,
+    /// The entity it becomes.
+    #[n(2)]
+    pub into: EntId,
+}
+
+/// Bind the note that *is* the project, rather than one that mentions it.
+///
+/// `None` unbinds, and is a decision rather than an absence — the same reason
+/// [`ParentBody`] carries an `Option`. "No longer backed by anything" has to be
+/// able to beat an earlier bind, and a body of this kind holding no note can
+/// mean nothing else.
+///
+/// Binding does not retype the note. §4.3 puts this on the entity precisely so
+/// that what a note can be stays `note | task | event | series`; a backing note
+/// may be a task, and goes on being one everywhere tasks appear.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct EntityBindBody {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    /// Hiding salt.
+    pub nonce: [u8; 16],
+    /// Which entity.
+    #[n(1)]
+    pub ent: EntId,
+    /// The backing note, or `None` to unbind.
+    #[n(2)]
+    pub note: Option<EventId>,
 }
 
 /// Dismiss a divergence that has been looked at.
