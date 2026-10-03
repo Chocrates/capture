@@ -673,6 +673,38 @@ pub fn tick_item_at(name: String, ord: u32, done: bool) -> std::result::Result<S
     })())
 }
 
+/// Take the reading the archive offered but would not act on.
+///
+/// The other half of the confidence floor. Below it a recognition is shown and
+/// applied to nothing, which is right for a machine deciding alone and wrong as
+/// a final answer — the person reading it wrote the text.
+///
+/// Answers what it became.
+#[tauri::command]
+pub fn accept_suggestion(name: String) -> std::result::Result<String, String> {
+    wire((|| {
+        let as_ = capture_store::promote::accept(&paths()?, &name)?;
+        Ok(String::from(match as_ {
+            capture_core::body::Promoted::Note => "note",
+            capture_core::body::Promoted::Task(_) => "task",
+            capture_core::body::Promoted::Event(_) => "event",
+            capture_core::body::Promoted::Series(_) => "series",
+        }))
+    })())
+}
+
+/// Insert the character a capture was missing to be a list.
+///
+/// Rewrites what somebody wrote, where accepting a type annotates and leaves it
+/// alone — so the window says which character and where, rather than offering a
+/// bare yes. Answers the text as it now reads.
+#[tauri::command]
+pub fn fix_list(name: String) -> std::result::Result<String, String> {
+    wire((|| {
+        capture_store::mutate::accept_near_miss(&paths()?, &name)
+    })())
+}
+
 /// Tick an item by its words.
 ///
 /// Kept for somebody typing them. A surface should use `tick_item_at`, which

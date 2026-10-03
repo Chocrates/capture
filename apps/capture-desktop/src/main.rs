@@ -34,6 +34,8 @@ fn main() {
             ipc::list,
             ipc::tick_item,
             ipc::tick_item_at,
+            ipc::accept_suggestion,
+            ipc::fix_list,
             ipc::tagged,
             ipc::wiki_index,
             ipc::set_parent,

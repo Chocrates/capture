@@ -762,3 +762,44 @@ fn every_command_the_page_calls_is_registered() {
         );
     }
 }
+
+/// The note page works a list through, rather than only displaying one.
+///
+/// The timeline draws items read-only and its comment says why — a row is a
+/// button that opens the note, and nesting a control inside it makes one
+/// gesture ambiguous. It points at the note page as the place a list is worked
+/// through, and the note page did not draw items at all. The one surface meant
+/// for the job was the one surface without it.
+#[test]
+fn the_note_page_ticks_items_by_position() {
+    let js = ui_code("app.js");
+
+    assert!(
+        js.contains("tick_item_at"),
+        "the note page should tick by position",
+    );
+    // By position and not by words. Two items reading the same are ordinary on
+    // a shopping list and their words cannot tell them apart, which is the
+    // whole reason `tick_item_at` exists beside `tick_item`.
+    assert!(
+        !js.contains("\"tick_item\""),
+        "ticking by words cannot address two identical items",
+    );
+}
+
+/// Accepting a suggestion and fixing a near miss are different acts.
+///
+/// One annotates and leaves the words alone; the other rewrites them. A button
+/// that said the same thing for both would teach that accepting a suggestion
+/// never touches your text, which would then be false.
+#[test]
+fn the_two_offers_do_not_wear_the_same_button() {
+    let js = ui_code("app.js");
+
+    assert!(js.contains("accept_suggestion"), "a type can be accepted");
+    assert!(js.contains("fix_list"), "a missing colon can be inserted");
+    assert!(
+        js.contains("Add the colon"),
+        "the offer that rewrites text should say what it inserts",
+    );
+}

@@ -21,7 +21,7 @@
 - [x] 4.1 `acceptNearMiss(name)`, answering the text as it now reads. The offer itself arrives through the existing `suggestion(name)`.
 - [x] 4.2 The note page offers **"Add the colon"** rather than "Yes, that's what it is", so the gesture that changes the text does not wear the same button as the one that does not.
 - [x] 4.3 `capture fix-list <note>` — named for what it does to the text rather than "accept", because this rewrites what somebody wrote and accepting a type does not.
-- [~] 4.4 Not wired. The window shows below-floor suggestions but has no accept gesture for them at all, so there is no seam to extend — the same situation as its list ticking. New work rather than a conversion.
+- [x] 4.4 The window offers both, and they do not wear the same button: **"Add the colon"** where the text will be rewritten, **"Yes, that is what it is"** where a type is annotated beside it. `accept_suggestion` and `fix_list` added to the IPC — the desktop had no accept gesture for suggestions at all, so it was showing a sentence nobody could act on.
 
 ## 5. Seeing it
 

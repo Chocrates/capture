@@ -36,7 +36,7 @@
 - [x] 6.1 `tickAt(name, ord, done)`, and `ListLine` gains the capture it came from — a collection gathers items from however many captures wrote them, and a surface needs to know which in order to tick the right one. A capture's own checklist was already `NoteSummary.items`.
 - [x] 6.2 Note page and list screen both tick by position. The list screen says "Everything tagged #x, from N captures" when N > 1 — this is a *collection*, not one person's list, and drawing two shopping trips as one is how a tag came to be treated as a list's identity.
 - [x] 6.3 `capture tick-at <note> <n>` / `untick-at`, counting from 1 because that is how the list prints itself. `tick` by words stays for people typing them, and its ambiguous refusal now names the remedy instead of saying it cannot be done.
-- [~] 6.4 **IPC added, nothing to wire it to.** `tick_item_at` is registered beside `tick_item`. The window draws items read-only on purpose — its own comment says completing one is a write and this row is a button that opens the note, so nesting a control inside it would make one gesture ambiguous — and `tick_item` has no caller in the UI either. Giving the desktop a ticking surface is new work, not a conversion, so it is not smuggled in here.
+- [x] 6.4 **The window had no list surface at all, which was the real gap.** Its timeline draws items read-only and the comment says why — a row is a button that opens the note — and points at the note page as where a list is worked through. The note page did not draw items. It does now, with real checkboxes, ticked by position through `tick_item_at`, and a count underneath. Two frontend tests hold the line, including one asserting the by-words call is absent.
 
 ## 7. Seeing it
 

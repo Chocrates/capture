@@ -771,9 +771,67 @@ async function showNote(name, into = view) {
     into.append(box);
   }
 
-  // A reading it had and did not act on. One line, applied to nothing.
+  // The list this capture names, worked through here.
+  //
+  // The timeline draws these read-only and says why: a row is a button that
+  // opens the note, and a control nested inside it makes one gesture
+  // ambiguous. This is the page that comment points at, and until now it did
+  // not draw them at all — so the one surface meant for working through a list
+  // was the one surface without it.
+  //
+  // Ticked by position. Two items reading the same are ordinary on a shopping
+  // list, and their words cannot tell them apart.
+  if (page.items && page.items.length) {
+    const list = el("ul", "items tickable");
+    page.items.forEach((item, ord) => {
+      const li = el("li", item.done ? "item done" : "item");
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = item.done;
+      box.addEventListener("change", async () => {
+        await call("tick_item_at", { name: n.slug, ord, done: box.checked });
+        showNote(n.slug);
+      });
+      li.append(box, el("span", "text", item.text));
+      list.append(li);
+    });
+    into.append(list);
+    const left = page.items.filter((i) => !i.done).length;
+    into.append(
+      el(
+        "p",
+        "hint",
+        left === 0
+          ? `All ${page.items.length} done.`
+          : `${left} of ${page.items.length} left.`,
+      ),
+    );
+  }
+
+  // A reading it had and did not act on, and what to do about it.
+  //
+  // Two different offers wearing one sentence. Accepting a *type* annotates and
+  // leaves the words alone; inserting a missing colon rewrites them. The button
+  // says which, because making them look alike would teach that accepting a
+  // suggestion never touches your text — which would then be false.
   if (page.suggestion) {
-    into.append(el("p", "suggestion", page.suggestion));
+    const box = el("div", "suggestion");
+    box.append(el("p", null, page.suggestion));
+
+    const missingColon = page.suggestion.includes("would make it one");
+    const act = el("button", "act", missingColon ? "Add the colon" : "Yes, that is what it is");
+    act.addEventListener("click", async () => {
+      if (missingColon) {
+        const text = await call("fix_list", { name: n.slug });
+        toast(`Now a list: ${text}`);
+      } else {
+        const became = await call("accept_suggestion", { name: n.slug });
+        toast(`Taken as ${became}. No later reparse will change it.`);
+      }
+      showNote(n.slug);
+    });
+    box.append(act);
+    into.append(box);
   }
 
   const meta = el("p", "day");

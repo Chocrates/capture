@@ -185,6 +185,9 @@ h2:first-child { margin-top: 0; }
  * and a suggestion styled like a fact would be read as one. */
 .suggestion { color: var(--warn); font-size: .85rem; margin-top: .35rem;
               border-left: 2px solid var(--warn); padding-left: .5rem; }
+/* The offer sits under what it is offering, not beside it: reading the sentence
+ * and then deciding is the order somebody does it in. */
+.suggestion p { margin: 0 0 .35rem 0; }
 
 .said { color: var(--dim); font-size: .85rem; margin-top: .8rem; }
 /* Answered items stay on the page rather than vanishing. A list that reflows
@@ -354,6 +357,25 @@ nav .hist:not(:disabled):hover { color: var(--text); }
   color: var(--dim);
 }
 .note .item.done::before { content: "☑ "; }
+
+/* A list being worked through, rather than read.
+ *
+ * The drawn box above is a pseudo-element and cannot be clicked, which is right
+ * for the timeline — a row there is a button that opens the note. On the note
+ * page the items carry real checkboxes, so the box is suppressed to avoid two
+ * of them side by side. */
+.note .items.tickable .item::before { content: none; }
+.note .items.tickable .item {
+  display: flex;
+  align-items: baseline;
+  gap: .4rem;
+  padding: .1rem 0;
+}
+.note .items.tickable input[type="checkbox"] { cursor: pointer; }
+.note .items.tickable .item.done .text {
+  color: var(--dim);
+  text-decoration: line-through;
+}
 .note .item.done {
   color: var(--dim);
   text-decoration: line-through;
