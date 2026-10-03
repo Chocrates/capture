@@ -519,7 +519,9 @@ fn accepting_is_refused_where_there_is_nothing_to_fix() {
 fn declining_leaves_the_capture_exactly_as_written() {
     let scratch = Scratch::new("decline");
     let paths = scratch.paths();
-    let text = "#groceries 7 apples, 1kg lentils";
+    // Three items, because two is below the bar the eagerness measurement set:
+    // one comma fired on every ordinary tagged note it was tried against.
+    let text = "#groceries 7 apples, 1kg lentils, bag of carrots";
     let slug = capture(&paths, text);
 
     // Reading the offer changes nothing, and it is still there afterwards.

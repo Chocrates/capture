@@ -25,5 +25,7 @@
 
 ## 5. Seeing it
 
-- [ ] 5.1 The capture from the archive that started this, as a before and after. **`dev.capture.dev` or a scratch store only** — never the real archive.
-- [ ] 5.2 Count how often it fires across a few hundred real-shaped captures before deciding the comma rule is right. Too eager is a worse failure than too quiet here, because a suggestion nobody wants is one they learn to ignore.
+- [x] 5.1 Before and after against a scratch store, on the capture from the real archive: silent, then offering the colon, then five tickable items. The measurement in 5.2 is the stronger evidence and is kept as an ignored test.
+- [x] 5.2 **Measured, and the rule was wrong.** Over 614 capture-shaped strings from the suite it fired **0 times** — but that corpus holds only ten tag-anchored captures, five already lists, so a zero rate said almost nothing. Against hand-written tagged prose it fired on **every line**: `#reading finished the long one, finally`, `#health slept badly, again`, `#journal a quiet day, mostly reading` — six false offers out of eight.
+
+  The design's open question asked one comma or two. The answer is **two**, which is three things and therefore a list rather than a sentence with a clause in it. Six false positives to zero, both true positives kept. The cost — a two-item list written without its colon stays silent — is pinned as its own test rather than discovered later.

@@ -668,11 +668,24 @@ pub fn near_miss(text: &str) -> Option<NearMiss> {
             None
         }
 
-        // No colon at all. A comma is what separates "a list missing its colon"
-        // from an ordinary tagged note, and one is the fewest that can.
+        // No colon at all. Commas are what separate "a list missing its colon"
+        // from an ordinary tagged note — and **two**, not one.
+        //
+        // One comma was the first rule and it was measured, which is the only
+        // reason this says two. Against hand-written tagged prose it fired on
+        // every single line: `#reading finished the long one, finally`,
+        // `#health slept badly, again`, `#journal a quiet day, mostly reading`.
+        // Six false offers out of eight. A suggestion somebody does not want is
+        // one they learn to ignore, and an ignored channel cannot deliver the
+        // one that matters.
+        //
+        // Two commas means three things, which is a list rather than a sentence
+        // with a clause in it. The cost is a two-item list written without its
+        // colon, which stays silent — the failure this change exists to fix, in
+        // the one case where the evidence for it is weakest.
         None => {
             let (tag, after) = rest.split_once(char::is_whitespace)?;
-            if tag.is_empty() || !after.contains(ITEM_SEPARATOR) {
+            if tag.is_empty() || after.matches(ITEM_SEPARATOR).count() < 2 {
                 return None;
             }
             Some(NearMiss::NoColon {

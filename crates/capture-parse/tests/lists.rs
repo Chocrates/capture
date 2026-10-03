@@ -256,6 +256,30 @@ fn a_tag_with_commas_and_no_colon_is_a_near_miss() {
 }
 
 #[test]
+fn one_comma_is_a_sentence_and_two_are_a_list() {
+    // The boundary, set by measuring rather than by taste. One comma fired on
+    // every hand-written tagged note it was tried against — `#health slept
+    // badly, again` — and a suggestion somebody does not want is one they learn
+    // to ignore.
+    assert!(near_miss("#reading finished the long one, finally").is_none());
+    assert!(near_miss("#journal a quiet day, mostly reading").is_none());
+    assert!(near_miss("#health slept badly, again").is_none());
+
+    // Two commas is three things, which is a list rather than a sentence with a
+    // clause in it.
+    assert!(near_miss("#groceries milk, eggs, bread").is_some());
+    assert!(near_miss("#packing passport, charger, adapter").is_some());
+}
+
+#[test]
+fn a_two_item_list_without_its_colon_stays_quiet() {
+    // The cost of the rule above, written down rather than discovered. A list
+    // of two missing its colon is not offered, which is the silence this change
+    // exists to remove — in the one case where the evidence for it is weakest.
+    assert!(near_miss("#shop milk, eggs").is_none());
+}
+
+#[test]
 fn a_colon_with_nothing_after_it_is_a_near_miss() {
     assert_eq!(
         near_miss("#groceries:"),
