@@ -444,3 +444,88 @@ fn what_a_list_read_costs() {
         gathered.len(),
     );
 }
+
+#[test]
+fn accepting_a_near_miss_makes_the_capture_a_list() {
+    // The capture that started this, from a real archive: a grocery list for
+    // the day, written as one, not recognised, and nothing saying why.
+    let scratch = Scratch::new("nearmiss");
+    let paths = scratch.paths();
+    let slug = capture(
+        &paths,
+        "#groceries 7 apples, rye flour or bread, 1kg lentils, bag of carrots",
+    );
+
+    // Not a list, and the archive can say exactly why.
+    assert!(items(&paths, &slug).is_empty());
+    let said = capture_store::review::suggestion_for(
+        "#groceries 7 apples, rye flour or bread, 1kg lentils, bag of carrots",
+        None,
+        NOW as i64,
+    )
+    .expect("a near miss");
+    assert!(said.contains("#groceries:"), "it should say where: {said}");
+
+    let fixed = mutate::accept_near_miss(&paths, &slug).unwrap();
+    assert_eq!(
+        fixed, "#groceries: 7 apples, rye flour or bread, 1kg lentils, bag of carrots",
+        "the colon went in the wrong place"
+    );
+
+    assert_eq!(
+        items(&paths, &slug)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![
+            "7 apples".to_string(),
+            "rye flour or bread".into(),
+            "1kg lentils".into(),
+            "bag of carrots".into(),
+        ],
+        "accepting did not produce the list the text named"
+    );
+
+    // And there is nothing left to offer.
+    assert!(
+        capture_store::review::suggestion_for(&fixed, None, NOW as i64).is_none()
+            || !capture_store::review::suggestion_for(&fixed, None, NOW as i64)
+                .unwrap()
+                .contains("looks like a list")
+    );
+}
+
+#[test]
+fn accepting_is_refused_where_there_is_nothing_to_fix() {
+    let scratch = Scratch::new("nofix");
+    let paths = scratch.paths();
+
+    // Already a list.
+    let listy = capture(&paths, "#shop: milk, eggs");
+    assert!(mutate::accept_near_miss(&paths, &listy).is_err());
+
+    // An ordinary tagged note, which is not a near miss and must not be edited.
+    let note = capture(&paths, "#reading finished the long one");
+    assert!(mutate::accept_near_miss(&paths, &note).is_err());
+
+    // A colon with nothing after it needs items, not a character — so it says
+    // that rather than writing an empty list.
+    let bare = capture(&paths, "#groceries:");
+    let err = mutate::accept_near_miss(&paths, &bare).unwrap_err();
+    assert!(format!("{err}").contains("items"), "unhelpful: {err}");
+}
+
+#[test]
+fn declining_leaves_the_capture_exactly_as_written() {
+    let scratch = Scratch::new("decline");
+    let paths = scratch.paths();
+    let text = "#groceries 7 apples, 1kg lentils";
+    let slug = capture(&paths, text);
+
+    // Reading the offer changes nothing, and it is still there afterwards.
+    let store = settled(&paths);
+    let tgt = store.resolve(&slug).unwrap().unwrap();
+    assert_eq!(store.text_of(&tgt).unwrap().as_deref(), Some(text));
+    assert!(capture_store::review::suggestion_for(text, None, NOW as i64).is_some());
+    assert!(items(&paths, &slug).is_empty());
+}

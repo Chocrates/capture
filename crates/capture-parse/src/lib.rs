@@ -614,6 +614,107 @@ const ITEM_SEPARATOR: char = ',';
 /// anyway: "is this the first thing written". Reading the text directly says
 /// what is meant. Reading the tokens would mean reassembling a position the
 /// tokenizer had already discarded.
+/// Why a capture nearly was a list, where it nearly was one.
+///
+/// [`list_of`] declines and says nothing, which is right for a parser and wrong
+/// for whoever wrote the capture. A grocery list sat in a real archive for three
+/// days as a tagged note because its colon was missing, and the only symptom was
+/// a list that never appeared.
+///
+/// §3.1.5's guard stays exactly as tight. That rule is about *acting* on a
+/// guess — a form firing inside ordinary writing is worse than one that never
+/// fires — and this does not act on anything. It answers a different question:
+/// not "is this a list" but "is this one character away from being one".
+///
+/// Two misses, and no others:
+///
+/// - **A tag, a comma, and no colon.** `#groceries 7 apples, rye flour` — the
+///   case from the archive.
+/// - **A colon with nothing after it.** `#groceries:` — somebody writing a list
+///   who stopped.
+///
+/// A tag with no comma and no colon is deliberately *not* a near miss.
+/// `#reading finished the long one` is an ordinary tagged note, and suggesting a
+/// list there would fire on most tagged notes ever written — which is §3.1.5's
+/// failure wearing a different hat.
+///
+/// Returns the tag, so a surface can say which character goes where. Never
+/// returns anything for text [`list_of`] already accepts.
+pub fn near_miss(text: &str) -> Option<NearMiss> {
+    use alloc::string::ToString;
+
+    // Already a list. Nothing to suggest.
+    if list_of(text).is_some() {
+        return None;
+    }
+
+    // Anchored, exactly as the list form is. A tag mid-sentence is prose.
+    let rest = text.trim_start().strip_prefix('#')?;
+
+    match rest.split_once(':') {
+        // A colon, and nothing after it worth naming. `#groceries:` is a tagged
+        // note today, and somebody typed that colon on purpose.
+        Some((tag, after)) => {
+            if tag.is_empty() || tag.chars().any(char::is_whitespace) {
+                return None;
+            }
+            if after.trim().is_empty() {
+                return Some(NearMiss::NothingAfterTheColon {
+                    tag: tag.to_string(),
+                });
+            }
+            // A colon and items after it, yet `list_of` refused — nothing left
+            // that this function knows how to explain.
+            None
+        }
+
+        // No colon at all. A comma is what separates "a list missing its colon"
+        // from an ordinary tagged note, and one is the fewest that can.
+        None => {
+            let (tag, after) = rest.split_once(char::is_whitespace)?;
+            if tag.is_empty() || !after.contains(ITEM_SEPARATOR) {
+                return None;
+            }
+            Some(NearMiss::NoColon {
+                tag: tag.to_string(),
+            })
+        }
+    }
+}
+
+/// How a capture missed being a list.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NearMiss {
+    /// A tag and commas, with no colon between them.
+    NoColon { tag: alloc::string::String },
+    /// A tag and a colon, with nothing following.
+    NothingAfterTheColon { tag: alloc::string::String },
+}
+
+impl NearMiss {
+    /// The tag the capture opened with.
+    pub fn tag(&self) -> &str {
+        match self {
+            NearMiss::NoColon { tag } | NearMiss::NothingAfterTheColon { tag } => tag,
+        }
+    }
+
+    /// What to say, naming the character and what it would become.
+    ///
+    /// "This might be a list" is not actionable. Which character, and where, is.
+    pub fn said(&self) -> alloc::string::String {
+        use alloc::format;
+        match self {
+            NearMiss::NoColon { tag } => {
+                format!("This looks like a list. A colon after #{tag} would make it one: #{tag}: …")
+            }
+            NearMiss::NothingAfterTheColon { tag } => format!(
+                "#{tag}: names a list with nothing on it. Items after the colon, separated by commas, would fill it in."
+            ),
+        }
+    }
+}
+
 pub fn list_of(text: &str) -> Option<List> {
     use alloc::string::ToString;
 

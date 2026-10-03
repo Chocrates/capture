@@ -304,7 +304,14 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
             // better placed than the parser to say whether it meant Tuesday.
             model.suggestion?.let { offered ->
                 Text(offered, style = MaterialTheme.typography.labelMedium)
-                TextButton({ model.accept(note.slug) }) { Text("Yes, that's what it is") }
+                // Two different offers wearing one sentence, and the difference
+                // matters: a type is an annotation beside the text, and a
+                // missing colon is a change *to* it. The button says which.
+                if (offered.contains("would make it one")) {
+                    TextButton({ model.fixList(note.slug) }) { Text("Add the colon") }
+                } else {
+                    TextButton({ model.accept(note.slug) }) { Text("Yes, that's what it is") }
+                }
             }
             recording?.let { Listen(it, model) }
         }

@@ -353,6 +353,62 @@ fn resolve_entity(paths: &StorePaths, kind: &str, name: &str) -> Result<EntId> {
     }
 }
 
+/// Insert the character a capture was missing to be a list.
+///
+/// An ordinary [`edit`], authored because somebody asked for it. The system does
+/// not write this on its own: captured text is kept verbatim (§3.1.3), and a
+/// correction to one's own words is a thing a person does.
+///
+/// Different in kind from accepting a promotion, which annotates and leaves the
+/// text alone. That is why the surfaces say what will be inserted rather than
+/// offering a bare yes — teaching somebody that accepting a suggestion never
+/// touches what they wrote would be teaching them something false.
+///
+/// Refused where there is nothing to fix, so that a surface offering it on the
+/// wrong capture fails loudly rather than rewriting text for no reason.
+pub fn accept_near_miss(paths: &StorePaths, name: &str) -> Result<String> {
+    let text = {
+        let store = crate::projection::current(paths)?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        store
+            .text_of(&tgt)?
+            .ok_or_else(|| crate::Error::Usage(String::from("that capture has no readable text")))?
+    };
+
+    let Some(miss) = capture_parse::near_miss(&text) else {
+        return Err(crate::Error::Usage(String::from(
+            "that capture is not one character from being a list",
+        )));
+    };
+
+    let fixed = match &miss {
+        // `#groceries 7 apples, …` becomes `#groceries: 7 apples, …`. The colon
+        // goes directly after the tag, which is the only place the list form
+        // ever looks for one.
+        capture_parse::NearMiss::NoColon { tag } => {
+            let trimmed = text.trim_start();
+            let at = text.len() - trimmed.len() + 1 + tag.len();
+            let mut fixed = String::with_capacity(text.len() + 1);
+            fixed.push_str(&text[..at]);
+            fixed.push(':');
+            fixed.push_str(&text[at..]);
+            fixed
+        }
+        // Nothing follows the colon, so there is nothing to insert and nothing
+        // to guess. Saying so beats writing an empty list.
+        capture_parse::NearMiss::NothingAfterTheColon { .. } => {
+            return Err(crate::Error::Usage(String::from(
+                "that one needs items, not a character; write them after the colon",
+            )));
+        }
+    };
+
+    edit(paths, name, &fixed)?;
+    Ok(fixed)
+}
+
 /// Dismiss a note's divergence.
 ///
 /// Dismissing is not choosing. Both versions stay in the log and in the version

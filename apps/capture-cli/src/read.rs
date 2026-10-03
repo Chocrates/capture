@@ -596,6 +596,15 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
                 i.note.text.as_deref().map(first_line).unwrap_or_default()
             );
             say!("    — {why}");
+            // What the archive suspects but would not act on. Computed in
+            // `review()` and, until now, printed nowhere: a suggestion nobody
+            // is shown is a suggestion that does not exist.
+            if let Some(text) = i.note.text.as_deref()
+                && let Some(said) =
+                    capture_store::review::suggestion_for(text, i.note.tz.as_deref(), now)
+            {
+                say!("    {said}");
+            }
             say!();
         }
         say!("capture engaged <name>   did something with it");

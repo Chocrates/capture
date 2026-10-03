@@ -740,6 +740,19 @@ fn day_of(ms: i64) -> String {
 /// all of them. "Already done" and "just done" are different facts, and a
 /// refusal to guess between two identical items is not a failure — it is the
 /// only honest answer when completion matches by text.
+/// Insert the character a capture was missing to be a list.
+///
+/// Says what it did, because it changed what somebody wrote. Accepting a type
+/// leaves the words alone and this does not, and a surface that made the two
+/// look alike would be teaching something false.
+pub fn fix_list(paths: StorePaths, name: &str) -> Result<()> {
+    let fixed = capture_store::mutate::accept_near_miss(&paths, name)?;
+    say!("Now a list:");
+    say!();
+    say!("  {fixed}");
+    Ok(())
+}
+
 /// Tick one item of a capture, by its number.
 ///
 /// What to reach for when two items read the same: a number says which, and

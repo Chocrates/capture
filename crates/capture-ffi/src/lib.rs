@@ -1664,6 +1664,19 @@ impl Archive {
         ))
     }
 
+    /// Insert the character a capture was missing to be a list.
+    ///
+    /// An ordinary edit, authored because somebody asked. Different in kind from
+    /// `accept`, which annotates and leaves the words alone — this rewrites
+    /// them, which is why a surface offering it says what will be inserted
+    /// rather than offering a bare yes.
+    ///
+    /// Answers the text as it now reads.
+    pub fn accept_near_miss(&self, name: String) -> Result<String> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::accept_near_miss(&self.paths, &name)?)
+    }
+
     /// Take the reading the archive offered but would not act on.
     ///
     /// The other half of the confidence floor. Below it a recognition is shown

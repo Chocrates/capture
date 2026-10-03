@@ -387,6 +387,16 @@ class Model(private val archive: Archive) : ViewModel() {
     /** Take the reading the archive offered but would not act on by itself. */
     fun accept(name: String) = after(name) { archive.accept(name) }
 
+    /**
+     * Insert the character a capture was missing to be a list.
+     *
+     * Rewrites what somebody wrote, where [accept] annotates and leaves the
+     * words alone. The surface says which character and where, because making
+     * the two look alike would teach that accepting a suggestion never touches
+     * the text — which would then be false.
+     */
+    fun fixList(name: String) = after(name) { archive.acceptNearMiss(name) }
+
     // --- entities ------------------------------------------------------------
     //
     // Re-read the page rather than patching it. A merge changes which notes the

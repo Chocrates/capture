@@ -101,6 +101,10 @@ pub enum Command {
         item: String,
         done: bool,
     },
+    /// Insert the character a capture was missing to be a list.
+    FixList {
+        name: String,
+    },
     /// Tick one item of a capture, by its number.
     TickAt {
         name: String,
@@ -594,6 +598,10 @@ where
         //
         // One-based on the way in, because the list prints itself that way and
         // somebody counting rows on a screen is counting from one.
+        // `capture fix-list <note>`. Named for what it does to the text, not
+        // "accept": this rewrites what somebody wrote, where accepting a type
+        // leaves it alone, and the two should not sound the same.
+        "fix-list" => one_name(&args[1..], "fix-list", |name, _| Command::FixList { name }),
         "tick-at" | "untick-at" => {
             let done = args[0] == "tick-at";
             match &args[1..] {
@@ -1150,6 +1158,7 @@ TIME AND TASKS
   capture list <tag>             a list: its items, and what is left
   capture due                    what will speak, and when
   capture tick <tag> <item>      tick one off; untick puts it back
+  capture fix-list <note>        insert the colon a list was missing
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
                                (untick-at puts it back; use this where two
                                 items read the same)

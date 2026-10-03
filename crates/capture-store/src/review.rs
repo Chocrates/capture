@@ -292,6 +292,16 @@ pub fn suggestion_for(text: &str, tz: Option<&str>, now: i64) -> Option<String> 
         .and_then(capture_time::Zone::new)
         .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
 
+    // A capture that nearly was a list, before anything about time.
+    //
+    // First because it is the more specific statement: a grocery list missing
+    // its colon also reads as "a day" at 70%, and telling somebody their
+    // shopping list might be an appointment is worse than useless when the
+    // actual answer is a missing character.
+    if let Some(miss) = capture_parse::near_miss(text) {
+        return Some(miss.said());
+    }
+
     let r = capture_parse::recognize(text, now, zone);
     if r.confidence == 0 || r.confidence >= crate::promote::FLOOR {
         return None;

@@ -230,3 +230,87 @@ fn a_stray_sigil_before_the_colon_is_not_an_empty_tag() {
     // Reading it as a tag called "" would file things under nothing at all.
     assert!(list_of("#: milk, eggs").is_none());
 }
+
+// -------------------------------------------------------- near misses ------
+//
+// The case from a real archive: a grocery list written as one, not recognised,
+// and nothing anywhere saying why. The guard that refused it is right; its
+// silence was not.
+
+use capture_parse::{NearMiss, near_miss};
+
+#[test]
+fn a_tag_with_commas_and_no_colon_is_a_near_miss() {
+    let m = near_miss("#groceries 7 apples, rye flour or bread, 500g pearl barley, 1kg lentils")
+        .expect("a near miss");
+    assert_eq!(
+        m,
+        NearMiss::NoColon {
+            tag: "groceries".into()
+        }
+    );
+    assert!(
+        m.said().contains("#groceries:"),
+        "it should say where the colon goes"
+    );
+}
+
+#[test]
+fn a_colon_with_nothing_after_it_is_a_near_miss() {
+    assert_eq!(
+        near_miss("#groceries:"),
+        Some(NearMiss::NothingAfterTheColon {
+            tag: "groceries".into()
+        })
+    );
+    assert!(near_miss("#groceries:   ").is_some());
+}
+
+#[test]
+fn a_list_is_not_a_near_miss() {
+    assert!(near_miss("#groceries: milk, eggs").is_none());
+    assert!(near_miss(": milk, eggs").is_none());
+}
+
+#[test]
+fn an_ordinary_tagged_note_is_not_a_near_miss() {
+    // No comma, so nothing suggests a list. Without this guard the offer would
+    // appear on most tagged notes ever written, which is §3.1.5's failure in
+    // another costume.
+    assert!(near_miss("#reading finished the long one").is_none());
+    assert!(near_miss("#standup at 9:30").is_none());
+    assert!(near_miss("#groceries").is_none());
+}
+
+#[test]
+fn prose_is_not_a_near_miss() {
+    for prose in [
+        "ask sarah about the invoice, she has it",
+        "the plan: get it done",
+        "milk, eggs, bread",
+        "",
+        "   ",
+    ] {
+        assert!(near_miss(prose).is_none(), "{prose:?} is not a near miss");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// Saying "this nearly matched" must never become "this matched".
+    ///
+    /// The whole safety of this feature is that the guard does not move. Stated
+    /// over arbitrary text because that is where a loosened guard would hide.
+    #[test]
+    fn a_near_miss_is_never_also_a_list(s in ".*") {
+        if near_miss(&s).is_some() {
+            prop_assert!(
+                list_of(&s).is_none(),
+                "{:?} was offered as a near miss and is already a list", s,
+            );
+            // And it is anchored, like the form it nearly is.
+            prop_assert!(s.trim_start().starts_with('#'), "{:?} is not anchored", s);
+        }
+    }
+}
