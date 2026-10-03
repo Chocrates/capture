@@ -740,6 +740,31 @@ fn day_of(ms: i64) -> String {
 /// all of them. "Already done" and "just done" are different facts, and a
 /// refusal to guess between two identical items is not a failure — it is the
 /// only honest answer when completion matches by text.
+/// Tick one item of a capture, by its number.
+///
+/// What to reach for when two items read the same: a number says which, and
+/// words cannot. Counted from 1 on the way in, because the list prints itself
+/// that way and somebody reading rows off a screen counts from one.
+pub fn tick_at(paths: StorePaths, name: &str, ord: u32, done: bool) -> Result<()> {
+    use capture_store::promote::Ticked;
+
+    match capture_store::promote::tick_at(&paths, name, ord, done)? {
+        Ticked::Done if done => say!("Done."),
+        Ticked::Done => say!("Open again."),
+        Ticked::Already if done => say!("Already done."),
+        Ticked::Already => say!("Not ticked."),
+        Ticked::NoSuchItem => {
+            say!("{name} has no item {}.", ord + 1);
+            say!();
+            say!("They are numbered in the order they were written, from 1.");
+        }
+        // Unreachable by construction: a number names exactly one item, which
+        // is the whole reason this exists beside `tick`.
+        Ticked::Ambiguous(_) => say!("That item could not be told apart."),
+    }
+    Ok(())
+}
+
 pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> {
     use capture_store::promote::Ticked;
 
@@ -757,8 +782,8 @@ pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> 
         Ticked::Ambiguous(n) => {
             say!("{n} items on #{tag} read \"{item}\".");
             say!();
-            say!("Completion matches an item by its text, so these cannot be told");
-            say!("apart. Edit the list to say which is which.");
+            say!("Naming an item by its words cannot tell those apart. Say which");
+            say!("by its number instead:  capture tick-at <note> <n>");
         }
         Ticked::NoSuchItem => {
             say!("Nothing on #{tag} reads \"{item}\".");

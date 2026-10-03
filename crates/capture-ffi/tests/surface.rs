@@ -1721,3 +1721,48 @@ fn merging_accepts_the_other_name_written_bare() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn two_identical_items_are_tickable_through_the_binding() {
+    // Untickable before this. `tick` matched by words, found two, and refused —
+    // and a phone showing the list always knew which row a thumb landed on.
+    let root = scratch("tick-at");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("#shop: milk, milk, bread".into()).unwrap() else {
+        panic!("it stored");
+    };
+
+    assert!(matches!(
+        a.tick(("shop").into(), "milk".into(), true).unwrap(),
+        capture_ffi::Ticked::Ambiguous { count: 2 }
+    ));
+
+    a.tick_at(slug.clone(), 1, true).unwrap();
+    let items = a.note(slug.clone()).unwrap().items;
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        items.iter().map(|i| i.done).collect::<Vec<_>>(),
+        vec![false, true, false],
+        "the wrong one of two identical items was ticked"
+    );
+}
+
+#[test]
+fn a_reworded_item_keeps_its_tick_through_the_binding() {
+    let root = scratch("reword-ffi");
+    let a = Archive::open(root.clone()).unwrap();
+
+    let Captured::Stored { slug } = a.capture("#shop: milk, eggs, bread".into()).unwrap() else {
+        panic!("it stored");
+    };
+    a.tick_at(slug.clone(), 1, true).unwrap();
+    a.edit(slug.clone(), "#shop: milk, free-range eggs, bread".into())
+        .unwrap();
+
+    let items = a.note(slug.clone()).unwrap().items;
+    assert_eq!(items[1].text, "free-range eggs");
+    assert!(items[1].done, "correcting a word discarded the tick");
+
+    std::fs::remove_dir_all(&root).ok();
+}

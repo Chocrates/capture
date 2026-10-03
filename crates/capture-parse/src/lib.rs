@@ -619,19 +619,40 @@ pub fn list_of(text: &str) -> Option<List> {
 
     // Anchored. Leading whitespace is allowed because it is invisible to
     // whoever typed it; anything else before the sigil is not.
-    let rest = text.trim_start().strip_prefix('#')?;
+    let anchored = text.trim_start();
 
-    // The tag runs to the first colon, and must be a single slug. Splitting on
-    // the *first* colon rather than the last: `#groceries: milk: the good one`
-    // names one item containing a colon, which is likelier than a tag with one
-    // in it.
-    let (tag, items) = rest.split_once(':')?;
+    // Two forms, and the second exists because requiring a tag made every
+    // checklist a collection as well.
+    //
+    // A task with parts does not want a label — `: pack passport, charger,
+    // adapter` is one errand with three bits, not a thing to file under
+    // "pack". Forcing a tag there is how a checklist and a collection came to
+    // be the same word.
+    let (tag, items) = match anchored.strip_prefix('#') {
+        // `#groceries: milk, eggs`. The tag runs to the first colon and must be
+        // a single slug. Splitting on the *first* colon rather than the last:
+        // `#groceries: milk: the good one` names one item containing a colon,
+        // which is likelier than a tag with one in it.
+        Some(rest) => {
+            let (tag, items) = rest.split_once(':')?;
 
-    // One slug. An empty tag is not one either — `#: milk` names nothing to
-    // file under.
-    if tag.is_empty() || tag.chars().any(char::is_whitespace) {
-        return None;
-    }
+            // One slug. An empty tag is not one either — `#: milk` is the
+            // untagged form below written with a stray sigil, and reading it as
+            // a tag named "" would file things under nothing.
+            if tag.is_empty() || tag.chars().any(char::is_whitespace) {
+                return None;
+            }
+            (tag, items)
+        }
+
+        // `: milk, eggs`. No tag, and the empty string says so — which is what
+        // the projection stores and what a collection query excludes.
+        //
+        // Anchored just as hard. A colon mid-sentence is ordinary writing, and
+        // §3.1.5's rule is that a match firing inside prose is worse than no
+        // match at all.
+        None => ("", anchored.strip_prefix(':')?),
+    };
 
     let items: alloc::vec::Vec<_> = items
         .split(ITEM_SEPARATOR)

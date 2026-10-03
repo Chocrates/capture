@@ -69,8 +69,9 @@ fn what_is_not_a_list() {
         // A tag with nothing after the colon.
         "#groceries:",
         "#groceries:   ",
-        // Nothing to file under.
-        ": milk, eggs",
+        // A sigil that names nothing. The untagged form is written without
+        // one; reading this as a tag called "" would file things under
+        // nothing at all.
         "#: milk",
         // No colon.
         "#groceries milk eggs",
@@ -109,7 +110,9 @@ proptest! {
     #[test]
     fn a_recognised_list_is_always_well_formed(s in ".*") {
         if let Some(list) = list_of(&s) {
-            prop_assert!(!list.tag.is_empty(), "a list always files under something");
+            // A tag is optional now: a checklist with no label is one errand
+            // with parts rather than a thing to file. Where there *is* one it
+            // is still a single slug.
             prop_assert!(
                 !list.tag.chars().any(char::is_whitespace),
                 "the tag is one slug: {:?}", list.tag,
@@ -119,9 +122,12 @@ proptest! {
                 prop_assert!(!item.is_empty(), "an empty item is never named");
                 prop_assert_eq!(item.trim(), item.as_str(), "items arrive trimmed");
             }
+            // Anchored, which is the guard that matters. Two openers now, and
+            // neither may appear anywhere but the front.
+            let front = s.trim_start();
             prop_assert!(
-                s.trim_start().starts_with('#'),
-                "only an anchored sigil opens a list: {:?}", s,
+                front.starts_with('#') || front.starts_with(':'),
+                "only an anchored opener starts a list: {:?}", s,
             );
         }
     }
@@ -140,7 +146,8 @@ proptest! {
         ).prop_map(|v| v.join(" "))
     ) {
         if let Some(list) = list_of(&s) {
-            prop_assert!(s.trim_start().starts_with('#'));
+            let front = s.trim_start();
+            prop_assert!(front.starts_with('#') || front.starts_with(':'));
             prop_assert!(!list.items.is_empty());
         }
     }
@@ -168,4 +175,58 @@ proptest! {
 
 fn alloc_line(tag: &str, items: &[String]) -> String {
     format!("#{tag}: {}", items.join(", "))
+}
+
+// --------------------------------------------------------- untagged --------
+//
+// A checklist without a label. Requiring a tag is what made every checklist a
+// collection as well: a task with parts does not want filing under anything,
+// and `: pack passport, charger, adapter` is one errand with three bits.
+
+#[test]
+fn a_checklist_needs_no_tag() {
+    let list = list_of(": milk, eggs, bread").expect("a list");
+    assert_eq!(list.tag, "", "an untagged list should name no tag");
+    assert_eq!(list.items, ["milk", "eggs", "bread"]);
+}
+
+#[test]
+fn an_untagged_checklist_is_anchored_just_as_hard() {
+    // A colon mid-sentence is ordinary writing, and §3.1.5 rates a match firing
+    // inside prose as worse than no match at all. These are the sentences that
+    // would have been destroyed by a looser rule.
+    for prose in [
+        "ask sarah: she has it",
+        "the plan: get it done",
+        "note to self: milk, eggs",
+        "standup at 9:30",
+        "budget 40k: revisit in Q2",
+    ] {
+        assert!(
+            list_of(prose).is_none(),
+            "{prose:?} is a sentence, not a list"
+        );
+    }
+}
+
+#[test]
+fn leading_space_is_still_invisible() {
+    // Whitespace before it is invisible to whoever typed it; anything else is
+    // not, which is the same rule the tagged form follows.
+    assert!(list_of("   : milk, eggs").is_some());
+    assert!(list_of("x : milk, eggs").is_none());
+}
+
+#[test]
+fn a_colon_with_nothing_after_it_is_not_a_list() {
+    assert!(list_of(":").is_none());
+    assert!(list_of(":   ").is_none());
+    assert!(list_of("#shop:").is_none());
+}
+
+#[test]
+fn a_stray_sigil_before_the_colon_is_not_an_empty_tag() {
+    // `#: milk` is the untagged form written with a sigil that names nothing.
+    // Reading it as a tag called "" would file things under nothing at all.
+    assert!(list_of("#: milk, eggs").is_none());
 }

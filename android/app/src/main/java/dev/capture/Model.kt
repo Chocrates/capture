@@ -210,6 +210,30 @@ class Model(private val archive: Archive) : ViewModel() {
     }
 
     /**
+     * Tick one item of a capture, by where it sits in it.
+     *
+     * What every surface here should use. A row on screen already knows which
+     * one a thumb landed on, so there is nothing to match by words — and two
+     * items reading the same were untickable until this existed, because
+     * matching by words found both and refused. "milk, milk" is what somebody
+     * writes when two shops are meant.
+     *
+     * The position goes into the log with the tick, so correcting a word later
+     * does not discard it.
+     */
+    fun tickAt(name: String, ord: UInt, done: Boolean) = load {
+        when (archive.tickAt(name, ord, done)) {
+            is Ticked.NoSuchItem ->
+                trouble = "That item is no longer on this capture."
+            // Nothing to say for the rest. Ambiguous cannot happen here — that
+            // is the whole point of addressing a row rather than its words.
+            else -> trouble = null
+        }
+        reread()
+        if (screen is Screen.Search) hits = archive.search(asked, 50u)
+    }
+
+    /**
      * Where this session has been, oldest first.
      *
      * A list rather than a single previous screen, because the gesture is

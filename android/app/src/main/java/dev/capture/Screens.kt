@@ -72,7 +72,7 @@ import uniffi.capture_ffi.Entity
 fun Timeline(
     notes: List<NoteSummary>,
     onOpen: (String) -> Unit,
-    onTick: (String, String, Boolean) -> Unit,
+    onTick: (String, UInt, Boolean) -> Unit,
 ) {
     if (notes.isEmpty()) {
         Empty("Nothing captured yet.")
@@ -111,7 +111,7 @@ private const val ITEMS_ON_A_ROW = 5
 private fun NoteRow(
     note: NoteSummary,
     onOpen: (String) -> Unit,
-    onTick: (String, String, Boolean) -> Unit,
+    onTick: (String, UInt, Boolean) -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth().clickable { onOpen(note.slug) }.padding(16.dp, 8.dp)
@@ -163,7 +163,10 @@ private fun NoteRow(
                     // hold is the standard way to reach the thing behind a row
                     // and costs the quick gesture nothing.
                     .combinedClickable(
-                        onClick = { onTick(note.listTag ?: "", item.text, !item.done) },
+                        // By position. The row knows which item it drew, and
+                        // the words cannot say when two of them read the same —
+                        // which is exactly what a shopping list does.
+                        onClick = { item.ord?.let { onTick(note.slug, it, !item.done) } },
                         onLongClick = { onOpen(note.slug) },
                     )
                     .padding(vertical = 6.dp),
@@ -261,7 +264,12 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
             for (item in note.items) {
                 Row(
                     Modifier.fillMaxWidth()
-                        .clickable { model.tick(note.listTag ?: "", item.text, !item.done) }
+                        // By position, not by words. The row knows which one it
+                        // is, and two items reading the same used to be
+                        // untickable from here for want of saying so.
+                        .clickable {
+                            item.ord?.let { model.tickAt(note.slug, it, !item.done) }
+                        }
                         .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -374,7 +382,7 @@ fun Search(
     hits: List<NoteSummary>,
     onQuery: (String) -> Unit,
     onOpen: (String) -> Unit,
-    onTick: (String, String, Boolean) -> Unit,
+    onTick: (String, UInt, Boolean) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize()) {
@@ -828,7 +836,7 @@ fun EntityPage(
             return@Column
         }
         for (note in entity.notes) {
-            NoteRow(note, onOpen = onOpen, onTick = model::tick)
+            NoteRow(note, onOpen = onOpen, onTick = model::tickAt)
         }
     }
 }
@@ -919,16 +927,41 @@ private fun EntityActions(mention: String, entity: Entity, model: Model) {
  * question this change deliberately left for a week of real use to answer.
  */
 @Composable
-fun ListScreen(tag: String, lines: List<ListLine>, onTick: (String, Boolean) -> Unit) {
+fun ListScreen(
+    tag: String,
+    lines: List<ListLine>,
+    onTick: (String, UInt, Boolean) -> Unit,
+) {
     if (lines.isEmpty()) {
         Empty("Nothing on the #$tag list. Capture one: #$tag: first thing, second thing")
         return
     }
+    // How many captures wrote what is on screen.
+    //
+    // Said out loud when it is more than one, because this is a *collection* —
+    // everything carrying the tag — and not one person's single list. Drawing
+    // two shopping trips as one list is how a tag came to be treated as a
+    // list's identity, and somebody reading it has no other way to tell.
+    val sources = lines.map { it.slug }.filter { it.isNotEmpty() }.distinct()
     LazyColumn(Modifier.fillMaxSize()) {
+        if (sources.size > 1) {
+            item {
+                Text(
+                    "Everything tagged #$tag, from ${sources.size} captures.",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(16.dp, 8.dp),
+                )
+            }
+        }
         items(lines) { line ->
             Row(
                 Modifier.fillMaxWidth()
-                    .clickable { onTick(line.text, !line.done) }
+                    // By position, which is what the row knows. Two items
+                    // reading the same were untickable from here until this,
+                    // because matching by words found both and refused.
+                    .clickable {
+                        line.ord?.let { onTick(line.slug, it, !line.done) }
+                    }
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {

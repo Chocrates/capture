@@ -258,13 +258,23 @@ pub struct Note {
     /// schedule moved would be a completion silently lost.
     #[n(21)]
     pub occurrences: BTreeMap<i64, OccState>,
-    /// Which items of this capture's list have been ticked off, by their text.
+    /// Every tick written against this capture's items, in event order.
     ///
-    /// A map rather than a set, so that un-ticking is expressible. A pure set
-    /// with removal could not survive two devices disagreeing — the same
-    /// argument `occ_undone` is written under (§6).
+    /// Raw, and deliberately not reconciled here. Deciding *which* item a tick
+    /// belongs to means expanding the capture's text, `list_of` lives in
+    /// `capture-parse`, and `capture-parse` already depends on this crate — so
+    /// this carries what was recorded and the projection decides what it meant,
+    /// in the one place that holds both halves.
+    ///
+    /// A list rather than a map, because the key is the question. Keyed by text
+    /// it used to be, and correcting a word then discarded the tick; keyed by
+    /// position alone, inserting an item would move every tick below it to the
+    /// wrong row. Both are kept and weighed where the items are known.
+    ///
+    /// Order is event order, so a later tick beats an earlier one on the same
+    /// item without anything here having to know which items those are.
     #[n(25)]
-    pub items: BTreeMap<String, bool>,
+    pub item_ticks: Vec<ItemTick>,
     /// Independent versions the fold could not order by causality.
     #[n(11)]
     pub divergences: Vec<Divergence>,
@@ -518,6 +528,30 @@ impl Projection {
         minicbor::encode(self, &mut b).expect("encoding into Vec is infallible");
         b
     }
+}
+
+/// One tick, as it was written.
+///
+/// Both halves of how an item was identified, kept so the projection can weigh
+/// them: the position it was written at, and the words it had at the time. An
+/// event written before positions existed carries `None`.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
+pub struct ItemTick {
+    /// Where the item sat when this was written, if the writer knew.
+    #[n(0)]
+    pub ord: Option<u32>,
+    /// What the item said at the time.
+    #[n(1)]
+    pub text: String,
+    /// Ticked, or put back.
+    #[n(2)]
+    pub done: bool,
+    /// How many items the capture had at the time, where the writer knew.
+    ///
+    /// Only a position written against the same number of items is comparable;
+    /// see [`ItemBody::of`].
+    #[n(3)]
+    pub of: Option<u32>,
 }
 
 /// A tag addition that has not been retracted.
@@ -811,7 +845,7 @@ fn apply_capture(
             promotion: None,
             review: ReviewState::default(),
             occurrences: BTreeMap::new(),
-            items: BTreeMap::new(),
+            item_ticks: Vec::new(),
             muted_until: None,
             muted_at: None,
             redacted_at: None,
@@ -1472,9 +1506,17 @@ fn apply_item(proj: &mut Projection, e: &Envelope, done: bool) {
         return;
     };
     if let Some(n) = proj.notes.get_mut(&tgt) {
-        // Set, not counted: ticking twice is ticking once, and events arrive
-        // in timestamp order so the later word wins.
-        n.items.insert(i.item, done);
+        // Appended, not resolved. Which item this meant is a question about the
+        // capture's current text, and answering it here would need a parser
+        // this crate cannot reach. Events arrive in timestamp order, so the
+        // order of this list is already the order the projection should weigh
+        // them in.
+        n.item_ticks.push(ItemTick {
+            ord: i.ord,
+            text: i.item,
+            done,
+            of: i.of,
+        });
     }
 }
 

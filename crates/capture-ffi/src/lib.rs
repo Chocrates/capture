@@ -108,6 +108,12 @@ pub struct ListLine {
     /// Its place in the order somebody wrote, where it has one. Absent for a
     /// task that joined the list by carrying its tag.
     pub ord: Option<u32>,
+    /// The capture this line came from.
+    ///
+    /// A collection gathers items from however many captures wrote them, and a
+    /// surface needs to know which — to tick the right one by position, and to
+    /// say that what is on screen is not one person's single list.
+    pub slug: String,
 }
 
 /// What ticking did, so the surface can say it rather than guess.
@@ -1541,10 +1547,14 @@ impl Archive {
         Ok(store
             .list(&tag, self.now_ms())?
             .into_iter()
-            .map(|e| ListLine {
-                text: e.text,
-                done: e.done,
-                ord: e.ord,
+            .map(|e| {
+                let slug = store.slug_of(&e.tgt).ok().flatten().unwrap_or_default();
+                ListLine {
+                    text: e.text,
+                    done: e.done,
+                    ord: e.ord,
+                    slug,
+                }
             })
             .collect())
     }
@@ -1554,6 +1564,30 @@ impl Archive {
         let _w = self.write_lock()?;
         Ok(
             match capture_store::promote::tick(&self.paths, &tag, &item, done, self.now_ms())? {
+                capture_store::promote::Ticked::Done => Ticked::Done,
+                capture_store::promote::Ticked::Already => Ticked::Already,
+                capture_store::promote::Ticked::Ambiguous(n) => {
+                    Ticked::Ambiguous { count: n as u32 }
+                }
+                capture_store::promote::Ticked::NoSuchItem => Ticked::NoSuchItem,
+            },
+        )
+    }
+
+    /// Tick an item of one capture, by where it sits in it.
+    ///
+    /// What a surface should use. A list on screen already knows which row was
+    /// touched, so there is nothing to match by words — which is the whole of
+    /// why two items reading the same were untickable before this: `tick`
+    /// found two, could not tell them apart, and refused. "milk, milk" is an
+    /// ordinary thing to write when two shops are meant.
+    ///
+    /// The position is recorded with the tick, so correcting a word later does
+    /// not discard it.
+    pub fn tick_at(&self, name: String, ord: u32, done: bool) -> Result<Ticked> {
+        let _w = self.write_lock()?;
+        Ok(
+            match capture_store::promote::tick_at(&self.paths, &name, ord, done)? {
                 capture_store::promote::Ticked::Done => Ticked::Done,
                 capture_store::promote::Ticked::Already => Ticked::Already,
                 capture_store::promote::Ticked::Ambiguous(n) => {
@@ -2795,6 +2829,8 @@ fn read_as(
                 text: e.text,
                 done: e.done,
                 ord: e.ord,
+                // Its own items, so the capture is the one being summarised.
+                slug: s.slug.clone(),
             })
             .collect();
     }

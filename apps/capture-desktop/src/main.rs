@@ -33,6 +33,7 @@ fn main() {
             ipc::mentioning,
             ipc::list,
             ipc::tick_item,
+            ipc::tick_item_at,
             ipc::tagged,
             ipc::wiki_index,
             ipc::set_parent,

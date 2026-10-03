@@ -86,6 +86,7 @@ fn run(command: Command) -> Result<()> {
         Command::List { tag, json } => read::list(&paths()?, &tag, json),
         Command::Due { json } => read::due(&paths()?, json),
         Command::Tick { tag, item, done } => write::tick(paths()?, &tag, &item, done),
+        Command::TickAt { name, ord, done } => write::tick_at(paths()?, &name, ord, done),
         Command::Mentions { name, json } => read::mentions(&paths()?, &name, json),
         Command::People { json } => read::entities(&paths()?, "person", json),
         Command::Projects { json } => read::entities(&paths()?, "project", json),

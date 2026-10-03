@@ -1045,3 +1045,50 @@ fn muting_an_entity_encodes_the_same_way_for_ever() {
         "835099999999999999999999999999999999820381582022222222222222222222222222222222222222222222222222222222222222221b00000199c82cc000"
     );
 }
+
+#[test]
+fn an_item_tick_encodes_the_same_way_for_ever() {
+    use capture_core::body::ItemBody;
+
+    // With the position and the count, which is what every tick written from
+    // now on carries. The count is what makes the position usable at all: a
+    // position written against a different number of items cannot be compared,
+    // because removing one leaves its slot holding the item below it.
+    let ticked = ItemBody {
+        nonce: [0x99; 16],
+        item: "eggs".to_string(),
+        ord: Some(1),
+        of: Some(3),
+    };
+    assert_eq!(
+        hex(&canonical_of(&ticked)),
+        "84509999999999999999999999999999999964656767730103"
+    );
+
+    // Without it — and this is the compatibility property, in bytes.
+    //
+    // A trailing `None` is elided, so this is a two-element array, which is
+    // *exactly* what `ItemBody` encoded to before the position existed. Every
+    // tick already written in every archive is still a valid encoding of this
+    // type, and decodes with no position rather than failing.
+    let legacy = ItemBody {
+        nonce: [0x99; 16],
+        item: "eggs".to_string(),
+        ord: None,
+        of: None,
+    };
+    let bytes = canonical_of(&legacy);
+    assert_eq!(
+        hex(&bytes),
+        "8250999999999999999999999999999999996465676773"
+    );
+
+    let back: ItemBody = minicbor::decode(&bytes).unwrap();
+    assert_eq!(back.ord, None, "an older tick did not read back");
+    assert_eq!(back.item, "eggs", "an older tick lost its words");
+
+    // And the new shape round-trips whole.
+    let back: ItemBody = minicbor::decode(&canonical_of(&ticked)).unwrap();
+    assert_eq!(back.ord, Some(1));
+    assert_eq!(back.of, Some(3));
+}

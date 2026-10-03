@@ -771,9 +771,50 @@ pub struct ItemBody {
     /// Hiding salt.
     #[cbor(n(0), with = "minicbor::bytes")]
     pub nonce: [u8; 16],
-    /// Which item, by the text written for it.
+    /// The words written for the item.
+    ///
+    /// No longer the identity, and still here for two reasons. It is what lets
+    /// a tick survive an item moving — the words appearing once elsewhere is a
+    /// better answer than a position that has shifted under them — and it is
+    /// what keeps `capture log` legible, since an event saying "item 2 done"
+    /// and nothing else is unreadable by somebody trying to understand their
+    /// own archive.
     #[n(1)]
     pub item: String,
+    /// Which item, by where it was written.
+    ///
+    /// Added at a new index, which is the one permitted evolution of a frozen
+    /// body: an older build reading this gets the text it already understood,
+    /// and an event written before this arrives here as `None`.
+    ///
+    /// Position rather than text, because text is not an identity. Correcting a
+    /// word on a shopping list used to discard what had already been bought —
+    /// the `item_done` event stayed in the log and simply stopped matching
+    /// anything, which §6 rates worse than a state that cannot be reversed,
+    /// because nothing said it had happened.
+    ///
+    /// Not an identity either, and nothing here can be: items are re-derived
+    /// from a mutable string on every fold, so there is nothing minted to point
+    /// at. Position and text together are a *reconciliation*, and the rules are
+    /// in the store, which is the only layer that can expand a capture's items.
+    #[n(2)]
+    pub ord: Option<u32>,
+    /// How many items the capture had when this was written.
+    ///
+    /// What makes the position usable. Without it, falling back to a position
+    /// cannot tell a *reworded* item from a *deleted* one: remove the middle of
+    /// three and the position still exists, now holding the item that was
+    /// below it, which then inherits a tick nobody gave it.
+    ///
+    /// With it the fallback is only taken when the count is unchanged — so a
+    /// reword is matched and a deletion is not matched at all. The tick then
+    /// applies to nothing, which is the honest outcome: the event is still in
+    /// the log, and restoring the item restores it.
+    ///
+    /// Found by a test. The rule as first written handed a deleted item's tick
+    /// to its neighbour.
+    #[n(3)]
+    pub of: Option<u32>,
 }
 
 /// Where a page sits in the wiki tree.

@@ -56,6 +56,13 @@ use crate::{Result, db};
 /// existed becomes a list on this rebuild, which is what an additive
 /// recognizer (§3.1.3) means and is intended.
 ///
+/// Version 9 re-expands every list. Items are unchanged in shape, but which of
+/// them are ticked is now worked out by reconciling each `item_done` against
+/// the capture's current items rather than by matching the words — so a
+/// completion recorded before this has to be re-read against the list it was
+/// written for. There is nothing to migrate: the ticks are in the log and were
+/// never in this table.
+///
 /// Version 8 adds `entities` and `entity_names`, which give the names in
 /// `mentions` an identity that survives being renamed (§4.3). Every existing
 /// note has to be re-read: the entities are derived from the sigils in the
@@ -67,7 +74,7 @@ use crate::{Result, db};
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 8;
+pub const PROJECTION_SCHEMA: u32 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -2232,6 +2239,15 @@ impl Store {
     /// an order somebody chose and tasks do not, and interleaving the two by
     /// time would scramble the one thing that was deliberate.
     pub fn list(&self, tag: &str, now: u64) -> Result<Vec<ListEntry>> {
+        // A collection is gathered by a tag, and an untagged checklist has
+        // none. Its items belong to the capture that wrote them and are read
+        // through `items_of`; gathering every untagged list in the archive
+        // under one empty name would be the opposite of what writing no tag
+        // meant.
+        if tag.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Muted list captures are excluded here for the same reason muted
         // notes are excluded from a tag page and from search (§2.6): muting is
         // the cheap way to stop something resurfacing, and a surface that kept
@@ -2268,9 +2284,23 @@ impl Store {
             });
         }
 
+        // Which captures' items are already on this list. A task that *is* one
+        // of them is not a separate thing beside its own contents.
+        //
+        // Reachable the moment a list capture is promoted to a task, which is
+        // an ordinary thing to do to a shopping list: the capture then appeared
+        // under its own items and was counted with them, so a three-item list
+        // reported four things outstanding. The comment below reasons carefully
+        // about a task that is genuinely separate, and did not anticipate the
+        // one that owns the items.
+        let owners: Vec<EventId> = items.iter().map(|e| e.tgt).collect();
+
         // The tag's own notes, which carry whatever completion there is.
         let mut loose = Vec::new();
         for note in self.tagged(tag, now)? {
+            if owners.contains(&note.tgt) {
+                continue;
+            }
             let Some(text) = note.text.as_deref() else {
                 // Redacted, or queued for it. A list must not become a way to
                 // read back what redaction removed.
@@ -3371,6 +3401,83 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
     until
 }
 
+/// Work out which item each tick meant, and whether it is now done.
+///
+/// An item has no identity to find. Items are re-derived from a mutable string
+/// on every fold, and nothing is minted at capture time to point at — the body
+/// is frozen and carries no item ids. So this is a *reconciliation*, not a
+/// lookup, and the question is only which failure is least bad.
+///
+/// Text alone is what this replaces: correcting a word discarded the tick,
+/// which is the most ordinary edit there is. Position alone is worse in a
+/// quieter way — inserting one item at the top shifts every position below it,
+/// so every tick moves to the wrong row and nothing says so.
+///
+/// So both are weighed, in this order, and each rule is the answer to one edit:
+///
+/// 1. **Exact** — same position and same words. Nothing was touched.
+/// 2. **The words, somewhere else** — they appear exactly once. Something was
+///    inserted or removed above this item.
+/// 3. **The position** — the words are gone but the slot is there. The item was
+///    reworded.
+/// 4. Otherwise the tick applies to nothing, and is left for a later fold where
+///    the item may be back. An edit does not destroy a record of something that
+///    happened.
+///
+/// Ticks are applied in event order, so a later one beats an earlier one on the
+/// same item.
+///
+/// # What this gets wrong
+///
+/// Rewording an item *and* inserting another above it in one edit. Rule 1
+/// misses, rule 2 misses because the words changed, and rule 3 fires on a
+/// position now holding a different item — so the tick lands on the wrong row.
+/// Rarer than either edit alone, and the alternative is to refuse every
+/// ambiguous case, which would discard ticks for the common edits in order to
+/// avoid being wrong in an uncommon one.
+fn reconcile_ticks(items: &[String], ticks: &[capture_core::fold::ItemTick]) -> Vec<bool> {
+    let mut done = vec![false; items.len()];
+
+    for tick in ticks {
+        // 1. Exact.
+        let at = match tick.ord.map(|o| o as usize) {
+            Some(o) if o < items.len() && items[o] == tick.text => Some(o),
+            _ => None,
+        };
+
+        // 2. The words, if they appear exactly once.
+        let at = at.or_else(|| {
+            let mut found = items.iter().enumerate().filter(|(_, i)| **i == tick.text);
+            match (found.next(), found.next()) {
+                (Some((o, _)), None) => Some(o),
+                _ => None,
+            }
+        });
+
+        // 3. The position — but only against the same number of items.
+        //
+        // The count is what makes this safe, and leaving it out is what the
+        // first version got wrong: remove the middle of three and the position
+        // still exists, holding the item that was below it, which then inherits
+        // a tick nobody gave it. A test caught it.
+        //
+        // So a changed count means the list was added to or taken from, and a
+        // position written against the old one means nothing. The tick then
+        // matches nothing and applies to nothing — the event stays in the log,
+        // and restoring the item restores it.
+        let at = at.or_else(|| match (tick.ord.map(|o| o as usize), tick.of) {
+            (Some(o), Some(of)) if of as usize == items.len() && o < items.len() => Some(o),
+            _ => None,
+        });
+
+        if let Some(o) = at {
+            done[o] = tick.done;
+        }
+    }
+
+    done
+}
+
 /// Which kind of entity a sigil names.
 ///
 /// `>`, `!` and `~` are absent and that is the division: a date, a priority and
@@ -3648,16 +3755,12 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             // that shortens a list does not leave the items it dropped behind.
             tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
             if let Some(list) = capture_parse::list_of(text) {
+                let done = reconcile_ticks(&list.items, &n.item_ticks);
                 for (ord, item) in list.items.iter().enumerate() {
-                    // A tick recorded against an item this capture no longer
-                    // names is simply not found here, which is the inert
-                    // outcome `apply_item` describes: an edit does not destroy
-                    // the record, and restoring the item restores the tick.
-                    let done = n.items.get(item).copied().unwrap_or(false);
                     tx.execute(
                         "INSERT OR REPLACE INTO list_items (tgt, ord, tag, item, done)
                          VALUES (?1,?2,?3,?4,?5)",
-                        params![t, ord as i64, list.tag, item, done as i64],
+                        params![t, ord as i64, list.tag, item, done[ord] as i64],
                     )?;
                 }
             }

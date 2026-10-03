@@ -101,6 +101,12 @@ pub enum Command {
         item: String,
         done: bool,
     },
+    /// Tick one item of a capture, by its number.
+    TickAt {
+        name: String,
+        ord: u32,
+        done: bool,
+    },
     /// Put a page under another in the wiki, or back at the top.
     Parent {
         name: String,
@@ -583,6 +589,31 @@ where
                 problem: "expected entity-bind <@name> [note]   (no note unbinds)".into(),
             }),
         },
+        // `capture tick-at <capture> 2`. By number, which is what a surface
+        // knows and what words cannot answer when two items read the same.
+        //
+        // One-based on the way in, because the list prints itself that way and
+        // somebody counting rows on a screen is counting from one.
+        "tick-at" | "untick-at" => {
+            let done = args[0] == "tick-at";
+            match &args[1..] {
+                [name, n] => match n.parse::<u32>() {
+                    Ok(n) if n >= 1 => Ok(Command::TickAt {
+                        name: name.clone(),
+                        ord: n - 1,
+                        done,
+                    }),
+                    _ => Err(Bad::Value {
+                        command: args[0].clone(),
+                        problem: format!("'{n}' is not an item number; they start at 1"),
+                    }),
+                },
+                _ => Err(Bad::Value {
+                    command: args[0].clone(),
+                    problem: "expected a capture and an item number".into(),
+                }),
+            }
+        }
         // `capture list groceries`. The tag without its sigil, because a
         // leading `#` is a comment to most shells and quoting it is a thing to
         // remember at exactly the wrong moment.
@@ -1119,6 +1150,9 @@ TIME AND TASKS
   capture list <tag>             a list: its items, and what is left
   capture due                    what will speak, and when
   capture tick <tag> <item>      tick one off; untick puts it back
+  capture tick-at <note> <n>     tick item n of one capture, counting from 1
+                               (untick-at puts it back; use this where two
+                                items read the same)
   capture mentions @sarah        every note naming a person, project or tag
                                (@person, ^project, #tag)
   capture people                 everyone the archive knows, most-said first

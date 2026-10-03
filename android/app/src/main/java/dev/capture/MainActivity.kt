@@ -286,13 +286,13 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                 is Screen.Timeline -> Timeline(
                     notes = model.timeline,
                     onOpen = { model.go(Screen.Note(it)) },
-                    onTick = model::tick,
+                    onTick = model::tickAt,
                 )
                 is Screen.Search -> Search(
                     hits = model.hits,
                     onQuery = model::search,
                     onOpen = { model.go(Screen.Note(it)) },
-                    onTick = model::tick,
+                    onTick = model::tickAt,
                 )
                 is Screen.Agenda -> Agenda(screen.day, model.agenda) {
                     model.go(Screen.Tasks)
@@ -382,7 +382,7 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                 is Screen.ListOf -> ListScreen(
                     tag = screen.tag,
                     lines = model.list,
-                    onTick = { item, done -> model.tick(screen.tag, item, done) },
+                    onTick = { slug, ord, done -> model.tickAt(slug, ord, done) },
                 )
             }
         }

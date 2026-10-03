@@ -896,19 +896,75 @@ pub fn tick(paths: &StorePaths, tag: &str, item: &str, done: bool, now: u64) -> 
         let store = reading(paths)?;
         let count = store.list_item_count(tag, item)?;
         let found = store.list(tag, now)?.into_iter().find(|e| e.text == item);
-        (count, found.as_ref().map(|e| e.tgt), found.map(|e| e.done))
+        let of = match found.as_ref() {
+            Some(e) => Some(store.items_of(&e.tgt)?.len() as u32),
+            None => None,
+        };
+        (
+            count,
+            found.as_ref().map(|e| (e.tgt, e.ord, of)),
+            found.map(|e| e.done),
+        )
     };
 
     if on_list > 1 {
+        // Two items reading the same, named by their words, and nothing here
+        // can tell them apart. `tick_at` can, because a surface showing a list
+        // already knows which row was touched — this path is the one where
+        // somebody typed the words.
         return Ok(Ticked::Ambiguous(on_list));
     }
-    let (Some(tgt), Some(was)) = (target, already) else {
+    let (Some((tgt, ord, of)), Some(was)) = (target, already) else {
         return Ok(Ticked::NoSuchItem);
     };
     if was == done {
         return Ok(Ticked::Already);
     }
 
+    write_tick(paths, tgt, ord, of, item, done)?;
+    Ok(Ticked::Done)
+}
+
+/// Tick an item of one capture, by where it sits in it.
+///
+/// What a surface should use. A list on screen already knows which row was
+/// touched, so there is nothing to match by text and nothing to be ambiguous
+/// about — which is the whole of why two items reading the same were untickable
+/// before this existed.
+pub fn tick_at(paths: &StorePaths, name: &str, ord: u32, done: bool) -> Result<Ticked> {
+    let (tgt, text, was, of) = {
+        let store = reading(paths)?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        let items = store.items_of(&tgt)?;
+        let of = items.len() as u32;
+        match items.into_iter().find(|e| e.ord == Some(ord)) {
+            Some(e) => (tgt, e.text, e.done, of),
+            None => return Ok(Ticked::NoSuchItem),
+        }
+    };
+    if was == done {
+        return Ok(Ticked::Already);
+    }
+    write_tick(paths, tgt, Some(ord), Some(of), &text, done)?;
+    Ok(Ticked::Done)
+}
+
+/// Append the tick, carrying both halves of how the item was identified.
+///
+/// The position is what survives the words being corrected; the words are what
+/// survives the position shifting, and are what makes the event legible in a
+/// log. Which of them decides is worked out when the items are expanded, in the
+/// projection — the only layer that can see both.
+fn write_tick(
+    paths: &StorePaths,
+    tgt: capture_core::EventId,
+    ord: Option<u32>,
+    of: Option<u32>,
+    item: &str,
+    done: bool,
+) -> Result<()> {
     let mut s = crate::session::Session::open(paths.clone())?;
     let kind = if done {
         capture_core::event::Kind::ITEM_DONE
@@ -919,11 +975,12 @@ pub fn tick(paths: &StorePaths, tag: &str, item: &str, done: bool, now: u64) -> 
         minicbor::to_vec(capture_core::body::ItemBody {
             nonce,
             item: item.to_string(),
+            ord,
+            of,
         })
         .expect("encoding into a Vec is infallible")
     })?;
-
-    Ok(Ticked::Done)
+    Ok(())
 }
 
 /// The current generation, read-only.

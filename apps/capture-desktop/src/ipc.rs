@@ -657,6 +657,27 @@ pub fn list(tag: String) -> std::result::Result<Vec<ListLine>, String> {
 /// in one IPC surface is the kind of collision that is obvious today and is a
 /// wrong call site in six months.
 #[tauri::command]
+pub fn tick_item_at(name: String, ord: u32, done: bool) -> std::result::Result<String, String> {
+    wire((|| {
+        let paths = paths()?;
+        Ok(
+            match capture_store::promote::tick_at(&paths, &name, ord, done)? {
+                capture_store::promote::Ticked::Done => "done".to_string(),
+                capture_store::promote::Ticked::Already => "already".to_string(),
+                // Unreachable: a position names exactly one item, which is the
+                // whole reason this sits beside `tick_item`.
+                capture_store::promote::Ticked::Ambiguous(n) => format!("ambiguous:{n}"),
+                capture_store::promote::Ticked::NoSuchItem => "absent".to_string(),
+            },
+        )
+    })())
+}
+
+/// Tick an item by its words.
+///
+/// Kept for somebody typing them. A surface should use `tick_item_at`, which
+/// cannot be ambiguous.
+#[tauri::command]
 pub fn tick_item(tag: String, item: String, done: bool) -> std::result::Result<String, String> {
     wire((|| {
         let paths = paths()?;
