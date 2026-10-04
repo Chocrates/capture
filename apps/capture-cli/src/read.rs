@@ -208,7 +208,28 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
                 text.as_deref().map(quote).unwrap_or_else(|| "null".into())
             ));
         }
-        say!("[{}]", items.join(","));
+        // An object rather than the bare array it used to be, so the count can
+        // ride along — the same change `tasks --json` made, for the same
+        // reason: a consumer reading an empty list as "nothing that day" was
+        // being told something that might not be true.
+        //
+        // The agenda has the stronger case of the two. A day with nothing on it
+        // is a far commoner answer than an empty task list, so the ambiguity is
+        // met more often, and a script is the consumer least able to notice it:
+        // a person reading "nothing" in a terminal sees the line underneath it,
+        // and a program receiving `[]` sees an empty day.
+        //
+        // Present at zero deliberately. A field that appeared only when
+        // something was unread would make the shape depend on the state, so a
+        // consumer that worked all week would break the first morning the sweep
+        // fell behind.
+        say!(
+            "{{\"entries\":[{}],\"unread\":{}}}",
+            items.join(","),
+            store
+                .unread_count(capture_parse::GRAMMAR_VERSION)
+                .unwrap_or(0)
+        );
         return Ok(());
     }
 

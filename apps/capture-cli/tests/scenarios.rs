@@ -470,3 +470,45 @@ fn completing_a_task_takes_it_out_of_the_listing() {
         "an empty surface should say so plainly"
     );
 }
+
+/// An agenda asked for as JSON says what it has not read.
+///
+/// The requirement names three commands — agenda, tasks and occurrences — and
+/// only `tasks --json` ever carried the count. `agenda --json` answered a bare
+/// array and returned before every one of the five `say_if_behind` call sites,
+/// all of which are on the prose path.
+///
+/// So the same question asked two ways was hedged in a terminal and confident
+/// in a script, and the script is the consumer least able to notice: a person
+/// reading "nothing on Tuesday" sees the line underneath it, a program
+/// receiving `[]` sees an empty day.
+#[test]
+fn an_agenda_in_json_reports_what_is_unread() {
+    let s = Store::new("agenda-unread");
+
+    // Read, so the count is a real zero rather than an absence.
+    s.capture("dentist thursday 2pm");
+    s.ok(&["settle"]);
+    let settled = s.ok(&["agenda", "--json"]);
+    assert!(
+        settled.contains("\"unread\":0"),
+        "the field should be present at zero, so the shape does not depend on \
+         the state:\n{settled}"
+    );
+
+    // Captured and deliberately not settled.
+    s.capture("pay the invoice");
+    s.capture("call the plumber");
+    let behind = s.ok(&["agenda", "--json"]);
+    assert!(
+        behind.contains("\"unread\":2"),
+        "an answer derived from incomplete promotion was presented as a \
+         complete one:\n{behind}"
+    );
+
+    // And it still answers the question it was asked.
+    assert!(
+        behind.contains("\"entries\":"),
+        "the entries went missing:\n{behind}"
+    );
+}
