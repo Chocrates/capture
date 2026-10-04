@@ -34,5 +34,19 @@
 
 ## 7. Closing
 
-- [ ] 7.1 `make ci`.
-- [ ] 7.2 Confirm the count is zero by re-running the searches in the proposal, and put the numbers in the commit — before and after, so the next audit has a baseline.
+- [x] 7.1 **`make ci`: all gates passed**, exit 0. It had been failing on three of them, none from this change: `duplicated` on two byte-identical `split_mention` copies in the command line, `unwired` on `mute_entity`, and `lint` on clippy `-D warnings` (a cloned slice ref, three `assert_eq!` against literal bools, four clock reads in measurement tests missing the allow the other measurement tests carry).
+- [x] 7.2 **Before and after, by the proposal's own searches.**
+
+      | what | proposal | now |
+      |---|---|---|
+      | Reading the local timezone | 4 implementations | **1**, in `notifier.rs` |
+      | Rendering a device key | 7 | **1**, in `capture-core::id` |
+      | `hexed` / `unhex` | 2 each | **1 each**, in `capture-core::id` |
+      | "open the current generation" | ~20 hand-written sites | **1**, `projection::current` |
+      | Which kind a sigil names | *not in the proposal* — **6** | **1**, in `capture-core::id` |
+
+      The same names still appear in several files and that is not a relapse: each is now a one-line delegation to the single implementation, which is what lets a caller keep its own error type while the decision stays in one place. Verified by reading all of them rather than by counting definitions, because counting `fn short_key` finds four and three of those are `capture_core::id::short_key(k)`.
+
+      Gate numbers for the next audit: `duplicated` reports **1969 function bodies, each written once**; `unwired` reports **547 public functions, all reachable**, with 76 names skipped as defined in more than one place.
+
+      The sigil row is the one worth noting: it was never in the proposal's table, and the gate this change *built* is what surfaced it — two of the six copies happened to be byte-identical. The other four said the same thing in different words and no tool would have found them.

@@ -52,4 +52,4 @@ Not in the plan. Found by 2.3 asking whether the staleness line ever clears.
 - [x] 7.1 Fixed: the blob window now starts *after* the sweep. Computing `until` first made a catch-up spend the sync phase's budget — three seconds of reading off a window meant for moving attachments, so the first rounds after an upgrade would give the exchange almost nothing and look like a network fault. Two phases, two windows.
 - [x] 7.2 Done as 6.7.
 - [ ] 7.3 The exact-alarm permission is still not granted on the phone (`SCHEDULE_EXACT_ALARM` denied, noted in the ledger on 2026-09-21). Predates this and is the user's to grant; the app asks for it on capture.
-- [ ] 7.4 `make unwired` / `make duplicated` still fail on `mute_entity` and `split_mention`. Both predate this change and are untouched by it.
+- [x] 7.4 Both fixed, along with `lint`, under `one-of-each` 7.1 — which had `make ci` as its own open task. `make ci` now passes end to end.
