@@ -85,5 +85,19 @@
       recognition. Rows four and five are the anti-drift check: the same date
       from the sigil and from the prose, differing only in confidence, which is
       right because one was written and one was inferred.
-- [ ] 6.2 Capture one `>fri` on the phone and confirm the promotion reads
+- [x] 6.2 Capture one `>fri` on the phone and confirm the promotion reads
       Friday, against `dev.capture.dev` only — never the real archive.
+
+      Confirmed on the Pixel. `dentist thursday >fri`, shared into
+      `dev.capture.dev` (both app ids are installed on this phone; the release
+      `dev.capture` was not touched), promotes to an **event on 2026-10-09** at
+      confidence 100. Today is Sunday 2026-10-04, so Thursday is the 8th and
+      Friday the 9th: the sigil won. The timeline row renders `2026-10-09` and
+      the text is kept verbatim, `>fri` and all.
+
+      The reparse is visible too: every pre-existing capture on the device now
+      records `grammar = 6`, having been read again on open. That is the half of
+      this change a unit test cannot show — the version bump is what corrects
+      captures already stored under 5.
+
+      Screenshot: `2026-10-04-sigil-fri-on-device.png`.
