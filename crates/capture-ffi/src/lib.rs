@@ -1302,92 +1302,67 @@ impl Archive {
         // Reported with *when*, never as a bare "sync is broken". The date is
         // what tells somebody whether this started before or after the thing
         // they changed.
-        let peers = ops.peer_addresses()?;
-        if !peers.is_empty() {
-            let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
-            let reached = peers.iter().filter_map(|p| p.last_seen).max();
-            let ran = ops.last_round()?;
+        // The state of sync, decided in `capture-store` so that this surface,
+        // the window and the command line give one answer.
+        //
+        // The two questions this used to ask inline are now the order of
+        // `SyncState`'s arms. Moving them was the point: they were asked
+        // correctly *here* and not at all on the other two, which reported
+        // "device X has never been reached" at somebody whose daemon had simply
+        // never been started.
+        let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        // Membership from the log, and *not* from `peer_addresses`: a device
+        // paired and never yet dialled has a roster entry and no row there,
+        // which is the case this is most needed for.
+        let roster_log = capture_store::log::Log::open_read(&self.paths.events)?;
+        let me_key = capture_store::Identity::load(&self.paths)?
+            .public()
+            .to_bytes();
+        let others = capture_core::roster::build(&roster_log.all()?)
+            .keys
+            .iter()
+            .filter(|k| **k != me_key)
+            .count();
+        let sync = capture_store::syncstate::sync_state(&ops, others, now)?;
+        if let Some((tier, text)) = sync.message() {
+            out.push(Condition {
+                tier: tier.into(),
+                text,
+            });
+        }
 
-            // The job, before the network. If rounds are not happening, what the
-            // network would have done is not a question anybody can act on.
-            match ran {
-                Some(at) if now.saturating_sub(at) > DAY_MS => {
-                    out.push(Condition {
-                        tier: if now.saturating_sub(at) > 3 * DAY_MS {
-                            "attention"
-                        } else {
-                            "worth-knowing"
-                        }
+        if !matches!(sync, capture_store::syncstate::SyncState::Alone) {
+            // §5.2's named trap, on a surface rather than in a toast.
+            //
+            // It was reported by `Toast.note` from a fifteen-minute background
+            // job: three and a half seconds over whatever application happened
+            // to be in front, possibly with the screen off, recorded nowhere.
+            // The one message whose whole purpose is to prevent a silent
+            // failure was itself effectively silent.
+            if ops.last_round_had_discovery()? == Some(false) {
+                out.push(Condition {
+                    tier: "worth-knowing".into(),
+                    text: "the last sync ran without discovery, so it could only \
+                           reach devices whose address is already known"
                         .into(),
-                        text: format!(
-                            "sync has not run for {}. Captures are safe on this device and                              have not been copied to any other one.",
-                            lasting(now.saturating_sub(at))
-                        ),
-                    });
-                }
-                None => {
-                    out.push(Condition {
-                        tier: "attention".into(),
-                        text: "sync has never run on this device, so nothing here exists                                anywhere else"
-                            .into(),
-                    });
-                }
-                _ => {
-                    // Rounds are happening. Now the network is a fair question.
-                    match reached {
-                        Some(at) if now.saturating_sub(at) > DAY_MS => {
-                            out.push(Condition {
-                                tier: if now.saturating_sub(at) > 3 * DAY_MS {
-                                    "attention"
-                                } else {
-                                    "worth-knowing"
-                                }
-                                .into(),
-                                text: format!(
-                                    "no other device has been reached for {}, though sync is                                      running. Both devices need to be awake on the same                                      network.",
-                                    lasting(now.saturating_sub(at))
-                                ),
-                            });
-                        }
-                        None => {
-                            out.push(Condition {
-                                tier: "attention".into(),
-                                text: "no other device has ever been reached, so nothing here                                        exists anywhere else"
-                                    .into(),
-                            });
-                        }
-                        _ => {}
-                    }
-
-                    // §5.2's named trap, on a surface rather than in a toast.
-                    //
-                    // It was reported by `Toast.note` from a fifteen-minute
-                    // background job: three and a half seconds over whatever
-                    // application happened to be in front, possibly with the
-                    // screen off, recorded nowhere. The one message whose whole
-                    // purpose is to prevent a silent failure was itself
-                    // effectively silent.
-                    if ops.last_round_had_discovery()? == Some(false) {
-                        out.push(Condition {
-                            tier: "worth-knowing".into(),
-                            text: "the last sync ran without discovery, so it could only                                    reach devices whose address is already known"
-                                .into(),
-                        });
-                    }
-                }
+                });
             }
 
             // Said only when it is the reason something is not working. A peer
             // that refused one dial is one peer, and the round after it
             // succeeded — reporting that would be reporting the ordinary.
-            if let Some(t) = ops.last_round_trouble()? {
-                let stale = reached.is_none_or(|at| now.saturating_sub(at) > DAY_MS);
-                if stale {
-                    out.push(Condition {
-                        tier: "worth-knowing".into(),
-                        text: format!("the last sync reported: {t}"),
-                    });
-                }
+            //
+            // "Not working" is `SyncState` rather than a second look at the
+            // peer rows: anything that is not `Working` is a state where the
+            // trouble string might be the explanation, and that is the same
+            // judgement the condition above it just made.
+            if let Some(t) = ops.last_round_trouble()?
+                && !matches!(sync, capture_store::syncstate::SyncState::Working)
+            {
+                out.push(Condition {
+                    tier: "worth-knowing".into(),
+                    text: format!("the last sync reported: {t}"),
+                });
             }
         }
 
@@ -2786,27 +2761,6 @@ const LOCATION_PERMITTED: &str = "android.location_permitted";
 
 /// Where the platform's own idea of this device's zone is remembered.
 const DEVICE_ZONE: &str = "device.zone";
-
-/// A day, in milliseconds.
-const DAY_MS: u64 = 24 * 60 * 60 * 1000;
-
-/// How long something has been going on, in the coarsest unit that is still
-/// true.
-///
-/// Coarse deliberately. "2 days" is a thing somebody can compare against what
-/// they remember doing; "51 hours" is arithmetic, and a condition that has to
-/// be worked out gets skipped.
-fn lasting(ms: u64) -> String {
-    let hours = ms / (60 * 60 * 1000);
-    let days = hours / 24;
-    match (days, hours) {
-        (0, 0) => "less than an hour".into(),
-        (0, 1) => "an hour".into(),
-        (0, h) => format!("{h} hours"),
-        (1, _) => "a day".into(),
-        (d, _) => format!("{d} days"),
-    }
-}
 
 /// The radius used when the intent did not name one.
 ///

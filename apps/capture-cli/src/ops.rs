@@ -206,6 +206,11 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 
     // ---- tier one: things that want a decision -----------------------------
     let mut attention: Vec<String> = Vec::new();
+    // Declared with the other, rather than beside the first thing that fills
+    // it, because the sync condition below needs both: a round that stopped a
+    // day ago is worth knowing and one that stopped a week ago wants a
+    // decision, and it has to be said *before* any peer is described.
+    let mut worth_knowing: Vec<String> = Vec::new();
 
     let health = capture_store::gesture::health(
         mechanism != capture_store::hotkey::Mechanism::None,
@@ -317,6 +322,47 @@ pub fn status(paths: &StorePaths) -> Result<()> {
         ));
     }
 
+    // Whether sync is running at all, before anything about a peer.
+    //
+    // This was missing and the omission had a cost. A round that never ran and
+    // a round that reached nobody need different remedies — a daemon to start,
+    // or a network to fix — and the peer rows below describe them identically.
+    // So somebody whose `capture-syncd` had simply never been started read
+    // "device d4389d6f has never been reached", went to look at their Wi-Fi,
+    // and wrote "sync not running?" in a notebook with a question mark.
+    //
+    // The phone had been asking both questions and saying which; this one and
+    // the window had not. The decision now lives in `capture-store` so all
+    // three give one answer.
+    // How many *other* devices are paired, from the roster rather than from
+    // `ops`. A device paired and never yet dialled has a roster entry and no
+    // `peer_state` row, and that is exactly the case worth reporting — asking
+    // `ops` would answer it with silence.
+    let identity_now = capture_store::identity::Identity::load(paths)?;
+    let me_now = identity_now.public().to_bytes();
+    let others = roster_now(paths)?
+        .keys
+        .iter()
+        .filter(|k| **k != me_now)
+        .count();
+
+    // Whether sync is running at all, before any peer is described.
+    //
+    // The order is the point. "device X has never been reached" is a fact about
+    // a peer and reads as a fact about the network, so somebody whose
+    // `capture-syncd` was never started goes to look at their Wi-Fi. The round
+    // question has a different remedy and has to come first, which is what
+    // `ops::round_ran` was recorded separately *for* — its own comment says a
+    // surface should be able to tell "nobody was home" from "nobody knocked",
+    // and this surface could not.
+    if let Some((tier, text)) = capture_store::syncstate::sync_state(&ops, others, now)?.message() {
+        if tier == "attention" {
+            attention.push(text);
+        } else {
+            worth_knowing.push(text);
+        }
+    }
+
     // A device that has not been reached in over a week.
     //
     // Promoted deliberately (§4.5): a phone that has silently stopped syncing
@@ -378,7 +424,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     }
 
     // ---- tier two: worth knowing, no action ---------------------------------
-    let mut worth_knowing: Vec<String> = Vec::new();
+
     let quarantined = state.quarantined()?;
     if !quarantined.is_empty() {
         // Described by cause. Most of these are a newer client writing kinds
@@ -495,7 +541,10 @@ const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Every device in the roster, and when this one last reached it.
 pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
-    let ops = Ops::open(&paths.ops)?;
+    // Read-only. This command reads and the §8.8 rule is that reads go direct;
+    // holding a writable handle to answer a question about peers is that rule
+    // broken in miniature.
+    let ops = Ops::open_read(&paths.ops)?;
     let identity = capture_store::identity::Identity::load(paths)?;
     let me = identity.public().to_bytes();
 
@@ -551,6 +600,20 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     if members.len() == 1 {
         say!();
         say!("No other devices. To add one:  capture pair");
+        return Ok(());
+    }
+
+    // What the rows above cannot say.
+    //
+    // "never reached" is a fact about a peer and reads as a fact about the
+    // network. Whether a round has ever run is a different question with a
+    // different remedy, and without it somebody whose daemon was never started
+    // goes looking at their Wi-Fi. Beside the rows rather than instead of them:
+    // the two together are a complete sentence.
+    let others = members.iter().filter(|k| **k != me).count();
+    if let Some((_, text)) = capture_store::syncstate::sync_state(&ops, others, now)?.message() {
+        say!();
+        say!("{text}");
     }
     Ok(())
 }

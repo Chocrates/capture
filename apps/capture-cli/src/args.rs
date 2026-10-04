@@ -999,7 +999,10 @@ where
             [key] => Ok(Command::AdmissionSeen { key: key.clone() }),
             _ => Err(Bad::Value {
                 command: "admission-seen".into(),
-                problem: "give the key shown in capture health".into(),
+                // `capture status` is the one that shows it. There is no
+                // `capture health` — being told to run something that answers
+                // "is not a command" ends the search in the wrong place.
+                problem: "give the key shown in capture status".into(),
             }),
         },
         "verify" => Ok(Command::Verify {
@@ -1397,6 +1400,63 @@ mod tests {
                 "{args:?} reports a missing argument as an unknown flag"
             );
         }
+    }
+
+    #[test]
+    fn every_command_a_refusal_names_is_a_command() {
+        // `admission-seen` used to say "give the key shown in capture health".
+        // There is no `capture health` — it is `capture status` that shows it —
+        // so the one message whose job was to point somewhere pointed nowhere,
+        // and being told to run something that answers "is not a command" ends
+        // the search in the wrong place.
+        //
+        // Over this file's own text rather than over a list someone maintains,
+        // because a hand-kept list of the commands we mention is the thing that
+        // went stale in the first place.
+        let src = include_str!("args.rs");
+        let mut checked = 0;
+        for line in src.lines() {
+            // Messages only. Prose in a comment may say "capture text" meaning
+            // the text of a capture, and does not promise a command exists.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            for (i, _) in line.match_indices("capture ") {
+                let after = &line[i + "capture ".len()..];
+                let word: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                // The binary's own name with no verb, and the help it prints.
+                if word.is_empty() || word == "help" {
+                    continue;
+                }
+                // Shown as a command, not mentioned as a noun. "expected a
+                // capture and an item number" is about a captured note, and
+                // promises no `capture and`. A command being shown ends the
+                // string, ends the line, or is followed by a placeholder.
+                let rest = &after[word.len()..];
+                if !(rest.is_empty()
+                    || rest.starts_with('"')
+                    || rest.starts_with(" <")
+                    || rest.starts_with("\\n"))
+                {
+                    continue;
+                }
+                checked += 1;
+                // That the *verb* is known, not that this invocation is
+                // complete. `capture intent` needs three arguments, and
+                // demanding a parse would have made the test a second copy of
+                // every command's arity — which is a thing to get wrong, not a
+                // thing to assert.
+                assert!(
+                    !matches!(p(&[&word]), Err(Bad::UnknownCommand(_))),
+                    "a message names `capture {word}`, which is not a command",
+                );
+            }
+        }
+        assert!(checked > 0, "the scan found nothing, so it proves nothing");
     }
 
     #[test]

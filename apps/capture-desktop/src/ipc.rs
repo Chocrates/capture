@@ -1401,6 +1401,17 @@ pub fn health() -> std::result::Result<Health, String> {
             });
         }
 
+        // Whether sync is running at all, before any peer is described.
+        //
+        // The window is where this matters most: somebody reading it is the
+        // least likely to know whether a daemon is running, and the most likely
+        // to read "never reached" as a statement about their network. It was
+        // the only thing said here, and on a machine where `capture-syncd` had
+        // never been started it pointed at the wrong half of the system.
+        //
+        // Same decision and same words as the phone and the command line, from
+        // `capture-store`, because three surfaces answering this separately is
+        // how two of them came to be wrong.
         // Membership from the log rather than the projection: the projection's
         // copy is only written when a gate opens, and a local capture never
         // opens one — so reading it reports an empty roster on any device that
@@ -1408,6 +1419,32 @@ pub fn health() -> std::result::Result<Health, String> {
         let roster = capture_core::roster::build(&log.all()?);
         let me = capture_store::Identity::load(&p)?.public().to_bytes();
         let known = ops.peer_addresses()?;
+
+        // Whether sync is running at all, before any peer is described.
+        //
+        // The window is where this matters most: somebody reading it is the
+        // least likely to know whether a daemon is running, and the most likely
+        // to read "never reached" as a statement about their network. That was
+        // the only thing said here, and on a machine where `capture-syncd` had
+        // never been started it pointed at the wrong half of the system.
+        //
+        // Same decision and same words as the phone and the command line, from
+        // `capture-store`, because three surfaces answering this separately is
+        // how two of them came to be wrong.
+        let others = roster.keys.iter().filter(|k| **k != me).count();
+        if let Some((tier, text)) =
+            capture_store::syncstate::sync_state(&ops, others, now)?.message()
+        {
+            conditions.push(Condition {
+                tier: if tier == "attention" {
+                    "attention"
+                } else {
+                    "worth-knowing"
+                },
+                text,
+                acknowledgeable: false,
+            });
+        }
 
         let mut peers = Vec::new();
         for key in &roster.keys {
