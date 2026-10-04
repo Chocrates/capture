@@ -324,6 +324,7 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                     model.notifier,
                     model.me,
                     onNotifier = model::chooseNotifier,
+                    onRetire = model::retire,
                     onSync = {
                         SyncWorker.now(context)
                         // The worker is out of reach once started, so the

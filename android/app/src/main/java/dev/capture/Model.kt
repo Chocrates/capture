@@ -533,6 +533,27 @@ class Model(private val archive: Archive) : ViewModel() {
         notifier = archive.notifier()
     }
 
+    /**
+     * Close a device's membership.
+     *
+     * §5.3's remedy for a lost device, from the device that is left. It was
+     * only ever half reachable: retiring a lost *phone* from the desktop
+     * always worked, and a lost *desktop* left this device holding the archive
+     * with the missing key still a member and nothing able to revoke it.
+     * `Archive.retire` was written for exactly that and nothing called it.
+     *
+     * The archive matches the key, refuses an ambiguous prefix and authors the
+     * event. What is decided here is only that the list is re-read afterwards,
+     * so the row that was acted on stops offering to send alerts to a device
+     * that is no longer a member.
+     */
+    fun retire(key: String) = load {
+        archive.retire(key)
+        peers = archive.peers()
+        conditions = archive.health()
+        notifier = archive.notifier()
+    }
+
     /** Say whether the platform is currently letting this device see where it is. */
     fun located(watching: Watching) {
         located = watching

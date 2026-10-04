@@ -1042,11 +1042,46 @@ fun Health(
     notifier: String?,
     me: String,
     onNotifier: (String?) -> Unit,
+    onRetire: (String) -> Unit,
     onSync: () -> Unit,
     onPair: () -> Unit,
 ) {
     val attention = conditions.filter { it.tier == "attention" }
     val knowing = conditions.filter { it.tier != "attention" }
+
+    // Which device a retirement has been begun for, and not yet confirmed.
+    // Held here rather than per row so the dialog is drawn once, outside the
+    // list that is about to be re-read underneath it.
+    var closing by remember { mutableStateOf<String?>(null) }
+
+    closing?.let { key ->
+        AlertDialog(
+            onDismissRequest = { closing = null },
+            title = { Text("Retire this device?") },
+            text = {
+                Column {
+                    Text(key, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        // Named rather than counted, and the undo named too.
+                        // §5.3 makes a retirement reversible only by a
+                        // readmission signed by two devices — and somebody
+                        // reaching for this has just lost one, so the undo may
+                        // not be available at the moment the mistake is made.
+                        "It stops being a member and can no longer read what arrives after this. " +
+                            "Its past notes are kept.\n\n" +
+                            "Undoing this needs two devices to sign, so it may not be possible " +
+                            "from here alone.",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                Button({ onRetire(key); closing = null }) { Text("Retire") }
+            },
+            dismissButton = { TextButton({ closing = null }) { Text("Keep it") } },
+        )
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
         item { Text("Needs attention", style = MaterialTheme.typography.titleSmall) }
@@ -1128,6 +1163,13 @@ fun Health(
                         "${peer.missed} attempt(s) since",
                         style = MaterialTheme.typography.labelSmall,
                     )
+                }
+                // Never for the device being held. Revoking the key you are
+                // using leaves no member able to author the readmission that
+                // would undo it, which is the one state §5.3's remedy cannot
+                // be written from.
+                if (peer.key != me) {
+                    TextButton({ closing = peer.key }) { Text("Retire this device") }
                 }
             }
         }
