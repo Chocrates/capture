@@ -2827,6 +2827,21 @@ impl Store {
         // the capture they came from was destroyed.
         tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
         tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+        // The context it was captured in: the application, the window title,
+        // the working directory, the repository and the branch.
+        //
+        // The third table to be found surviving a purge, after the two above,
+        // and for the same reason — a purge edits the projection in place, so
+        // every derived table has to be named here or it is simply missed.
+        //
+        // §1.1's argument about the search index applies unchanged: destroying
+        // the body while leaving a derived copy of the same material is the
+        // stated purpose failing. A window title is frequently the same
+        // material as the note beside it — "Reset password — Fastmail" next to
+        // a destroyed note about a password — and `by_context` joined this
+        // table with no redaction filter, so a destroyed note went on being
+        // returned by a context query with its context attached.
+        tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
         tx.commit()?;
         Ok(())
     }
