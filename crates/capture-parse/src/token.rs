@@ -53,6 +53,20 @@ pub enum Class {
     Number(u32),
     /// `Q1`–`Q4`.
     Quarter(u32),
+    /// A full date written as one token: `2026-09-20`.
+    ///
+    /// Decided here, where every other shape is decided. A date is exactly the
+    /// question a tokenizer answers — "what is this run of characters" — and
+    /// putting it anywhere else means two places that know what one looks like.
+    ///
+    /// Validity is checked when the class is assigned, so `2026-13-45` stays an
+    /// ordinary word rather than becoming a date that fails later. The whole
+    /// token must be the date, which is what keeps `v2026-09-20` a word.
+    IsoDate {
+        year: i32,
+        month: u8,
+        day: u8,
+    },
     /// `1st`, `2nd`, `14th`.
     Ordinal(u32),
     /// A clock written as one token: `2pm`, `14:00`, `9:30am`.
@@ -151,6 +165,37 @@ pub fn tokenize(text: &str) -> Vec<Token<'_>> {
             continue;
         }
 
+        // A date written in full, before the range operator gets to it.
+        //
+        // This ordering is the whole fix. A hyphen between digits is a range —
+        // `aug 1-14` — so `2026-09-20` was split into three numbers and two
+        // operators and never reached the classifier as one thing. The most
+        // unambiguous way to write a date was the one way the archive could not
+        // see it at all.
+        //
+        // Safe to try first because the shape is exact: ten characters, a
+        // four-digit year, and a real calendar day. `1-14` cannot match it, and
+        // neither can `2026-13-45`.
+        if c.is_ascii_digit()
+            && let Some(end) = iso_date_end(text, i)
+        {
+            let whole = &text[i..end];
+            if let Some(d) = capture_time::FloatingDate::parse(whole) {
+                out.push(Token {
+                    text: whole,
+                    start: i,
+                    end,
+                    class: Class::IsoDate {
+                        year: d.year,
+                        month: d.month,
+                        day: d.day,
+                    },
+                });
+                i = end;
+                continue;
+            }
+        }
+
         // A range written tight: `1-14`, `aug 1..14`.
         if (c == b'-' || c == b'.') && looks_like_range(bytes, i) {
             let len = if c == b'.' { 2 } else { 1 };
@@ -235,6 +280,27 @@ fn is_meridiem_dot(bytes: &[u8], i: usize) -> bool {
 }
 
 /// Whether this is a range operator rather than a hyphen inside a word.
+/// Where a full date ends, if one starts here.
+///
+/// Exactly ten characters and a boundary after them, so `v2026-09-20` is not a
+/// date with a letter in front and `2026-09-201` is not one with a digit after.
+/// Whether those ten characters are a *real* day is left to the parser, which
+/// already knows that the 31st of February is not one.
+fn iso_date_end(text: &str, at: usize) -> Option<usize> {
+    let end = at + 10;
+    if end > text.len() || !text.is_char_boundary(end) {
+        return None;
+    }
+    let b = text.as_bytes();
+    if at > 0 && !b[at - 1].is_ascii_whitespace() && !matches!(b[at - 1], b'>' | b'(' | b'[') {
+        return None;
+    }
+    if end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'-') {
+        return None;
+    }
+    Some(end)
+}
+
 fn looks_like_range(bytes: &[u8], i: usize) -> bool {
     if bytes[i] == b'.' {
         return bytes.get(i + 1) == Some(&b'.');
@@ -251,6 +317,13 @@ fn classify(s: &str) -> Class {
     }
     if let Some(q) = quarter(s) {
         return Class::Quarter(q);
+    }
+    if let Some(d) = capture_time::FloatingDate::parse(s) {
+        return Class::IsoDate {
+            year: d.year,
+            month: d.month,
+            day: d.day,
+        };
     }
     if let Some(o) = ordinal(s) {
         return Class::Ordinal(o);

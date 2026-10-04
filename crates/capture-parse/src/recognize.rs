@@ -194,26 +194,42 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
     let tokens = tokenize(text);
     let markers = markers(&tokens);
 
+    // A task verb at the head is a hint about what the sentence is *for*.
+    // Verbs are an open class and any list of them is wrong at the edges, so it
+    // is never the whole reading — but it does decide between two readings of
+    // the same day, and that is what the composition below is.
+    //
+    // Computed before the sigil path, not after it, and that ordering was the
+    // bug. A sigil returned immediately with a bare day, so the most precise
+    // way to write a due date — an explicit marker and a full date — produced
+    // an *event*: a thing you attend rather than a thing you owe, which is the
+    // wrong half of §3.6's table. The more exactly somebody wrote it, the more
+    // certainly it was misread.
+    let head_is_verb = tokens
+        .iter()
+        .find(|t| t.class != Class::Break)
+        .is_some_and(|t| t.class == Class::TaskVerb);
+
     // A sigil is exact and beats inference. Where one names a date, tier 2 is
     // not consulted for one at all — not even to record a competing suggestion
     // (§3.1.1).
+    //
+    // The verb is still read. These answer different questions: the sigil says
+    // *which date*, the verb says *what kind of thing this is*, and nothing
+    // about reading both makes an inference compete with a sigil. The date it
+    // names is the date, at full confidence, either way.
     if let Some(d) = markers.date.as_deref().and_then(FloatingDate::parse) {
         return Recognition {
-            shape: Shape::Point(When::Date(d)),
+            shape: if head_is_verb {
+                Shape::Task { due: Some(d) }
+            } else {
+                Shape::Point(When::Date(d))
+            },
             confidence: 100,
             markers,
             grammar: crate::GRAMMAR_VERSION,
         };
     }
-
-    // A task verb at the head is a hint about what the sentence is *for*.
-    // Verbs are an open class and any list of them is wrong at the edges, so it
-    // is never the whole reading — but it does decide between two readings of
-    // the same day, and that is what the composition below is.
-    let head_is_verb = tokens
-        .iter()
-        .find(|t| t.class != Class::Break)
-        .is_some_and(|t| t.class == Class::TaskVerb);
 
     if let Some((shape, confidence)) = temporal(&tokens, now, zone, head_is_verb) {
         return Recognition {
@@ -513,9 +529,32 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone, head_is_verb: bool) -> Opti
         let (anchor, consumed, kind) = match t.class {
             Class::Weekday => (next_weekday(now, zone, t.text)?, 1, Anchor::Day),
             Class::DayWord => (day_word(now, zone, t.text)?, 1, Anchor::Day),
+            // A date written in full, as one token. Exactly as unambiguous as
+            // `sep 20` and read at the same band — it should not count as more
+            // certain just for being written in digits.
+            Class::IsoDate { year, month, day } => (
+                FloatingDate::new(year, month, day)?,
+                1,
+                Anchor::CompleteDate,
+            ),
             Class::Month => {
                 let day = day_number(tokens.get(i + 1)?)?;
                 let month = month_number(t.text)?;
+                (
+                    FloatingDate::new(year_for(now, zone, month, day), month, day)?,
+                    2,
+                    Anchor::CompleteDate,
+                )
+            }
+            // The same date the other way round. Day-first is how most of the
+            // world writes one, and reading only `sep 20` means the form works
+            // silently for some people and not others.
+            //
+            // A month name has to follow, which is what keeps `in 3 weeks` out:
+            // no unit is a month.
+            Class::Number(n) => {
+                let month = month_number(tokens.get(i + 1)?.text)?;
+                let day = u8::try_from(n).ok()?;
                 (
                     FloatingDate::new(year_for(now, zone, month, day), month, day)?,
                     2,
@@ -669,7 +708,12 @@ fn guarded(tokens: &[Token<'_>], t: &Token<'_>) -> bool {
         Class::Marker | Class::Break | Class::Determiner | Class::RecHead
     ) || matches!(
         t.class,
-        Class::Weekday
+        // A full date needs no permission from what precedes it. It is the most
+        // distinctive token there is — ten characters, a four-digit year, a real
+        // calendar day — and there is no prose in which `2026-09-20` is not a
+        // date. The other classes here are self-evident; this one more so.
+        Class::IsoDate { .. }
+            | Class::Weekday
             | Class::Month
             | Class::DayWord
             | Class::Quarter(_)

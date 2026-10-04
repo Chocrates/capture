@@ -699,3 +699,38 @@ fn what_it_gets_wrong_on_tagged_prose() {
     }
     println!();
 }
+
+/// What the date rules changed about captures already written.
+///
+/// A grammar bump re-reads every capture parsed under the old rules, so the
+/// question is not only "is the new reading right" but "how many readings
+/// move". Each one that moves is a note whose kind or date changes under
+/// somebody, and they should all be changes from wrong to right.
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn which_readings_the_date_rules_move() {
+    use capture_parse::{Shape, recognize};
+    use capture_time::Zone;
+
+    let zone = Zone::new("UTC").unwrap();
+    let now = 1_790_000_000_000i64;
+
+    let mut dated = 0;
+    let mut tasks_due = 0;
+    for text in CORPUS {
+        let r = recognize(text, now, zone);
+        match r.shape {
+            Shape::Task { due: Some(_) } => {
+                tasks_due += 1;
+                dated += 1;
+            }
+            Shape::Point(_) | Shape::Range { .. } => dated += 1,
+            _ => {}
+        }
+    }
+
+    println!(
+        "\n  {} captures\n  read as dated: {dated}\n  of those, tasks with a due date: {tasks_due}\n",
+        CORPUS.len(),
+    );
+}

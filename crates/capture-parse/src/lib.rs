@@ -100,7 +100,18 @@ pub use token::{Class, Token, tokenize};
 /// today, and would have moved again on every later bump. Anything promoted
 /// under 3 or earlier may be sitting on the day a sweep happened to run, so it
 /// is read again now that a reparse resolves against the capture.
-pub const GRAMMAR_VERSION: u32 = 4;
+/// Version 5 reads a date written exactly. Three forms were misread or unread
+/// and the pattern was the same in each: the more precisely somebody wrote the
+/// date, the worse it went. A sigil and a full date produced an *event* where a
+/// task verb was present, because the sigil path returned before the verb was
+/// looked at — so the most explicit possible way to write a due date landed on
+/// the wrong half of §3.6's table. A bare `2026-09-20` was split by the range
+/// operator and never seen at all. A day before a month name was not read.
+///
+/// Every capture parsed under 4 or earlier is read again, which is the point:
+/// anything that became an appointment when it was meant to be owed is
+/// corrected by the sweep. A pinned promotion still wins, as always.
+pub const GRAMMAR_VERSION: u32 = 5;
 
 /// A word the recognizer knows, and what it is worth.
 ///

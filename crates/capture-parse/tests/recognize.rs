@@ -539,3 +539,115 @@ fn an_email_address_is_not_a_person() {
     // Otherwise every address in a capture invents a person page.
     assert!(capture_parse::mentions("mail sarah@example.com about it").is_empty());
 }
+
+// ------------------------------------------------- dates written exactly ---
+//
+// The more precisely a date was written, the worse it was read. All three of
+// these were found by trying to put one of each kind on a phone.
+
+#[test]
+fn a_verb_and_a_sigil_date_is_a_task_due() {
+    // The worst of the three: `recognize` returned at the sigil path before
+    // `head_is_verb` was computed, so the most explicit way to write a due date
+    // produced an *event* — a thing you attend rather than a thing you owe,
+    // which is the wrong half of §3.6's table.
+    match read("pay the invoice >2026-09-20").shape {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}"), "2026-09-20"),
+        other => panic!("expected a task due that day, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sigil_date_with_no_verb_is_still_an_event() {
+    // The composition reads the verb; it does not invent one.
+    match read("dentist >2026-09-20").shape {
+        Shape::Point(When::Date(d)) => assert_eq!(format!("{d}"), "2026-09-20"),
+        other => panic!("expected an event on that day, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sigil_date_is_still_fully_confident() {
+    assert_eq!(read("pay the invoice >2026-09-20").confidence, 100);
+    assert_eq!(read("dentist >2026-09-20").confidence, 100);
+}
+
+#[test]
+fn a_date_written_in_full_is_read_in_prose() {
+    // A hyphen between digits is the range operator, so `2026-09-20` used to be
+    // split into three numbers and two operators and never reached the
+    // classifier whole. The one unambiguous form was the one that was invisible.
+    match read("dentist 2026-09-20").shape {
+        Shape::Point(When::Date(d)) => assert_eq!(format!("{d}"), "2026-09-20"),
+        other => panic!("expected that day, got {other:?}"),
+    }
+    match read("pay the invoice on 2026-09-20").shape {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}"), "2026-09-20"),
+        other => panic!("expected a task due that day, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_range_is_still_a_range() {
+    // The ordering above must not eat `aug 1-14`, which is what the hyphen rule
+    // was for in the first place.
+    match read("vacation aug 1-14").shape {
+        Shape::Range { .. } => {}
+        other => panic!("expected a span, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_a_whole_token_that_is_a_real_day_is_a_date() {
+    for not_a_date in [
+        "dentist 2026-13-45",
+        "v2026-09-20 shipped",
+        "build 2026-09-201",
+        "the 2026-09-20 timeline",
+    ] {
+        assert!(
+            !matches!(read(not_a_date).shape, Shape::Point(When::Date(_))),
+            "{not_a_date:?} should not be a date"
+        );
+    }
+}
+
+#[test]
+fn a_month_name_is_read_either_way_round() {
+    // Day-first is how most of the world writes a date, and reading only one
+    // order means the form works silently for some people and not others.
+    let a = read("pay the invoice on 20 sep").shape;
+    let b = read("pay the invoice on sep 20").shape;
+    assert_eq!(a, b, "the two orders named different days");
+    match a {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}").split('-').nth(2), Some("20")),
+        other => panic!("expected a task due on the twentieth, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_count_before_a_unit_is_still_an_offset() {
+    // The day-first arm needs a month name after the number, which is what
+    // keeps this out: no unit is a month.
+    match read("check back in 3 weeks").shape {
+        Shape::Point(When::Date(_)) => {}
+        other => panic!("expected an offset to a day, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_ambiguous_numeric_date_is_not_guessed_at() {
+    // `09/20` and `20/09` are the same characters meaning different days, and
+    // nothing in a capture says which convention its author uses. A date read
+    // wrongly is worse than one not read: it is confidently off by months.
+    for ambiguous in [
+        "pay the invoice on 20/09",
+        "pay the invoice on 20.09.2026",
+        "pay the invoice on 09/20/2026",
+    ] {
+        assert!(
+            !matches!(read(ambiguous).shape, Shape::Task { due: Some(_) }),
+            "{ambiguous:?} should name no date"
+        );
+    }
+}
