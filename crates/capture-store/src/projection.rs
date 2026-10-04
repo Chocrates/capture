@@ -3168,6 +3168,34 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM held", [], |r| r.get::<_, i64>(0))? as u64)
     }
+
+    /// Which events are held, and why.
+    ///
+    /// `held_count` was the only accessor anywhere, so a surface could say
+    /// "1 event(s) stored but not folded" and nothing could say *which*, of
+    /// what kind, or why. A condition with nowhere to go is one somebody reads
+    /// once and then learns to skip — and in this case the count was wrong, and
+    /// unlistable meant unarguable.
+    ///
+    /// The kind comes from the caller's log rather than from here: the
+    /// projection stores the reason, and what the event actually *was* is in
+    /// the events table where it has always been.
+    pub fn held(&self) -> Result<Vec<(EventId, String)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT event_id, reason FROM held ORDER BY event_id")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, reason) = r?;
+            if let Ok(id) = <[u8; 32]>::try_from(id.as_slice()) {
+                out.push((EventId(id), reason));
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn fts_row(tx: &rusqlite::Transaction<'_>, tgt: &EventId) -> Result<Option<i64>> {

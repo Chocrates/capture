@@ -84,6 +84,7 @@ fn run(command: Command) -> Result<()> {
         Command::Agenda { day, json } => read::agenda(&paths()?, day.as_deref(), json),
         Command::Tasks { json } => read::tasks(&paths()?, json),
         Command::Settle { json } => write::settle(&paths()?, json),
+        Command::Held { json } => ops::held(&paths()?, json),
         Command::List { tag, json } => read::list(&paths()?, &tag, json),
         Command::Due { json } => read::due(&paths()?, json),
         Command::Tick { tag, item, done } => write::tick(paths()?, &tag, &item, done),

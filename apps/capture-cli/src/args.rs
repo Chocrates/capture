@@ -73,6 +73,10 @@ pub enum Command {
     Projects {
         json: bool,
     },
+    /// Events stored but not folded, and why.
+    Held {
+        json: bool,
+    },
     /// An entity's page: what it is called, what backs it, what names it.
     Entity {
         name: String,
@@ -839,6 +843,9 @@ where
         "quarantine" => Ok(Command::Quarantine {
             json: has_json(&args[1..]),
         }),
+        "held" => Ok(Command::Held {
+            json: has_json(&args[1..]),
+        }),
         "rejected" => Ok(Command::Rejected {
             json: has_json(&args[1..]),
         }),
@@ -1204,6 +1211,7 @@ TIME AND TASKS
   capture list <tag>             a list: its items, and what is left
   capture due                    what will speak, and when
   capture settle                 read captures nothing has read yet
+  capture held                   events stored but not folded, and why
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
@@ -1497,6 +1505,18 @@ mod tests {
             let msg = p(&naming_nothing).unwrap_err().message();
             assert!(msg.contains("names nothing"), "{naming_nothing:?}: {msg}");
         }
+    }
+
+    #[test]
+    fn held_takes_nothing_but_json() {
+        assert!(matches!(
+            p(&["held"]).unwrap(),
+            Command::Held { json: false }
+        ));
+        assert!(matches!(
+            p(&["held", "--json"]).unwrap(),
+            Command::Held { json: true }
+        ));
     }
 
     #[test]

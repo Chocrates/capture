@@ -449,8 +449,13 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 
     let held = state.held_count()?;
     if held > 0 {
+        // Names where to look. This said only the count, and `held_count` was
+        // the only accessor in the workspace — so somebody reading it could
+        // not find out which event, of what kind, or why. A condition with
+        // nowhere to go gets read once and skipped afterwards.
         worth_knowing.push(format!(
-            "{held} event(s) stored but not folded — this build has no rule for them"
+            "{held} event(s) stored but not folded — this build has no rule for them.\n\
+             Which ones:  capture held"
         ));
     }
     let pending = log.pending()?;
@@ -642,6 +647,70 @@ pub fn quarantine(paths: &StorePaths, json: bool) -> Result<()> {
     for (id, reason) in &rows {
         say!("  {}  {reason}", hex(&id.0[..8]));
     }
+    Ok(())
+}
+
+/// Events stored but not folded, and why.
+///
+/// `capture status` could report a count and nothing could report anything
+/// else: `held_count` was the only accessor in the workspace. So a line saying
+/// "this build has no rule for them" had no next step, and nobody could tell
+/// whether it meant a newer peer had written something this build predates — or
+/// whether the count was simply wrong, which for every archive ever rebuilt it
+/// was, because the fold filed its own roster key as an unknown kind.
+///
+/// The kind comes from the log rather than the projection, because what the
+/// event *is* has always lived there. Naming it is the whole point: "unknown
+/// kind 33" is a newer build on another device and will resolve on upgrade,
+/// where "unknown kind 25" was this one failing to recognise a roster key.
+pub fn held(paths: &StorePaths, json: bool) -> Result<()> {
+    let state = read::open(paths)?;
+    let rows = state.held()?;
+    let log = Log::open_read(&paths.events)?;
+
+    // Every event once, so the kind of a held id can be looked up. A held set
+    // is a handful at most — it is bounded by what this build cannot read —
+    // and anything cleverer would be optimising a diagnostic.
+    let kinds: std::collections::BTreeMap<_, _> = log
+        .all()?
+        .iter()
+        .map(|e| (e.header.id(), e.header.kind))
+        .collect();
+
+    if json {
+        let out: Vec<String> = rows
+            .iter()
+            .map(|(id, reason)| {
+                format!(
+                    "{{\"id\":\"{}\",\"reason\":\"{reason}\",\"kind\":{}}}",
+                    hex(&id.0[..8]),
+                    kinds.get(id).map(|k| k.0).unwrap_or(0)
+                )
+            })
+            .collect();
+        say!("[{}]", out.join(","));
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        say!("Nothing is held.");
+        say!();
+        say!("Every event in the log has a rule this build understands.");
+        return Ok(());
+    }
+
+    say!("Stored, authentic, and not folded — this build has no rule for them.");
+    say!();
+    for (id, reason) in &rows {
+        match kinds.get(id) {
+            Some(k) => say!("  {}  kind {}  {reason}", hex(&id.0[..8]), k.0),
+            None => say!("  {}  kind unknown  {reason}", hex(&id.0[..8])),
+        }
+    }
+    say!();
+    say!("A kind this build does not have is usually a newer one on another");
+    say!("device. These are re-examined on every rebuild, so an upgrade picks");
+    say!("them up without anything being lost.");
     Ok(())
 }
 

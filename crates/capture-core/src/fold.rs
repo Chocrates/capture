@@ -708,7 +708,30 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::TOMBSTONE => apply_tombstone(&mut proj, e),
             // Membership and settings do not affect note state.
             Kind::SETTING => apply_setting(&mut proj, e),
-            Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM => {}
+            // Every membership kind, not only the two that were listed.
+            //
+            // `ROSTER_KEY`, `DEVICE_RETIRE` and `DEVICE_READMIT` were missing
+            // and fell to the arm below, which files an event as
+            // `UnknownKind` — meaning "this build has no rule for it, look
+            // again after an upgrade". The build has a rule: `roster::build`
+            // reads all five outside the fold, which is exactly why the fold
+            // has nothing to do with them.
+            //
+            // It was not an edge case. Every archive mints a roster key at
+            // genesis, so *every* projection this build rebuilt held one, and
+            // every status surface reported "1 event(s) stored but not folded"
+            // for ever. Invisible until a rebuild, which is why it survived:
+            // the incremental path does not record held events, so it appeared
+            // only after `capture rebuild` or a schema bump.
+            //
+            // A permanent false positive is worse than saying nothing. §4.5's
+            // tiers only work if the list is believable, and one that always
+            // has a line in it is one people learn to skip.
+            Kind::DEVICE_ADD
+            | Kind::ORIGIN_CLAIM
+            | Kind::ROSTER_KEY
+            | Kind::DEVICE_RETIRE
+            | Kind::DEVICE_READMIT => {}
             // Handled outside the main pass.
             Kind::REDACT | Kind::REDACT_CANCEL => {}
             _ => {
@@ -1745,6 +1768,37 @@ fn apply_tombstone(proj: &mut Projection, e: &Envelope) {
 mod tests {
     use super::*;
     use crate::testing;
+
+    /// Membership is not note state, and is not an unknown kind either.
+    ///
+    /// Every archive mints a roster key at genesis, so this is not an edge
+    /// case: before the fix, *every* projection rebuilt by this build held that
+    /// event as `UnknownKind` and every status surface said "1 event(s) stored
+    /// but not folded — this build has no rule for them". The build knows
+    /// exactly what a roster key is; `roster::build` reads these kinds outside
+    /// the fold, which is why the fold has nothing to do with them.
+    ///
+    /// A permanent false positive is worse than silence: §4.5's two tiers only
+    /// work if the list is believable, and one that always has a line in it is
+    /// one people learn to skip.
+    #[test]
+    fn membership_kinds_are_ignored_rather_than_held() {
+        for kind in [
+            Kind::DEVICE_ADD,
+            Kind::ORIGIN_CLAIM,
+            Kind::ROSTER_KEY,
+            Kind::DEVICE_RETIRE,
+            Kind::DEVICE_READMIT,
+        ] {
+            let mut d = testing::Origin::new(0);
+            let e = d.author(kind, None, None, alloc::vec![0u8; 16], 1_700_000_000_000);
+            let proj = fold(core::slice::from_ref(&e));
+            assert!(
+                proj.held.is_empty(),
+                "kind {kind:?} was held, and membership is read outside the fold",
+            );
+        }
+    }
 
     /// Two notes, where the second links the first by name.
     fn linked_pair(second_text: &str) -> (Projection, EventId, EventId) {
