@@ -1039,9 +1039,13 @@ fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool)
         let items: Vec<String> = kept
             .iter()
             .map(|s| {
+                // `taken_at` beside the retention: a consumer can do nothing
+                // with a rendered date and everything with a number, and the
+                // field has been carried this far and dropped at the surface.
                 format!(
-                    "{{\"id\":{},\"expires_in_ms\":{}}}",
+                    "{{\"id\":{},\"taken_at\":{},\"expires_in_ms\":{}}}",
                     quote(&capture_store::mutate::short(&s.redact)),
+                    s.taken_at,
                     s.expires_at.saturating_sub(now)
                 )
             })
@@ -1060,15 +1064,9 @@ fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool)
 
     say!("Copies of content that was destroyed, kept so a misfire is recoverable.");
     say!();
+    let zone = local_zone();
     for s in kept {
-        // The first line only. Enough to recognise a note, rather than a second
-        // place the whole of a destroyed note is printed.
-        say!(
-            "  {}  expires in {:<10}  {}",
-            capture_store::mutate::short(&s.redact),
-            ms(s.expires_at.saturating_sub(now)),
-            first_line(&s.text)
-        );
+        say!("{}", recoverable_line(s, now, zone));
     }
     say!();
     say!("Bring one back with:  capture recover <id>");
@@ -1077,6 +1075,36 @@ fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool)
 }
 
 /// Coarse enough to decide with, for a retention measured in days.
+/// One line of the recoverable listing.
+///
+/// Pure, and lifted out of the loop, because it is the only way this can be
+/// tested at all. Producing a snapshot needs a redaction that has actually been
+/// carried out; the cancellation window is thirty minutes of real time (§1.1),
+/// nothing drains the queue early, and the command line has no clock to inject.
+/// So a test at that level would have to wait half an hour — which is why
+/// `capture recover` is invoked by no test in the repo, and how a field could be
+/// dropped here while the store test below it asserted the field was present.
+///
+/// The date rather than the instant: it is what somebody remembers — "the thing
+/// I destroyed on Tuesday" — and a millisecond timestamp in a listing is noise
+/// that makes the first line harder to find.
+///
+/// The first line of the text only. Enough to recognise a note, rather than a
+/// second place the whole of a destroyed one is printed.
+fn recoverable_line(
+    s: &capture_store::ops::Snapshot,
+    now: u64,
+    zone: capture_time::Zone,
+) -> String {
+    format!(
+        "  {}  taken {}  expires in {:<10}  {}",
+        capture_store::mutate::short(&s.redact),
+        capture_time::civil_date(s.taken_at as i64, zone),
+        ms(s.expires_at.saturating_sub(now)),
+        first_line(&s.text)
+    )
+}
+
 fn ms(v: u64) -> String {
     let hours = v / (60 * 60 * 1000);
     match hours / 24 {
@@ -1132,4 +1160,46 @@ pub fn release_redaction(paths: StorePaths, id_prefix: &str) -> Result<()> {
     say!("Nothing has been destroyed yet. It happens when the archive next");
     say!("settles — or immediately, with:  capture settle");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The listing says when a copy was taken.
+    ///
+    /// The first unit test in this file, and it exists because nothing else can
+    /// reach this line: a snapshot needs a redaction that has actually been
+    /// carried out, the cancellation window is thirty minutes of real time, and
+    /// the command line has no clock to inject. `capture recover` is invoked by
+    /// no test at all, which is how `taken_at` came to be stored, selected,
+    /// ordered by, carried to the surface and dropped there.
+    #[test]
+    fn a_recoverable_copy_is_listed_with_when_it_was_taken() {
+        let s = capture_store::ops::Snapshot {
+            redact: capture_core::EventId([7; 32]),
+            tgt: capture_core::EventId([9; 32]),
+            // 2026-09-20, 15:00 UTC.
+            taken_at: 1_789_916_400_000,
+            expires_at: 1_792_508_400_000,
+            text: "the thing I asked to be destroyed\nand a second line".into(),
+        };
+        let utc = capture_time::Zone::new("UTC").expect("UTC is always present");
+        let line = recoverable_line(&s, 1_789_916_400_000, utc);
+
+        assert!(
+            line.contains("2026-09-20"),
+            "the listing does not say when the copy was taken: {line}"
+        );
+        assert!(
+            line.contains("the thing I asked to be destroyed"),
+            "the listing does not say what it begins with: {line}"
+        );
+        // The first line only: the purpose is recognising a copy, not reading
+        // destroyed content back out of a listing.
+        assert!(
+            !line.contains("and a second line"),
+            "the listing printed more than the first line: {line}"
+        );
+    }
 }
