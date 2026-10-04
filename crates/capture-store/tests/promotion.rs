@@ -422,3 +422,48 @@ fn kind_of(p: &StorePaths, slug: &str) -> String {
         .map(|x| x.kind)
         .unwrap_or_default()
 }
+
+#[test]
+fn demoting_to_a_note_holds_against_the_recognizer() {
+    // The half of a correction that is easy to leave untested, because the
+    // obvious assertion — "it is a note now" — passes whether or not the
+    // demotion is pinned.
+    //
+    // `dentist thursday 2pm` is promoted confidently and correctly. Somebody
+    // demoting it is saying the recognizer was wrong *about this one*, and a
+    // sweep that re-promoted it would overrule them silently on a schedule.
+    // §6 rates that failure above all the others here.
+    let sc = Scratch::new("demoted");
+    let p = sc.paths();
+    let text = "dentist thursday 2pm";
+    let slug = capture(&p, text);
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+    assert_eq!(
+        kind_of(&p, &slug),
+        "event",
+        "the recognizer should promote this on its own, or the test proves nothing"
+    );
+
+    promote::correct(&p, &slug, Promoted::Note).unwrap();
+    assert_eq!(kind_of(&p, &slug), "note", "the demotion did not take");
+
+    // An edit is when a reparse happens, so it is where the pin has to hold.
+    capture_store::mutate::edit(&p, &slug, "dentist friday 3pm").unwrap();
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    assert_eq!(
+        kind_of(&p, &slug),
+        "note",
+        "a sweep re-promoted something a person had demoted"
+    );
+
+    // And the words are the person's throughout. Promotion annotates; it never
+    // rewrites (§3.1.3), and demotion is a promotion like any other.
+    let n = note_of(&p, &slug);
+    assert_eq!(n.text.as_deref(), Some("dentist friday 3pm"));
+}

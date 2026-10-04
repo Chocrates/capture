@@ -755,7 +755,9 @@ pub fn set_kind(name: String, kind: String) -> std::result::Result<(), String> {
 /// insisted on one would push people into inventing dates.
 #[tauri::command]
 pub fn as_task(name: String, due: Option<String>) -> std::result::Result<(), String> {
-    wire((|| capture_store::promote::as_task(&paths()?, &name, due.as_deref()))())
+    wire((|| {
+        capture_store::promote::as_task(&paths()?, &name, due.as_deref())
+    })())
 }
 
 /// Take the reading the archive offered but would not act on.

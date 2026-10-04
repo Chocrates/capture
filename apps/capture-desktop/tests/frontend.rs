@@ -938,10 +938,16 @@ fn the_note_page_can_correct_a_kind() {
         "making a task should be hidden on something already a task",
     );
 
-    // Promotion annotates and never rewrites, and the surface says so rather
-    // than leaving somebody to wonder what a correction touched.
-    assert!(
-        body.contains("The text is unchanged"),
-        "the window should say what a correction did not touch",
+    // Promotion annotates and never rewrites, and *both* corrections say so
+    // rather than leaving somebody to wonder what one touched.
+    //
+    // Counted rather than merely found: the first version of this assertion
+    // looked for the phrase once, and removing it from either control still
+    // left the other's, so the check passed while half the reassurance was
+    // gone.
+    assert_eq!(
+        body.matches("The text is unchanged").count(),
+        2,
+        "both corrections should say what they did not touch",
     );
 }
