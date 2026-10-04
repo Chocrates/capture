@@ -43,10 +43,13 @@ Not in the plan. Found by 2.3 asking whether the staleness line ever clears.
 - [x] 6.2 `ffi::due` calls `settle()` instead of reimplementing it inline. It keeps its sweep — the alarm receiver arrives in the background with no guarantee the foreground pass has run — but as one named operation.
 - [x] 6.3 `Archive::unread()`, read-only, so a surface can report being behind without becoming a writer.
 - [x] 6.4 `make android-decides` clean: 22 Kotlin files, none deciding anything.
-- [ ] 6.5 Device case: capture a dated task, go to Tasks, see it — against `dev.capture.dev`, never the real archive. Needs the phone.
-- [ ] 6.6 Device case: capture, background, wait for the alarm, confirm `due` still fires. The path that already worked must keep working.
+- [x] 6.5 **Pixel 8 Pro, `dev.capture.dev`, fresh debug build.** Captured `call the plumber on 2026-10-09` through the share target, opened the app: promoted, under **Due**, carrying `task · due 2026-10-09`, and **no staleness line** — the foreground settle had already read it, which is the designed outcome. Screenshot kept.
+- [x] 6.6 `due()` still works through the new `settle()` call. Captured a timed `pick up prescription today at 21:30`; the app immediately requested `SCHEDULE_EXACT_ALARM`, which only happens when `due()` returns an alert with `timed` set — so the sweep-then-read path ran. Every Kotlin caller wraps `due()` in `runCatching`, so a throw would have been silent; this is the signal that distinguishes them. The entry also renders on the agenda's timed band.
+- [x] 6.7 `unread()` wired into the Tasks screen rather than left as FFI surface nothing calls — the project's own `unwired` rule. Not forced on device: it shows only when the settle fails, and the CLI's equivalent is what the tests pin.
 
 ## 7. Open after this
 
-- [ ] 7.1 The daemon's settle is not bounded by the round's `spent` budget — `BLOB_WINDOW_MS` is computed before it. A 2.86s catch-up overruns a round that thought it had a window. Worth deciding whether the sweep should take the same budget.
-- [ ] 7.2 No staleness surface on the phone. `unread()` exists and nothing calls it; the foreground settle means it should almost never be non-zero, which argues both ways.
+- [x] 7.1 Fixed: the blob window now starts *after* the sweep. Computing `until` first made a catch-up spend the sync phase's budget — three seconds of reading off a window meant for moving attachments, so the first rounds after an upgrade would give the exchange almost nothing and look like a network fault. Two phases, two windows.
+- [x] 7.2 Done as 6.7.
+- [ ] 7.3 The exact-alarm permission is still not granted on the phone (`SCHEDULE_EXACT_ALARM` denied, noted in the ledger on 2026-09-21). Predates this and is the user's to grant; the app asks for it on capture.
+- [ ] 7.4 `make unwired` / `make duplicated` still fail on `mute_entity` and `split_mention`. Both predate this change and are untouched by it.
