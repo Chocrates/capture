@@ -304,20 +304,47 @@ fn a_destroyed_capture_has_no_items() {
     let scratch = Scratch::new("redacted");
     let paths = scratch.paths();
     let slug = capture(&paths, "#shop: milk, eggs");
+    let other = capture(&paths, "#shop: rye flour");
     assert_eq!(items(&paths, &slug).len(), 2);
 
     mutate::redact(&paths, &slug).unwrap();
 
-    // Queued, not yet carried out. The items are still here, because
-    // withholding the text is a read-time `CASE` and the expansion reads the
-    // stored text. Asserted rather than glossed over: nothing leaks, but the
-    // list is still drawable until the destruction runs.
+    // Queued, not yet carried out — and already withheld. §1.1 withholds the
+    // content the moment the destruction is *ordered*, which is the whole
+    // reason the window is cancellable rather than a delay before anything
+    // happens.
+    //
+    // This assertion used to read `== 2`, with a comment arguing that nothing
+    // leaked because the row carried no text. That was wrong on its own terms:
+    // `items_of` answers `ListEntry { text, .. }`, so the two rows it counted
+    // *were* the words — "milk" and "eggs" — expanded out of the text somebody
+    // had just asked to destroy, and readable by a query that never touches the
+    // withheld column.
     let store = settled(&paths);
     let tgt = store.resolve(&slug).unwrap().unwrap();
+    assert!(
+        store.items_of(&tgt).unwrap().is_empty(),
+        "a capture queued for destruction still listed its items"
+    );
+
+    // The rows existed before the order was given, so this also checks they are
+    // *removed* and not merely left unrecomputed — the failure a guard on the
+    // insert alone would leave behind.
+    assert!(
+        store
+            .list("shop", NOW)
+            .unwrap()
+            .iter()
+            .all(|e| e.text != "milk" && e.text != "eggs"),
+        "the tag-wide list still drew the queued capture's items"
+    );
+
+    // And the withholding is about this capture, not the tag: another capture
+    // under the same tag is untouched.
     assert_eq!(
-        store.items_of(&tgt).unwrap().len(),
-        2,
-        "queued behaviour changed; update this comment"
+        items(&paths, &other),
+        [("rye flour".to_string(), false)],
+        "withholding one capture's items took another's with it"
     );
 
     // Destroyed. The text is gone, so there is nothing to expand, and
@@ -329,7 +356,48 @@ fn a_destroyed_capture_has_no_items() {
         store.items_of(&tgt).unwrap().is_empty(),
         "a destroyed capture still listed its items"
     );
-    assert!(store.list("shop", NOW).unwrap().is_empty());
+    // The tag survives the capture, because another capture still writes under
+    // it. What must be gone is this capture's words — asserted by name rather
+    // than by the list being empty, which only held while `#shop` had a single
+    // contributor.
+    let left: Vec<String> = store
+        .list("shop", NOW)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.text)
+        .collect();
+    assert_eq!(
+        left,
+        ["rye flour"],
+        "a destroyed capture's items survived on the tag-wide list"
+    );
+}
+
+#[test]
+fn cancelling_brings_the_withheld_items_back() {
+    // What the withholding is allowed to cost. §1.1's window is cancellable,
+    // and the fold keeps the text through it for exactly this reason — so
+    // withholding has to be a decision about what may be *shown*, not a
+    // deletion. A withholding that could not be undone would have quietly
+    // taken the cancellation window with it.
+    let scratch = Scratch::new("cancelled");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "#shop: milk, eggs");
+    assert_eq!(items(&paths, &slug).len(), 2);
+
+    let id = mutate::redact(&paths, &slug).unwrap();
+    assert!(
+        items(&paths, &slug).is_empty(),
+        "the items were not withheld, so this test proves nothing"
+    );
+
+    mutate::cancel_redaction(&paths, &id).unwrap();
+
+    assert_eq!(
+        items(&paths, &slug),
+        [("milk".to_string(), false), ("eggs".to_string(), false)],
+        "cancelling did not bring the items back"
+    );
 }
 
 /// Carry out every redaction that has come due.

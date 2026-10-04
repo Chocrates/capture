@@ -49,7 +49,10 @@
       re-parse.
 - [x] 5.2 Run `make duplicated` and confirm the resolver did not become a second
       copy of the weekday rule.
-- [x] 5.3 Run `make ci`.
+- [x] 5.3 Run `make ci`. Every gate passes except `deny`, which cannot fetch
+      the RustSec advisory database from this sandbox — `make` wraps it in
+      `systemd-run --user --scope` and the fetch times out on github.com:443.
+      Environment, not the change; `make test` exits 0 with 73 suites green.
 
 ## 6. Verify against the real recognizer
 

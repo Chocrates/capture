@@ -248,26 +248,26 @@ fn a_destroyed_note_names_nobody() {
 
     mutate::redact(&paths, &slug).unwrap();
 
-    // While the destruction is only *queued*, the note is still on the page —
-    // its text is withheld at read time, but the mention row is there.
+    // Ordered, not yet carried out — and already off the page. §1.1 withholds
+    // the content when the destruction is ordered, and the spec says what that
+    // means here in as many words: a note with no readable text names nobody,
+    // "that is what keeps a redacted note, and one with a redaction queued, off
+    // every entity page".
     //
-    // Asserted rather than glossed over, because the comment above the mentions
-    // fill in `write_into` claims otherwise: it says a note "whose content is
-    // withheld or destroyed" must not go on naming people. Withholding is a
-    // `CASE` in `NOTE_COLUMNS`, so the stored text the fill reads is intact.
-    // Nothing leaks — the row carries no text — but the page does still say that
-    // somebody the archive is destroying named this person.
+    // This assertion used to read `== 2`, and the comment above it argued the
+    // case was acceptable: the row carries no note text, only the fact of the
+    // mention. The fact of the mention is the part §1.1 is about. The page said
+    // that a note the archive was in the middle of destroying had named this
+    // person — for the whole window, which is long enough to read.
     let store = settled(&paths);
     let queued = store.entity_notes(&sarah(), NOW).unwrap();
     assert_eq!(
         queued.len(),
-        2,
-        "queued behaviour changed; update the comment"
+        1,
+        "a note queued for destruction is still on the entity page"
     );
     assert!(
-        queued
-            .iter()
-            .all(|n| n.text.is_some() || n.redaction_queued),
+        queued.iter().all(|n| n.text.is_some()),
         "a withheld note leaked its text onto an entity page"
     );
 

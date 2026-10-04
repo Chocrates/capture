@@ -121,6 +121,45 @@ fn a_destroyed_note_is_not_offered_to_link_to() {
     );
 }
 
+#[test]
+fn a_note_queued_for_destruction_links_to_nothing() {
+    // The third table filled from a note's text with no withholding at all, and
+    // the one that leaks from both ends: `links.name` holds the words inside
+    // `[[..]]`, written by the person, and the target's backlinks name the
+    // queued note alongside them.
+    //
+    // Destruction was already covered, by two accidents rather than by the
+    // rule: the fold rebuilds a version's links from its body, so a destroyed
+    // note has no text to extract from, and `purge_note` deletes the rows
+    // anyway. Only the ordered window leaked — §1.1 withholds the content when
+    // the destruction is ordered, which is the whole reason the window is
+    // cancellable rather than a wait.
+    let sc = Scratch::new("queued-links");
+    let p = sc.paths();
+    let target = capture(&p, "the settlement figure");
+    capture_store::mutate::set_alias(&p, &target, Some("settlement")).unwrap();
+    let src = capture(&p, "ask about [[settlement]] before friday");
+
+    let s = Session::open(p.clone()).unwrap();
+    let src_tgt = s.state.resolve(&src).unwrap().unwrap();
+    let target_tgt = s.state.resolve(&target).unwrap().unwrap();
+    assert_eq!(s.state.links_from(&src_tgt).unwrap().len(), 1);
+    assert_eq!(s.state.links_to(&target_tgt).unwrap().len(), 1);
+    drop(s);
+
+    capture_store::mutate::redact(&p, &src).unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(
+        s.state.links_from(&src_tgt).unwrap().is_empty(),
+        "a note queued for destruction kept the words it linked with"
+    );
+    assert!(
+        s.state.links_to(&target_tgt).unwrap().is_empty(),
+        "a backlink still named a note queued for destruction"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Entity pages. §4.3: a page exists for every person and project immediately,
 // which is what makes the layer usable on day one rather than after curation.

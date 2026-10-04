@@ -308,6 +308,33 @@ impl Note {
     pub fn is_redacted(&self) -> bool {
         self.redacted_at.is_some()
     }
+
+    /// The text a reader may see, which is not always the text the note has.
+    ///
+    /// `None` once the content is destroyed, and `None` from the moment the
+    /// destruction is *ordered*. §1.1 withholds then rather than at the end of
+    /// the window — the window is cancellable precisely because the content is
+    /// already unreadable, so it is a chance to change your mind and not a
+    /// delay before anything happens.
+    ///
+    /// The fold keeps `text` through the window on purpose, so a cancellation
+    /// has something to restore; this answers the different question of whether
+    /// anybody may be shown it.
+    ///
+    /// Exists because that question was being decided separately by every table
+    /// derived from the text, and three of them got it wrong. `mentions` and
+    /// `list_items` tested `text.is_some()`, which is true for the whole
+    /// window, so a note somebody had asked to destroy went on naming people
+    /// and listing its contents; `links` tested nothing at all and kept the
+    /// words inside `[[..]]`. Only the search index had it right, by writing
+    /// this condition inline — and the two read-time constants that withhold
+    /// `notes.text` each carry a comment about a hand-written copy of a rule
+    /// that was "present in two call sites and absent from the rest".
+    pub fn readable_text(&self) -> Option<&str> {
+        self.text
+            .as_deref()
+            .filter(|_| self.redaction_pending.is_none())
+    }
 }
 
 /// A derived type, and where it came from.

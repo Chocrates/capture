@@ -3989,11 +3989,23 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             )?;
         }
 
-        for (i, l) in n.links.iter().enumerate() {
-            tx.execute(
-                "INSERT OR REPLACE INTO links (src, ord, name, resolved) VALUES (?1,?2,?3,?4)",
-                params![t, i as i64, l.name, l.resolved.map(|x| x.0.to_vec())],
-            )?;
+        // Links, withheld on the same condition as the mentions below.
+        //
+        // `links.name` is the words inside `[[..]]` — the person's own text,
+        // and it leaks from both ends: the row names what a note referred to,
+        // and the target's backlinks name the note that referred to it. This
+        // loop had no guard of any kind. Destruction was covered by two
+        // accidents rather than by the rule — the fold rebuilds a version's
+        // links from its body, so a destroyed note has nothing to extract
+        // from, and `purge_note` deletes the rows anyway — which left exactly
+        // the ordered window uncovered.
+        if n.readable_text().is_some() {
+            for (i, l) in n.links.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR REPLACE INTO links (src, ord, name, resolved) VALUES (?1,?2,?3,?4)",
+                    params![t, i as i64, l.name, l.resolved.map(|x| x.0.to_vec())],
+                )?;
+            }
         }
 
         if let Some(parent) = n.parent {
@@ -4010,11 +4022,27 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             )?;
         }
 
-        // Mentions come from the text a reader can see. `text_for_purge` is
-        // deliberately not used here: a note whose content is withheld or
-        // destroyed must not go on naming people, or an entity page becomes a
-        // way to read what redaction was supposed to have removed.
-        if let Some(text) = n.text.as_deref() {
+        // The items a note had are cleared whether or not it may be read.
+        //
+        // Above the guard, not inside it: withholding is about what gets
+        // written back, and a note that already had items must *lose* them when
+        // its destruction is ordered rather than keep the ones it had. Inside
+        // the guard this skipped the delete too, so the withholding worked on a
+        // note captured and queued in one breath and leaked on every real one.
+        tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+
+        // Everything derived from the words, under one condition.
+        //
+        // `readable_text` rather than `text`, and `text_for_purge` deliberately
+        // not used: a note whose content is withheld or destroyed must not go
+        // on naming people or listing its contents, or an entity page and a
+        // list become ways to read what redaction was supposed to have removed.
+        //
+        // `text.is_some()` was the old test and it is a test for the wrong
+        // half: the fold keeps the text through the cancellation window so a
+        // cancellation can restore it, so that condition stayed true for the
+        // whole thirty minutes after somebody asked for the note to be gone.
+        if let Some(text) = n.readable_text() {
             for (sigil, value) in capture_parse::mentions(text) {
                 tx.execute(
                     "INSERT OR IGNORE INTO mentions (tgt, sigil, value) VALUES (?1,?2,?3)",
@@ -4023,13 +4051,12 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             }
 
             // A list's items, expanded. Under the same guard as mentions and
-            // for the same reason: a note whose content is withheld or
-            // destroyed must not go on naming things, or a list becomes a way
-            // to read what redaction was supposed to have removed.
+            // for the same reason.
             //
             // The rows are replaced wholesale rather than merged, so an edit
-            // that shortens a list does not leave the items it dropped behind.
-            tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+            // that shortens a list does not leave the items it dropped behind —
+            // which is why the delete is unconditional and sits above this
+            // guard rather than in it.
             if let Some(list) = capture_parse::list_of(text) {
                 let done = reconcile_ticks(&list.items, &n.item_ticks);
                 for (ord, item) in list.items.iter().enumerate() {
@@ -4064,7 +4091,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
         // unfindable after destruction — and a note merely *queued* for
         // redaction contributes none either, or the content would stay
         // searchable for the whole cancellation window.
-        if let Some(text) = n.text.as_ref().filter(|_| n.redaction_pending.is_none()) {
+        if let Some(text) = n.readable_text() {
             tx.execute(
                 "INSERT OR IGNORE INTO fts_map (tgt) VALUES (?1)",
                 params![t],
