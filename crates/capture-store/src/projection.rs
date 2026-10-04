@@ -2862,6 +2862,24 @@ impl Store {
         // table with no redaction filter, so a destroyed note went on being
         // returned by a context query with its context attached.
         tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
+        // The queued destruction, now that it has happened.
+        //
+        // The fold already declines to queue a note whose body is gone — it
+        // stops setting `redaction_pending` — so a rebuilt projection has no
+        // row. A purge edits in place, and nothing deleted what the fold would
+        // no longer write, so the row stayed for ever and every later drain
+        // destroyed the note again: an intent recorded, a snapshot attempted,
+        // rows already gone deleted, an UPDATE that changed nothing, and a
+        // write-ahead-log checkpoint — paid on every drain, multiplied by every
+        // redaction the archive had ever carried out.
+        //
+        // It also let `cancel_redaction` find a row for a destruction that had
+        // already happened, write the cancellation, and report that nothing was
+        // destroyed over content that was gone.
+        //
+        // The fourth derived table found surviving a purge, after mentions,
+        // list items and ambient.
+        tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
         tx.commit()?;
         Ok(())
     }

@@ -15,6 +15,9 @@ use capture_store::ratelimit::TARGETS_PER_HOUR;
 use capture_store::session::Session;
 use capture_store::{StorePaths, promote};
 
+mod common;
+use common::body_survives;
+
 struct Scratch(std::path::PathBuf);
 
 impl Scratch {
@@ -69,20 +72,6 @@ fn redact_many(paths: &StorePaths, n: usize) -> Vec<capture_core::EventId> {
         tgts.push(tgt);
     }
     tgts
-}
-
-/// Whether the bytes are still in the log.
-///
-/// The property that matters, and not the same as whether the note is readable:
-/// a redaction hides its target from every view *on ingest*, immediately, and
-/// only the destruction is delayed (§1.1). So a held note is already invisible
-/// and its body is still there — which is the whole point of holding.
-fn body_survives(paths: &StorePaths, tgt: &capture_core::EventId) -> bool {
-    capture_store::log::Log::open_read(&paths.events)
-        .unwrap()
-        .by_id(tgt)
-        .unwrap()
-        .is_some_and(|e| e.body.is_some())
 }
 
 #[test]

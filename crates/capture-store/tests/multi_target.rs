@@ -14,6 +14,9 @@ use capture_core::event::Kind;
 use capture_store::StorePaths;
 use capture_store::session::Session;
 
+mod common;
+use common::body_survives;
+
 struct Scratch(std::path::PathBuf);
 
 impl Scratch {
@@ -72,14 +75,6 @@ fn redact_all(paths: &StorePaths, targets: &[capture_core::EventId]) {
         b
     })
     .unwrap();
-}
-
-fn body_survives(paths: &StorePaths, tgt: &capture_core::EventId) -> bool {
-    capture_store::log::Log::open_read(&paths.events)
-        .unwrap()
-        .by_id(tgt)
-        .unwrap()
-        .is_some_and(|e| e.body.is_some())
 }
 
 #[test]
