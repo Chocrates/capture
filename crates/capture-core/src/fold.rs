@@ -285,6 +285,22 @@ pub struct Note {
     /// written and what it meant when it was written.
     #[n(13)]
     pub links: Vec<Link>,
+    /// A redaction whose cancellation arrived after it had been carried out.
+    ///
+    /// §1.1 asks for a cancel arriving after its target has been destroyed to
+    /// be "recorded and reported rather than silently discarded". It was
+    /// recorded — the event is in the log like any other — and reported
+    /// nowhere, because the fold computed both halves and kept neither: the
+    /// content is gone, the governing order was withdrawn, and the destroyed
+    /// branch simply set `redacted_at`.
+    ///
+    /// The situation is ordinary. Two devices, one redaction: you cancel on the
+    /// phone and the desktop has already destroyed. The phone says nothing was
+    /// destroyed, the desktop silently keeps it gone, and nothing reconciles
+    /// the two. Somebody who cancels believes the content survived, and §6
+    /// rates being wrong about that as unrecoverable.
+    #[n(27)]
+    pub cancelled_too_late: Option<EventId>,
 }
 
 impl Note {
@@ -808,6 +824,11 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
         // that fact; the purge is what changes it.
         if n.text.is_none() {
             n.redacted_at = Some(r.at);
+            // Withdrawn, and too late to matter. Kept because nothing else
+            // knows both halves at once.
+            if r.cancelled {
+                n.cancelled_too_late = Some(r.event);
+            }
             // Rebuilt from identity alone. The note stays reconstructible on
             // every future fold, and its name stops carrying the words it was
             // built from — which otherwise propagate into every note linking
@@ -900,6 +921,7 @@ fn apply_capture(
             muted_at: None,
             redacted_at: None,
             redaction_pending: None,
+            cancelled_too_late: None,
             divergences: Vec::new(),
             links: Vec::new(),
             versions: alloc::vec![Version {

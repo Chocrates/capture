@@ -87,11 +87,18 @@ use crate::{Result, db};
 /// the log has always carried every target, so a redaction that destroyed one
 /// of three will destroy the other two as it was always ordered to.
 ///
+/// Version 12 adds `late_cancels`, which records a redaction whose cancellation
+/// arrived after it had already been carried out. The fold computed both halves
+/// — the content gone, the order withdrawn — and kept neither, so §1.1's
+/// promise that such a cancel is "recorded and reported" was half true. It is
+/// derived from the log, so the rebuild finds every past instance rather than
+/// only new ones.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 11;
+pub const PROJECTION_SCHEMA: u32 = 12;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -279,6 +286,19 @@ CREATE TABLE IF NOT EXISTS tag_adds (
 
 -- Events stored and verified, but not folded: an unrecognised kind, an
 -- unreadable payload, a note that is not present.
+-- A redaction whose cancellation arrived after it had been carried out.
+--
+-- §1.1 asks for such a cancel to be recorded and reported rather than silently
+-- discarded. It was recorded — the event is in the log — and reported nowhere,
+-- because the fold knew both halves and kept neither.
+--
+-- A table rather than a column on `notes`, for the reason written above
+-- `parents`: the schema may add tables, never columns.
+CREATE TABLE IF NOT EXISTS late_cancels (
+  tgt    BLOB PRIMARY KEY,
+  redact BLOB NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS held (
   event_id BLOB PRIMARY KEY,
   reason   TEXT NOT NULL
@@ -3233,6 +3253,23 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM held", [], |r| r.get::<_, i64>(0))? as u64)
     }
 
+    /// Notes whose cancellation arrived after they had been destroyed.
+    ///
+    /// Somebody who cancels a redaction believes the content survived. On the
+    /// device that cancelled it may have; on this one it did not, and §1.1 asks
+    /// for that to be reported rather than discarded.
+    pub fn late_cancels(&self) -> Result<Vec<EventId>> {
+        let mut st = self.conn.prepare("SELECT tgt FROM late_cancels")?;
+        let rows = st.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Ok(id) = <[u8; 32]>::try_from(r?.as_slice()) {
+                out.push(EventId(id));
+            }
+        }
+        Ok(out)
+    }
+
     /// Which events are held, and why.
     ///
     /// `held_count` was the only accessor anywhere, so a surface could say
@@ -3864,6 +3901,13 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
         if let Some(promotion) = &n.promotion {
             write_promotion(tx, tgt, promotion)?;
             expand_occurrences(tx, tgt, n, promotion, &p.notes, now)?;
+        }
+
+        if let Some(redact) = &n.cancelled_too_late {
+            tx.execute(
+                "INSERT OR REPLACE INTO late_cancels (tgt, redact) VALUES (?1,?2)",
+                params![tgt.0.to_vec(), redact.0.to_vec()],
+            )?;
         }
 
         if let Some(pending) = &n.redaction_pending {

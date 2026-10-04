@@ -437,6 +437,32 @@ pub fn status(paths: &StorePaths) -> Result<()> {
             worth_knowing.push(format!("{n} event(s) set aside: {reason}"));
         }
     }
+    // A cancellation that came too late.
+    //
+    // §1.1 asks for a cancel arriving after its target has been destroyed to be
+    // reported rather than silently discarded. Somebody who cancels believes
+    // the content survived — on the device they cancelled from it may have, and
+    // on this one it did not. Both devices otherwise report success and neither
+    // mentions the other.
+    //
+    // No remedy offered, because there is none: the content is gone. A snapshot
+    // may exist, and that is a separate mechanism with its own window and its
+    // own command; pointing at it here would imply the two are connected.
+    let late = state.late_cancels()?;
+    if !late.is_empty() {
+        let mut names: Vec<String> = Vec::new();
+        for tgt in &late {
+            names.push(state.slug_of(tgt)?.unwrap_or_else(|| "a note".into()));
+        }
+        attention.push(format!(
+            "{} cancellation(s) arrived after the content had already been destroyed \
+             here: {}.\nNothing was recovered. Another device may have cancelled in \
+             time; this one did not.",
+            late.len(),
+            names.join(", ")
+        ));
+    }
+
     // Destruction the ceiling stopped. Tier one because it is waiting on a
     // person: §1.1 holds what is over the ceiling "pending explicit
     // confirmation", and a hold nobody is told about is an archive stuck in a
