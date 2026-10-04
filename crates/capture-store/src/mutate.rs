@@ -23,8 +23,8 @@ use capture_core::{
     EventId,
     body::{
         AliasBody, EditBody, EntityBindBody, EntityMergeBody, EntityRenameBody, MuteBody,
-        MuteScope, OccBody, OccMoveBody, PinBody, RedactCancelBody, ResolveBody, TagBody,
-        UntagBody,
+        MuteScope, OccBody, OccEditBody, OccMoveBody, PinBody, RedactCancelBody, ResolveBody,
+        TagBody, UntagBody,
     },
     event::Kind,
     id::EntId,
@@ -622,7 +622,7 @@ fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
 /// somebody has to check before using.
 pub fn skip_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()> {
     let mut s = Session::open(paths.clone())?;
-    let tgt = series(&s, name)?;
+    let tgt = series(&s, name, "skip")?;
     s.append(Kind::OCC_CANCEL, Some(tgt), None, |nonce| {
         encode(&OccBody { nonce, occ })
     })?;
@@ -642,7 +642,7 @@ pub fn skip_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()> {
 /// no-op about time and a statement about cancellation.
 pub fn restore_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()> {
     let mut s = Session::open(paths.clone())?;
-    let tgt = series(&s, name)?;
+    let tgt = series(&s, name, "restore")?;
     s.append(Kind::OCC_MOVE, Some(tgt), None, |nonce| {
         encode(&OccMoveBody {
             nonce,
@@ -658,16 +658,90 @@ pub fn restore_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()
     Ok(())
 }
 
+/// Move one occurrence of a series to a different time.
+///
+/// §3.5's first edit scope, "this occurrence": the rule is untouched and every
+/// other occurrence keeps its time. The other two scopes are deliberately
+/// different mechanisms — editing the rule moves past occurrences too, and
+/// "this and future" is a split — and §3.5 names collapsing them as the thing
+/// implementations get wrong.
+///
+/// The occurrence keeps its name. An occurrence is named by the start the rule
+/// *would* have produced, so moving it says when it happens and not which one
+/// it is — which is what lets a completion written before the move still apply
+/// afterwards.
+///
+/// `end_ms` is passed through rather than invented. A length chosen here would
+/// put a duration on the calendar nobody asked for, the same refusal
+/// `restore_occurrence` makes and the same one the promoter makes about §3.3's
+/// "30m default".
+///
+/// Distinct from [`restore_occurrence`], which writes the same kind to say
+/// something else: that a cancellation is withdrawn. Expressing one as the
+/// other would make a call site read "move this to where it already is".
+pub fn move_occurrence(
+    paths: &StorePaths,
+    name: &str,
+    occ: i64,
+    start_ms: i64,
+    end_ms: Option<i64>,
+) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = series(&s, name, "move")?;
+    s.append(Kind::OCC_MOVE, Some(tgt), None, |nonce| {
+        encode(&OccMoveBody {
+            nonce,
+            occ,
+            start_ms,
+            end_ms,
+        })
+    })?;
+    Ok(())
+}
+
+/// Give one occurrence its own title, location or notes.
+///
+/// The first writer of `OCC_EDIT` anywhere. The kind has had a body type, a
+/// fold arm and three projected columns since M2, and nothing in `mutate`, the
+/// command line, the bindings, the window or the phone could author one — so
+/// the columns were always empty and §3.5's "this occurrence only: different
+/// title, location, notes" was a capability no person could reach.
+///
+/// `None` leaves that field to the series. Passing all three as `None` writes
+/// an exception that overrides nothing, which the caller is expected to refuse
+/// rather than record.
+pub fn amend_occurrence(
+    paths: &StorePaths,
+    name: &str,
+    occ: i64,
+    title: Option<String>,
+    location: Option<String>,
+    notes: Option<String>,
+) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = series(&s, name, "amend")?;
+    s.append(Kind::OCC_EDIT, Some(tgt), None, |nonce| {
+        encode(&OccEditBody {
+            nonce,
+            occ,
+            title: title.clone(),
+            location: location.clone(),
+            notes: notes.clone(),
+        })
+    })?;
+    Ok(())
+}
+
 /// The note a series exception is about, refusing anything that is not one.
 ///
 /// A plain note has no occurrences, and an exception naming it would sit in the
 /// log for ever recording a mistake that changes nothing when folded — the
 /// system silently right and the person silently wrong.
-fn series(s: &Session, name: &str) -> Result<EventId> {
+fn series(s: &Session, name: &str, doing: &str) -> Result<EventId> {
     let tgt = find(s, name)?;
     if s.state.occurrences_of(&tgt)?.is_empty() {
         return Err(Error::Usage(format!(
-            "'{name}' has no occurrences, so there is nothing to skip. \
+            "'{name}' has no occurrences, so there is nothing to {doing}. \
              Occurrences come from a repeating capture — \"standup every weekday at 9\""
         )));
     }

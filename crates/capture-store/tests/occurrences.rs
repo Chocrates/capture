@@ -925,3 +925,257 @@ fn at(
         .find(|r| r.occ == occ)
         .expect("the occurrence is still produced by the rule")
 }
+
+// ---------------------------------------------------------------------------
+// The gestures, as opposed to the events. Every test above appends an `OCC_*`
+// event by hand, which proves the fold is right and proves nothing about
+// whether anybody can reach it — and for `OCC_MOVE` and `OCC_EDIT` nobody
+// could. These go through `mutate`, which is what a person actually has.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn moving_one_occurrence_leaves_the_rest_alone() {
+    let sc = Scratch::new("move-gesture");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let before = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let target = before[2].occ;
+    let moved_to = target + 5 * 60 * 60 * 1000;
+
+    capture_store::mutate::move_occurrence(&p, &slug, target, moved_to, None).unwrap();
+
+    let after = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "moving an occurrence changed how many there are"
+    );
+
+    let hit = after
+        .iter()
+        .find(|o| o.occ == target)
+        .expect("the occurrence keeps its name");
+    assert_eq!(hit.start_ms, moved_to, "it did not move");
+
+    // Every sibling untouched. This is the half that separates "this
+    // occurrence" from the other two edit scopes §3.5 names.
+    for (b, a) in before.iter().zip(after.iter()) {
+        if b.occ == target {
+            continue;
+        }
+        assert_eq!(b.start_ms, a.start_ms, "a sibling moved too");
+    }
+}
+
+#[test]
+fn a_completion_written_before_a_move_survives_it() {
+    // Why an occurrence is named by the start the rule *would* have produced
+    // rather than by when it happens. Naming it by its time would mean moving
+    // it silently discarded the completion.
+    let sc = Scratch::new("move-done");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let target = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[2].occ;
+
+    let mut s = Session::open(p.clone()).unwrap();
+    s.append(Kind::OCC_DONE, Some(tgt), None, |nonce| {
+        let mut b = Vec::new();
+        minicbor::encode(&capture_core::body::OccBody { nonce, occ: target }, &mut b).unwrap();
+        b
+    })
+    .unwrap();
+    drop(s);
+
+    capture_store::mutate::move_occurrence(&p, &slug, target, target + 3_600_000, None).unwrap();
+
+    let hit = rebuild(&p, NOW)
+        .occurrences_of(&tgt)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.occ == target)
+        .expect("still there under its own name");
+    assert!(
+        hit.done,
+        "the completion was lost when the occurrence moved"
+    );
+    assert_eq!(hit.start_ms, target + 3_600_000);
+}
+
+#[test]
+fn amending_one_occurrence_gives_it_its_own_details() {
+    // The first exercise of `OCC_EDIT` through anything a person can reach.
+    // The kind has had a body, a fold arm and three columns since M2 with no
+    // writer, so these columns have never held a value outside a fold test.
+    let sc = Scratch::new("amend-gesture");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let all = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let target = all[1].occ;
+    let sibling = all[2].occ;
+
+    capture_store::mutate::amend_occurrence(
+        &p,
+        &slug,
+        target,
+        Some("walk the dog, long route".into()),
+        Some("the park".into()),
+        None,
+    )
+    .unwrap();
+
+    let after = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let hit = after.iter().find(|o| o.occ == target).unwrap();
+    assert_eq!(hit.title.as_deref(), Some("walk the dog, long route"));
+    assert_eq!(hit.location.as_deref(), Some("the park"));
+    assert_eq!(hit.notes, None, "a field left alone was invented");
+
+    // And only that one. An override that leaked to the siblings would be an
+    // edit of the series wearing the wrong name.
+    let other = after.iter().find(|o| o.occ == sibling).unwrap();
+    assert_eq!(other.title, None, "the amendment reached a sibling");
+    assert_eq!(other.location, None);
+
+    // Amending says nothing about when.
+    assert_eq!(
+        hit.start_ms,
+        all.iter().find(|o| o.occ == target).unwrap().start_ms,
+        "amending moved the occurrence"
+    );
+}
+
+#[test]
+fn an_exception_is_refused_for_a_note_that_has_none() {
+    // An exception naming a plain note would sit in the log for ever recording
+    // a mistake that changes nothing when folded.
+    let sc = Scratch::new("not-a-series");
+    let p = sc.paths();
+    let slug = {
+        let mut s = Session::open(p.clone()).unwrap();
+        let body = capture_store::session::capture_body("an ordinary thought").unwrap();
+        s.capture(&body).unwrap().slug
+    };
+
+    let moved = capture_store::mutate::move_occurrence(&p, &slug, NOW, NOW + 3_600_000, None);
+    let amended =
+        capture_store::mutate::amend_occurrence(&p, &slug, NOW, Some("x".into()), None, None);
+
+    for (what, r) in [("move", moved), ("amend", amended)] {
+        let e = r.expect_err("a plain note has no occurrences");
+        let said = e.to_string();
+        assert!(
+            said.contains("no occurrences") && said.contains(what),
+            "the refusal should name what was being done: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_move_onto_a_dst_transition_is_not_marked() {
+    // Written to find out, and the answer is no.
+    //
+    // 1 November 2026, 01:30 in Denver happens twice: the clocks go back at
+    // 02:00, so that wall time is ambiguous. Moving an occurrence onto it puts
+    // a calendar entry at a time that does not identify an instant.
+    //
+    // `shift` is filled from the *expansion's* value — the shift of the slot
+    // the rule produced — and the fallback path for exceptions the rule no
+    // longer reaches writes `NULL` outright. Neither recomputes it for where
+    // the occurrence was moved *to*. So the column says nothing.
+    //
+    // §4.4's reasoning is on that column: "a time that moves on its own with no
+    // explanation is what makes someone stop trusting the whole system." A move
+    // is not the system moving something on its own — the person chose it — so
+    // this is not the case §4.4 was written about, and marking it would be new
+    // behaviour rather than wiring. Asserted as it stands so that implementing
+    // it later is a deliberate change to a test that states today's answer.
+    let sc = Scratch::new("move-dst");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let target = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[2].occ;
+
+    // 2026-11-01 01:30 America/Denver, in the first pass of the hour.
+    let ambiguous = 1_792_175_400_000;
+    capture_store::mutate::move_occurrence(&p, &slug, target, ambiguous, None).unwrap();
+
+    let hit = rebuild(&p, NOW)
+        .occurrences_of(&tgt)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.occ == target)
+        .expect("still there under its own name");
+    assert_eq!(hit.start_ms, ambiguous, "it did not move");
+    assert_eq!(
+        hit.shift, None,
+        "a moved occurrence is now marked shifted — good, but then this test \
+         states the old answer and the spec scenario it was written against \
+         needs to come back"
+    );
+}
+
+#[test]
+fn an_amendment_survives_a_split_that_moves_past_it() {
+    // The same binding rule as `a_completion_survives_a_split_that_moves_past_it`,
+    // for the exception kind that had no writer until now. The fold implements
+    // the inheritance deliberately — `split_from` reaches the parent's
+    // exceptions for the occurrences this series now covers — and nothing has
+    // ever exercised it through a real amendment, because there was no way to
+    // make one.
+    let sc = Scratch::new("split-amend");
+    let p = sc.paths();
+    let (slug, tgt) = weekday_series(&p);
+
+    let occ = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let boundary = occ[10].occ;
+    let amended = occ[12].occ;
+
+    capture_store::mutate::amend_occurrence(
+        &p,
+        &slug,
+        amended,
+        Some("the long route".into()),
+        None,
+        Some("take the lead".into()),
+    )
+    .unwrap();
+
+    promote::split_series(
+        &p,
+        &slug,
+        boundary,
+        RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0b0001_1111,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        },
+    )
+    .unwrap();
+
+    let store = rebuild(&p, NOW);
+    let new = store
+        .promoted("series", 100)
+        .unwrap()
+        .into_iter()
+        .find(|(id, _)| *id != tgt)
+        .expect("the continuation exists");
+
+    let hit = store
+        .occurrences_of(&new.0)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.occ == amended)
+        .expect("the continuation still produces it");
+
+    assert_eq!(
+        hit.title.as_deref(),
+        Some("the long route"),
+        "an amendment was lost when the schedule moved past it"
+    );
+    assert_eq!(hit.notes.as_deref(), Some("take the lead"));
+}

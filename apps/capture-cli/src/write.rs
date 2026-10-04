@@ -217,6 +217,39 @@ pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result
 /// window as well and a second implementation there is how two surfaces come to
 /// disagree. `occurrence` above still writes its own event and should probably
 /// move too; that is a separate tidy rather than something to do halfway here.
+/// Move one occurrence, leaving the rule and its siblings alone.
+///
+/// Says what was *not* changed as well as what was, because that is the whole
+/// distinction §3.5 draws between the three edit scopes — and somebody reaching
+/// for this may have meant to change the schedule.
+pub fn move_occurrence(
+    paths: &StorePaths,
+    name: &str,
+    occ: i64,
+    start_ms: i64,
+    end_ms: Option<i64>,
+) -> Result<()> {
+    capture_store::mutate::move_occurrence(paths, name, occ, start_ms, end_ms)?;
+    say!("{name} moved for that occurrence.");
+    say!("The rule is unchanged, and every other occurrence stands.");
+    Ok(())
+}
+
+/// Give one occurrence its own details.
+pub fn amend_occurrence(
+    paths: &StorePaths,
+    name: &str,
+    occ: i64,
+    title: Option<String>,
+    location: Option<String>,
+    notes: Option<String>,
+) -> Result<()> {
+    capture_store::mutate::amend_occurrence(paths, name, occ, title, location, notes)?;
+    say!("{name} amended for that occurrence.");
+    say!("The rule is unchanged, and every other occurrence keeps the series' own.");
+    Ok(())
+}
+
 pub fn skip(paths: &StorePaths, name: &str, occ: i64, skipped: bool) -> Result<()> {
     if skipped {
         capture_store::mutate::skip_occurrence(paths, name, occ)?;

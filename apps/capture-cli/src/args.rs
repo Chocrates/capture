@@ -189,6 +189,30 @@ pub enum Command {
         /// Whether it is complete.
         done: bool,
     },
+    /// Move one occurrence of a series to a different time.
+    Move {
+        /// The series.
+        name: String,
+        /// Which occurrence, as its original start in milliseconds.
+        occ: i64,
+        /// Where it now starts, in milliseconds.
+        start_ms: i64,
+        /// Where it now ends, where that is known.
+        end_ms: Option<i64>,
+    },
+    /// Give one occurrence of a series its own details.
+    Amend {
+        /// The series.
+        name: String,
+        /// Which occurrence, as its original start in milliseconds.
+        occ: i64,
+        /// A title for this occurrence only.
+        title: Option<String>,
+        /// A location for this occurrence only.
+        location: Option<String>,
+        /// Notes on this occurrence only.
+        notes: Option<String>,
+    },
     /// Skip one occurrence of a series, or put it back.
     Skip {
         /// The series.
@@ -861,6 +885,91 @@ where
         }
         "resolve" => one_name(&args[1..], "resolve", |name, _| Command::Resolve { name }),
         "log" => one_name(&args[1..], "log", |name, json| Command::Log { name, json }),
+        "move" => match &args[1..] {
+            // Named exactly as `capture done` and `capture skip` name one.
+            [name, occ, start] | [name, occ, start, _] => {
+                let bad = |v: &String| Bad::UnknownFlag {
+                    command: args[0].clone(),
+                    flag: v.clone(),
+                };
+                let occ_ms = occ.parse::<i64>().map_err(|_| bad(occ))?;
+                let start_ms = start.parse::<i64>().map_err(|_| bad(start))?;
+                let end_ms = match &args[1..] {
+                    [_, _, _, end] => Some(end.parse::<i64>().map_err(|_| bad(end))?),
+                    _ => None,
+                };
+                Ok(Command::Move {
+                    name: name.clone(),
+                    occ: occ_ms,
+                    start_ms,
+                    end_ms,
+                })
+            }
+            _ => Err(Bad::Value {
+                command: args[0].clone(),
+                problem: "expected a series, the occurrence as its original start in \
+                          milliseconds, and the new start — capture show <series> lists them"
+                    .into(),
+            }),
+        },
+        "amend" => {
+            let rest = &args[1..];
+            let flag = |name: &str| {
+                rest.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| rest.get(i + 1))
+                    .cloned()
+            };
+            let positional: Vec<&String> = {
+                let mut out = Vec::new();
+                let mut skip_next = false;
+                for a in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if a.starts_with("--") {
+                        skip_next = true;
+                        continue;
+                    }
+                    out.push(a);
+                }
+                out
+            };
+            match positional.as_slice() {
+                [name, occ] => {
+                    let occ_ms = occ.parse::<i64>().map_err(|_| Bad::UnknownFlag {
+                        command: args[0].clone(),
+                        flag: (*occ).clone(),
+                    })?;
+                    let (title, location, notes) =
+                        (flag("--title"), flag("--location"), flag("--notes"));
+                    // An amendment that overrides nothing is a request that
+                    // meant something and said nothing. Refused rather than
+                    // written: an empty exception folds to no change at all.
+                    if title.is_none() && location.is_none() && notes.is_none() {
+                        return Err(Bad::Value {
+                            command: args[0].clone(),
+                            problem: "expected at least one of --title, --location or --notes"
+                                .into(),
+                        });
+                    }
+                    Ok(Command::Amend {
+                        name: (*name).clone(),
+                        occ: occ_ms,
+                        title,
+                        location,
+                        notes,
+                    })
+                }
+                _ => Err(Bad::Value {
+                    command: args[0].clone(),
+                    problem: "expected a series and an occurrence, as its original start \
+                              in milliseconds — capture show <series> lists them"
+                        .into(),
+                }),
+            }
+        }
         "skip" | "unskip" => {
             let skipped = args[0] == "skip";
             match &args[1..] {
@@ -1288,6 +1397,10 @@ TIME AND TASKS
   capture recover <id>           write one back as a new note
   capture skip <series> <occ>    not this one; the rule is untouched
                                (unskip puts it back)
+  capture move <series> <occ> <start-ms> [<end-ms>]
+                               this one happens at a different time
+  capture amend <series> <occ> --title T [--location L] [--notes N]
+                               this one only, with its own details
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
@@ -1604,6 +1717,68 @@ mod tests {
         // A series with no occurrence is the `done` shape, which means a task.
         // There is no task to skip, so it is a refusal rather than a guess.
         assert!(p(&["skip", "standup"]).is_err());
+    }
+
+    #[test]
+    fn move_and_amend_name_an_occurrence_the_same_way() {
+        // One convention for naming an occurrence across all four exceptions,
+        // rather than a second one for the two that arrived later.
+        assert_eq!(
+            p(&["move", "standup", "1791208800000", "1791216000000"]).unwrap(),
+            Command::Move {
+                name: "standup".into(),
+                occ: 1_791_208_800_000,
+                start_ms: 1_791_216_000_000,
+                end_ms: None,
+            }
+        );
+        assert_eq!(
+            p(&[
+                "move",
+                "standup",
+                "1791208800000",
+                "1791216000000",
+                "1791219600000"
+            ])
+            .unwrap(),
+            Command::Move {
+                name: "standup".into(),
+                occ: 1_791_208_800_000,
+                start_ms: 1_791_216_000_000,
+                end_ms: Some(1_791_219_600_000),
+            }
+        );
+        assert_eq!(
+            p(&[
+                "amend",
+                "standup",
+                "1791208800000",
+                "--title",
+                "in the annexe"
+            ])
+            .unwrap(),
+            Command::Amend {
+                name: "standup".into(),
+                occ: 1_791_208_800_000,
+                title: Some("in the annexe".into()),
+                location: None,
+                notes: None,
+            }
+        );
+
+        // A move with nowhere to move to, and an amendment that amends
+        // nothing: both are requests that meant something and said nothing, so
+        // both are refused rather than written as events that fold to nothing.
+        assert!(p(&["move", "standup", "1791208800000"]).is_err());
+        assert!(p(&["amend", "standup", "1791208800000"]).is_err());
+
+        let msg = p(&["amend", "standup", "1791208800000"])
+            .unwrap_err()
+            .message();
+        assert!(
+            msg.contains("--title"),
+            "the refusal should say what was missing: {msg}"
+        );
     }
 
     #[test]
