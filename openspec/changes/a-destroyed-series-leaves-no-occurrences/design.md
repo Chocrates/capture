@@ -74,6 +74,40 @@ on the same footing as the others; if they are not, that is worth an assertion
 either way, because "unreachable by today's queries" is exactly the kind of
 safety that disappears when somebody adds a query.
 
+## What the guard actually proves, measured rather than assumed
+
+Removing each delete from `purge_note` one at a time and running the guard
+separates them into two kinds:
+
+| delete removed | guard fires |
+|---|---|
+| `occurrences`, `tags`, `tag_adds`, `ambient`, `promotions` | yes |
+| `mentions`, `list_items`, `links` | **no** |
+
+The reason is the body. Once it is destroyed the note has no text, so everything
+derived *from the text* comes back empty on the next fold whether or not the
+purge cleared it — the deletes for those three are belt-and-braces. What needs
+the purge is everything derived from **events that outlive the body**: the
+promotion is a `PROMOTE` event, the occurrences expand from it, the tags are
+`TAG` events, the ambient context rides in the capture envelope.
+
+Two honest consequences.
+
+First, this test measures the state after the purge *and* after whatever folding
+followed it. It cannot tell the two apart, so "the purge clears this" is not
+quite what it asserts — it asserts "a destroyed note ends up with no rows here",
+which is the property that matters to a reader but a weaker claim about the
+function. The window between an in-place purge and the next fold is not covered
+by anything.
+
+Second, it means the three redundant deletes are load-bearing only if that
+window matters. They are kept: they cost nothing, the purge is the one path that
+must not leave content behind, and relying on a later fold to finish a
+destruction is exactly the kind of implicit ordering that breaks quietly.
+
+Worth a follow-on: measure immediately after `purge::execute` with no fold in
+between, which would make the guard say what its name claims.
+
 ## Open question, now at its fifth table
 
 **Should `purge_note` re-fold instead of editing in place?** Editing in place is

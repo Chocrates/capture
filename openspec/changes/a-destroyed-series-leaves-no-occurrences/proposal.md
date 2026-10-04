@@ -37,16 +37,26 @@ This is the seventh table found this way, and the point is that it should not
 have been found by reading at all. `tests/purge_leaves_nothing.rs` exists
 precisely so the next one is caught by running: it enumerates every table with a
 `tgt` column **at runtime** and fails if any holds a row for a destroyed note.
-It passes here, because its fixture note is
+It passes here, for two independent reasons, and the second is worse than the
+first. Its fixture note is
 
 ```
 #vault lunch with @sarah about ^acme on 2026-11-03: milk, eggs, bread
 ```
 
-— a one-off dated capture. `occurrences` is empty, so the enumeration has
-nothing to find. The guard is right and its fixture is too thin, which is worse
-than the missing delete: the delete is one line, and a guard that cannot fail is
-a guard that will let the eighth table through as well.
+— a one-off dated capture. `occurrences` is only ever filled from a
+`Promoted::Series`, so the table is empty, the `COUNT(*)` is zero, and zero
+reads identically to clean.
+
+And the enumeration asks SQLite for tables with a **`tgt`** column. `links` keys
+the note as `src`, so it is not in the list at all — the one derived table that
+holds the note's own words is outside a guard whose whole subject is derived
+copies of the note's words. `purge_note` happens to clear it, so nothing is
+broken today; nothing is checking either.
+
+The guard is right and its coverage is accidental, which is worse than the
+missing delete: the delete is one line, and a guard that cannot fail is a guard
+that will let the eighth table through as well.
 
 ## What Changes
 
@@ -61,6 +71,12 @@ a guard that will let the eighth table through as well.
   `readable_text` guard that now covers the text-derived tables — the withholding
   there may already be provided by the agenda's own filters, or may not be
   provided at all.
+- **The enumeration stops keying on one column name.** It selects tables with a
+  `tgt` column, and `links` keys the note as `src` — so the one derived table
+  that holds the note's own words has never been checked by the guard at all. It
+  is cleared by `purge_note` today, which is luck rather than coverage. Tables
+  with neither column are listed with a reason, so a future `note_id` is a test
+  failure rather than a silent exemption.
 - Any other table the widened fixture turns up is fixed in the same pass, since
   the fixture is the thing being corrected.
 

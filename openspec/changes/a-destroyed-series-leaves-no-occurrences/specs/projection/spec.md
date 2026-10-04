@@ -43,9 +43,21 @@ Emptiness SHALL therefore be a failure rather than a pass, for any table the
 test claims to cover. This is what makes the next table a test failure instead
 of a finding.
 
+The enumeration SHALL also find a derived table whatever it names the column
+holding the note, rather than only `tgt`. `links` keys it as `src` and was
+therefore never enumerated — the one derived table holding the note's own words,
+outside a check whose subject is derived copies of those words. A table keyed
+under neither name SHALL be listed with a reason, so that adding one is a
+failure rather than a silent exemption.
+
 #### Scenario: A table the fixture never populated is reported
 - **WHEN** the enumeration covers a table that held no row before the destruction
 - **THEN** the test SHALL fail, naming the table as unexercised rather than clean
+
+#### Scenario: A table keyed under another column name is still checked
+- **WHEN** a derived table holds the note under a column not named `tgt`
+- **THEN** the enumeration SHALL still cover it
+- **AND** a table keyed under no recognised name SHALL be named with a reason
 
 #### Scenario: The fixture populates the occurrence table
 - **WHEN** the fixture is captured and settled

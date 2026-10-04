@@ -2867,6 +2867,32 @@ impl Store {
         // the capture they came from was destroyed.
         tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
         tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+        // The expanded schedule, and what was written about single occurrences
+        // of it. `title`, `location` and `notes` come from `OCC_EDIT` bodies the
+        // purge has just destroyed, so leaving the rows is the same failure as
+        // leaving the mentions — the body gone and a derived copy of the same
+        // material still readable. The dates and the completions are not text,
+        // but they are a schedule belonging to a capture that no longer exists.
+        //
+        // The seventh table found missing from this function, and the first the
+        // guard caught rather than a person: its fixture had been a one-off
+        // capture, so `occurrences` was empty and counted clean.
+        tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
+        // The tags put on it, and the events that put them there.
+        //
+        // The eighth and ninth, and the argument is the one directly above
+        // about mentions: what survives is the *fact*, and the fact is the part
+        // §1.1 is about. `#medical` on a destroyed note still says what the note
+        // was about, and a tag listing would draw the tombstone under it.
+        //
+        // What settles it is the inconsistency otherwise. `#vault` typed into
+        // the text is a mention and goes; `#vault` applied with a tag event
+        // would stay. One word, two tables, opposite outcomes depending on how
+        // it was attached — and the comment above already says a destroyed note
+        // must not go on naming "every person, project and tag it had
+        // mentioned".
+        tx.execute("DELETE FROM tags WHERE tgt = ?1", params![t])?;
+        tx.execute("DELETE FROM tag_adds WHERE tgt = ?1", params![t])?;
         // The context it was captured in: the application, the window title,
         // the working directory, the repository and the branch.
         //
