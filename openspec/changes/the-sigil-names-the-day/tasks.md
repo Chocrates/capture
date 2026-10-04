@@ -29,8 +29,11 @@
       would have got wrong, so it is the test that proves the vocabulary is
       matched as whole words.
 - [x] 3.4 Test `plan the offsite >q2`: no date.
-- [ ] 3.5 Test that the capture's text is unchanged in every case above
-      (§3.1.3), not merely that the shape is undated.
+- [x] 3.5 Test that the capture's text is unchanged in every case above
+      (§3.1.3), not merely that the shape is undated. Asserted at the store
+      level, in `promotion.rs`, because `capture-parse` takes a `&str` and
+      returns no text — it cannot alter a capture even in principle, so the
+      claim is only observable once stored.
 
 ## 4. Keep the two readings from drifting
 
@@ -56,9 +59,31 @@
 
 ## 6. Verify against the real recognizer
 
-- [ ] 6.1 Run the recognizer on the spec's own examples and paste the outputs
+- [x] 6.1 Run the recognizer on the spec's own examples and paste the outputs
       into the archived change: `>fri` against "thursday", `>tomorrow`,
       `>satellite`, `>q2`, `>asdf`, and the two ISO cases. The defect was found
       by reading and confirmed by running; the fix is confirmed the same way.
+
+      Resolved against the fixture clock, Monday 1 June 2026 09:00 in Denver,
+      so Thursday is the 4th and Friday the 5th:
+
+      ```
+           dentist thursday >fri  conf 100  Point(Date(2026-06-05))
+                    meeting >fri  conf 100  Point(Date(2026-06-05))
+         call the bank >tomorrow  conf 100  Task { due: Some(2026-06-02) }
+                         >friday  conf 100  Point(Date(2026-06-05))
+                          friday  conf  70  Point(Date(2026-06-05))
+ review the draft thursday >asdf  conf  40  Task { due: None }
+           launch the >satellite  conf   0  Nothing
+            plan the offsite >q2  conf   0  Nothing
+     pay the invoice >2026-09-20  conf 100  Task { due: Some(2026-09-20) }
+             dentist >2026-09-20  conf 100  Point(Date(2026-09-20))
+      ```
+
+      The first line was `2026-06-04` at confidence 85 before the change — the
+      prose Thursday, with `markers.date = Some("fri")` sitting in the same
+      recognition. Rows four and five are the anti-drift check: the same date
+      from the sigil and from the prose, differing only in confidence, which is
+      right because one was written and one was inferred.
 - [ ] 6.2 Capture one `>fri` on the phone and confirm the promotion reads
       Friday, against `dev.capture.dev` only — never the real archive.
