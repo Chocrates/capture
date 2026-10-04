@@ -15,6 +15,9 @@ use capture_core::event::Kind;
 use capture_store::StorePaths;
 use capture_store::session::Session;
 
+mod common;
+use common::tgt_of;
+
 struct Scratch(std::path::PathBuf);
 
 impl Scratch {
@@ -76,14 +79,6 @@ fn cancel_from_a_peer(
         b
     })
     .unwrap();
-}
-
-fn tgt_of(paths: &StorePaths, slug: &str) -> capture_core::EventId {
-    capture_store::projection::current(paths)
-        .unwrap()
-        .resolve(slug)
-        .unwrap()
-        .expect("the note is named")
 }
 
 #[test]

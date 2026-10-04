@@ -2900,6 +2900,22 @@ impl Store {
         // The fourth derived table found surviving a purge, after mentions,
         // list items and ambient.
         tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
+        // What the recognizer made of it.
+        //
+        // `promotions` holds the rendered descriptor and the fields as CBOR,
+        // and for an event those fields carry the location and the attendees —
+        // all of it derived from the text being destroyed. §1.1's argument
+        // about the search index is the same argument: a derived copy of the
+        // material is the material.
+        //
+        // It also stops a destroyed note appearing as a task or an appointment,
+        // which it should not, having no content left to be one about.
+        //
+        // Found by the guard in `tests/purge_leaves_nothing.rs` on its first
+        // run, which is what that test is for — the fifth and sixth tables
+        // caught surviving a purge, and the first two not found by hand.
+        tx.execute("DELETE FROM promotions WHERE tgt = ?1", params![t])?;
+        tx.execute("DELETE FROM promotion_at WHERE tgt = ?1", params![t])?;
         tx.commit()?;
         Ok(())
     }

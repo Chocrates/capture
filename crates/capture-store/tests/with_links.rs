@@ -13,7 +13,7 @@
 //! are untouched.
 
 mod common;
-use common::body_survives;
+use common::{body_survives, tgt_of};
 
 use capture_store::StorePaths;
 use capture_store::session::Session;
@@ -49,14 +49,6 @@ fn capture(paths: &StorePaths, text: &str) -> String {
     let mut s = Session::open_for_capture(paths.clone()).unwrap();
     let body = capture_store::session::capture_body(text).unwrap();
     s.capture(&body).unwrap().slug
-}
-
-fn tgt_of(paths: &StorePaths, slug: &str) -> capture_core::EventId {
-    capture_store::projection::current(paths)
-        .unwrap()
-        .resolve(slug)
-        .unwrap()
-        .expect("the note is named")
 }
 
 /// The targets the command would name: the note, then what links to it.

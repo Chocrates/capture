@@ -9,6 +9,13 @@
 //! drains at — and pulling those together would hide the differences rather
 //! than share anything. What belongs here is a question with one answer.
 
+// Each test binary that declares `mod common;` compiles the whole module, and
+// uses the part it needs — so anything another suite uses is dead code here.
+// That is inherent to the shared-module pattern rather than a sign of an unused
+// helper: `tools/unwired.py` is what watches for those, and it reads the
+// workspace rather than one binary at a time.
+#![allow(dead_code, reason = "each test binary uses a different part of this")]
+
 use capture_store::StorePaths;
 
 /// Whether an event's bytes are still in the log.
@@ -26,4 +33,18 @@ pub fn body_survives(paths: &StorePaths, tgt: &capture_core::EventId) -> bool {
         .by_id(tgt)
         .unwrap()
         .is_some_and(|e| e.body.is_some())
+}
+
+/// The note a slug names.
+///
+/// Resolved *before* a redaction where a test needs it afterwards: a destroyed
+/// note's slug is re-derived from its id, so the name it had stops finding it.
+/// That is §1.1 limit 5 working, and it makes this the wrong thing to call
+/// after a purge.
+pub fn tgt_of(paths: &StorePaths, slug: &str) -> capture_core::EventId {
+    capture_store::projection::current(paths)
+        .unwrap()
+        .resolve(slug)
+        .unwrap()
+        .expect("the note is named")
 }
