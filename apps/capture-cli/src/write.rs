@@ -585,7 +585,7 @@ pub fn unflag(paths: StorePaths, name: &str) -> Result<()> {
 /// prompt names what will go, individually — a count is dismissible in a way a
 /// list of names is not, and this is the one confirmation in the system that
 /// must not be trained away by appearing routinely.
-pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
+pub fn redact(paths: StorePaths, name: &str, force: bool, with_links: bool) -> Result<()> {
     let mut s = Session::open(paths)?;
     let tgt = find(&s, name)?;
     let note = s
@@ -597,6 +597,49 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
         return Err(Error::Usage(format!("{name} has already been destroyed")));
     }
 
+    // The notes that point here, one hop.
+    //
+    // §1.1 limit 5: a note's slug is derived from its opening words, and a note
+    // linking to it carries that slug inside its own verbatim text. Destroying
+    // the target re-derives its name from its id so the name stops carrying the
+    // words — and the copies already written into other notes are untouched.
+    // §1.1 and §4.3 both name `redact --with-links` as the mitigation and
+    // neither one existed.
+    //
+    // Destroyed, not rewritten. §3.1.3 keeps captured text verbatim for ever,
+    // and editing somebody's note to remove a word that is there because of a
+    // *different* note's name is the system deciding what they meant.
+    //
+    // One hop only. A note linking to a note linking to here copied the middle
+    // note's name, not this one's, and following further lets one flag walk an
+    // arbitrary distance through the archive.
+    let mut targets = vec![tgt];
+    let linking = if with_links {
+        let back = s.state.links_to(&tgt)?;
+        for b in &back {
+            if !targets.contains(&b.tgt) {
+                targets.push(b.tgt);
+            }
+        }
+        back
+    } else {
+        Vec::new()
+    };
+
+    if targets.len() > capture_core::body::REDACT_TARGET_CAP {
+        // Refused rather than trimmed. Redacting the ones that fit would leave
+        // the rest holding the words the whole operation exists to remove,
+        // while reporting success — and choosing which go first would be this
+        // command inventing a policy nobody asked for.
+        return Err(Error::Usage(format!(
+            "{name} and the {} notes linking to it are {} in all, and a redaction \
+             may name at most {}",
+            linking.len(),
+            targets.len(),
+            capture_core::body::REDACT_TARGET_CAP
+        )));
+    }
+
     if !force {
         // `--force` suppresses this prompt and nothing else. The cap, the
         // window and the snapshot all remain — a flag that turned off the
@@ -606,6 +649,22 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
         say!("  {}", note.slug);
         if let Some(t) = &note.text {
             say!("  {}", first_line(t));
+        }
+
+        // Every name, because §1.1 makes this the one confirmation that must
+        // not be trained away — and a flag that quietly widens what a familiar
+        // prompt covers is exactly how it would be. Somebody who has typed the
+        // name once has learned that the prompt means one note.
+        if !linking.is_empty() {
+            say!();
+            say!(
+                "...and the {} note(s) linking to it, which carry its name in \
+                 their own text:",
+                linking.len()
+            );
+            for b in &linking {
+                say!("  {}", b.slug);
+            }
         }
 
         // Named, because §1.1 makes this the one confirmation in the system
@@ -644,14 +703,22 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
     // to reach as well as writing the event. Authoring the event here directly
     // is what left every redaction reported complete the moment it was
     // written.
-    let id = s.redact(tgt)?;
+    let id = s.redact_all(&targets)?;
 
     say!();
-    say!(
-        "Queued. {} will be destroyed in {} minutes.",
-        note.slug,
-        capture_core::REDACT_WINDOW_MS / 60_000
-    );
+    match targets.len() {
+        1 => say!(
+            "Queued. {} will be destroyed in {} minutes.",
+            note.slug,
+            capture_core::REDACT_WINDOW_MS / 60_000
+        ),
+        n => say!(
+            "Queued. {} notes, including {}, will be destroyed in {} minutes.",
+            n,
+            note.slug,
+            capture_core::REDACT_WINDOW_MS / 60_000
+        ),
+    }
     say!("  capture redact --cancel {}", hex8(&id));
     Ok(())
 }

@@ -67,10 +67,6 @@ pub struct Session {
     _writer: Writer,
 }
 
-fn alloc_vec(id: capture_core::EventId) -> Vec<capture_core::EventId> {
-    vec![id]
-}
-
 /// What a pairing learned about the device being admitted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Admitted {
@@ -734,11 +730,41 @@ impl Session {
     /// one of them recorded anything, which is exactly the second-path problem
     /// the ingest gate exists to avoid.
     pub fn redact(&mut self, tgt: capture_core::EventId) -> Result<capture_core::EventId> {
-        let id = self.append(Kind::REDACT, Some(tgt), None, |nonce| {
+        self.redact_all(&[tgt])
+    }
+
+    /// Destroy several notes under one redaction.
+    ///
+    /// One event, not several, so a single cancellation covers all of them —
+    /// splitting it would make undoing a mistake a matter of catching each one
+    /// inside its own window.
+    ///
+    /// The header names the first target because a header holds one, and §1.1
+    /// lets a redaction name sixty-four. Everything downstream reads the body:
+    /// the fold queues every target, and `incremental::affected` extends by
+    /// them so the cheap path reaches the same answer as a full fold.
+    ///
+    /// Over the cap is refused here as well as held by the fold. The fold's
+    /// refusal protects a replica from a peer; this one tells the person
+    /// standing here why nothing happened, which the fold cannot.
+    pub fn redact_all(&mut self, tgts: &[capture_core::EventId]) -> Result<capture_core::EventId> {
+        let Some(first) = tgts.first().copied() else {
+            return Err(Error::Usage("a redaction names at least one note".into()));
+        };
+        if tgts.len() > capture_core::body::REDACT_TARGET_CAP {
+            return Err(Error::Usage(format!(
+                "a redaction may name at most {} notes, and this names {}",
+                capture_core::body::REDACT_TARGET_CAP,
+                tgts.len()
+            )));
+        }
+
+        let targets = tgts.to_vec();
+        let id = self.append(Kind::REDACT, Some(first), None, |nonce| {
             let body = capture_core::body::RedactBody {
                 nonce,
                 scope: capture_core::body::RedactScope::WholeNote,
-                targets: alloc_vec(tgt),
+                targets: targets.clone(),
             };
             let mut b = Vec::new();
             minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");

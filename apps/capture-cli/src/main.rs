@@ -157,7 +157,11 @@ fn run(command: Command) -> Result<()> {
             ignore_redactions_after,
         ),
         Command::Unflag { name } => write::unflag(paths()?, &name),
-        Command::Redact { name, force } => write::redact(paths()?, &name, force),
+        Command::Redact {
+            name,
+            force,
+            with_links,
+        } => write::redact(paths()?, &name, force, with_links),
         Command::RedactCancel { id } => write::redact_cancel(paths()?, &id),
         Command::RedactCancelSince { since } => write::redact_cancel_since(paths()?, since),
         Command::Set { key, value } => ops::set(paths()?, &key, value.as_deref()),

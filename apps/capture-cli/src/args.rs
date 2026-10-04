@@ -321,6 +321,8 @@ pub enum Command {
     Redact {
         name: String,
         force: bool,
+        /// Take the notes linking to it as well (§1.1 limit 5).
+        with_links: bool,
     },
     /// Stop a queued redaction.
     RedactCancel {
@@ -947,11 +949,13 @@ where
                 return Ok(Command::RedactCancel { id: id.clone() });
             }
             let force = rest.iter().any(|a| a == "--force");
+            let with_links = rest.iter().any(|a| a == "--with-links");
             let names: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
             match names.as_slice() {
                 [name] => Ok(Command::Redact {
                     name: (*name).clone(),
                     force,
+                    with_links,
                 }),
                 _ => Err(Bad::Value {
                     command: "redact".into(),
@@ -1278,6 +1282,7 @@ TIME AND TASKS
   capture due                    what will speak, and when
   capture settle                 read captures nothing has read yet
   capture held                   events stored but not folded, and why
+  capture redact --with-links <name>   destroy it and the notes linking to it
   capture redact --release <id>  let a destruction the ceiling held go ahead
   capture recover                copies kept before a redaction
   capture recover <id>           write one back as a new note
