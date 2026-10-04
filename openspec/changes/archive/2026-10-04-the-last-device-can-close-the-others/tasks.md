@@ -13,4 +13,11 @@
 
 - [x] 3.1 `make android-decides` clean: 22 Kotlin files, none deciding anything. The surface decides where the control sits and what the confirmation says; everything else is the binding's.
 - [x] 3.2 Bindings regenerated, `make android-app` builds, `./gradlew assembleDebug` succeeds, and the APK installed on the device.
-- [ ] 3.3 **Not visually confirmed.** The phone is locked (`mDreamingLockscreen=true`) and getting past a lock screen is not something to automate around. The build and the decides gate are the evidence so far; the control appearing for a peer and not for this device still wants one look.
+- [x] 3.3 **Confirmed on the device, 2026-10-04.** Against `dev.capture.dev`, paired to a *scratch* desktop store — never the real archive — because the control only exists where a peer does, and the phone had none.
+      - The control appears on the peer's row and **not** on this phone's, which is the guard that matters.
+      - The confirmation names the device and says the undo needs two devices to sign.
+      - Declining leaves the peer listed and the control offered.
+      - Retiring removes it: the list goes back to "No other devices yet."
+
+      All five scenarios of the spec, on real hardware. Screenshot kept at
+      `~/.local/share/capture-reviews/2026-10-04-retire-confirmation.png`.
