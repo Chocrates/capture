@@ -170,14 +170,6 @@ fn run() -> Result<(), capture_store::Error> {
 
     let mut round = 0u64;
     loop {
-        // The daemon has no window the platform imposes, which is not the
-        // same as having no budget. The blob phase runs inside the writer
-        // lock, so a large attachment would otherwise make captures spool for
-        // as long as it takes to move — and the device with the attachment is
-        // usually the one somebody is capturing on.
-        let until = now() + BLOB_WINDOW_MS;
-        let spent = || now() >= until;
-
         // Read whatever has not been read, before anything about peers.
         //
         // The sweep used to reach a store only through `round::reconcile`, and
@@ -191,14 +183,39 @@ fn run() -> Result<(), capture_store::Error> {
         // second budget, and the trigger already exists: the wait below breaks
         // out as soon as `wrote_something` sees a local write, so a capture
         // settles on the next wake rather than on the idle timer.
-        match capture_store::promote::settle(&paths) {
+        //
+        // Bounded by a count and not by a clock: `PER_SWEEP` is 200, which
+        // measures at roughly three seconds on a first pass over an archive
+        // nothing has read, and twenty-odd milliseconds once it is caught up —
+        // which is every round but the first few. It holds the writer lock for
+        // that time, so a capture made during a catch-up spools rather than
+        // being written directly, which is the same thing the blob phase below
+        // already relies on.
+        let read = capture_store::promote::settle(&paths);
+        match read {
             Ok(0) => {}
-            Ok(n) => tracing::info!(promoted = n, "read captures nothing had read"),
+            Ok(n) => tracing::info!(read = n, "read captures nothing had read"),
             // A round that fails is a round, and the same goes for this. The
             // writer lock is held by whoever is capturing or by the overlay,
             // and the next round finds it free.
-            Err(e) => tracing::debug!(%e, "could not read captures this round"),
+            Err(ref e) => tracing::debug!(%e, "could not read captures this round"),
         }
+
+        // The blob window starts *after* the sweep, not before it.
+        //
+        // The daemon has no window the platform imposes, which is not the same
+        // as having no budget. The blob phase runs inside the writer lock, so a
+        // large attachment would otherwise make captures spool for as long as
+        // it takes to move — and the device with the attachment is usually the
+        // one somebody is capturing on.
+        //
+        // Computing `until` before the sweep made a catch-up spend the sync
+        // phase's budget: three seconds of reading came off a window meant for
+        // moving attachments, so the first rounds after an upgrade would have
+        // given the exchange almost nothing and looked like a network fault.
+        // Two phases, two windows, each honest about what it has.
+        let until = now() + BLOB_WINDOW_MS;
+        let spent = || now() >= until;
 
         if let Err(e) = tick(&paths, &identity, &mut beacon, round, port, &now, &spent) {
             // A round that fails is a round. The next one may find a different

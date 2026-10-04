@@ -476,6 +476,7 @@ fun Agenda(day: String, entries: List<AgendaEntry>, onTasks: () -> Unit) {
 @Composable
 fun Tasks(
     tasks: List<TaskLine>,
+    unread: UInt,
     onOpen: (String) -> Unit,
     onDone: (String, Boolean) -> Unit,
     onAgenda: () -> Unit,
@@ -492,6 +493,8 @@ fun Tasks(
             modifier = Modifier.clickable { onAgenda() },
         )
     }
+    if (unread > 0u) Unread(unread)
+
     if (tasks.isEmpty()) {
         // Plainly, and as a fact rather than an achievement. §0: nothing here
         // scores the user, so this is not congratulation and not an error.
@@ -521,6 +524,31 @@ fun Tasks(
             items(undated) { TaskRow(it, onOpen, onDone) }
         }
     }
+}
+
+/**
+ * That this list may be missing something, and why.
+ *
+ * Above the list and never instead of it. An empty list that admits it has not
+ * read three captures is a different statement from an empty list, and
+ * suppressing the list would make the screen fail whenever the sweep is behind
+ * — §8.8's failure with the sign flipped.
+ *
+ * The count comes from the archive. What this screen decides is only where to
+ * draw it, which is what a surface is for.
+ */
+@Composable
+private fun Unread(n: UInt) {
+    Text(
+        if (n == 1u) {
+            "1 capture has not been read yet, so this may be incomplete."
+        } else {
+            "$n captures have not been read yet, so this may be incomplete."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 0.dp, 16.dp, 12.dp),
+    )
 }
 
 @Composable

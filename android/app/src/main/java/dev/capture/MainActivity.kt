@@ -299,6 +299,7 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                 }
                 is Screen.Tasks -> Tasks(
                     tasks = model.tasks,
+                    unread = model.unread,
                     onOpen = { model.go(Screen.Note(it)) },
                     onDone = model::setDone,
                     onAgenda = { model.go(Screen.Agenda(model.today())) },

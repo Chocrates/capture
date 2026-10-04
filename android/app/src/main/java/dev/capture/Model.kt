@@ -93,6 +93,23 @@ class Model(private val archive: Archive) : ViewModel() {
     var tasks by mutableStateOf<List<TaskLine>>(emptyList())
         private set
 
+    /**
+     * Captures nothing has read yet, so a screen can say it may be incomplete.
+     *
+     * §3.1 puts the parse after the commit, so a capture is not a promotion
+     * until something reads it — and until then a task list is missing entries
+     * for a reason that has nothing to do with what is outstanding. The
+     * foreground settle means this should almost always be zero, which is
+     * exactly why it is worth showing when it is not: a non-zero count here is
+     * the settle having failed, and that is a thing to see rather than a thing
+     * to look at an empty list about.
+     *
+     * Read-only on the archive's side, so asking costs nothing and works when
+     * the writer does not.
+     */
+    var unread by mutableStateOf(0u)
+        private set
+
     /** Everyone and every project the archive knows, for the index. */
     var people by mutableStateOf<List<Entity>>(emptyList())
         private set
@@ -288,7 +305,10 @@ class Model(private val archive: Archive) : ViewModel() {
         screen = to
         when (to) {
             is Screen.Timeline -> load { timeline = archive.timeline(100u) }
-            is Screen.Tasks -> load { tasks = archive.tasks() }
+            is Screen.Tasks -> load {
+                tasks = archive.tasks()
+                unread = archive.unread()
+            }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load {
                 pages = archive.named()
@@ -586,7 +606,10 @@ class Model(private val archive: Archive) : ViewModel() {
     private suspend fun reread() {
         when (val here = screen) {
             is Screen.Timeline -> timeline = archive.timeline(100u)
-            is Screen.Tasks -> tasks = archive.tasks()
+            is Screen.Tasks -> {
+                tasks = archive.tasks()
+                unread = archive.unread()
+            }
             is Screen.Agenda -> agenda = archive.agenda(here.day)
             is Screen.ListOf -> list = archive.list(here.tag)
             is Screen.Wiki -> {
