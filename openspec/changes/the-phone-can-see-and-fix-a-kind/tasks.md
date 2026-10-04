@@ -32,6 +32,6 @@
 
 ## 5. Seeing it
 
-- [ ] 5.1 Against a store holding one of each kind — overdue, due today, undated, done, and a series — on a real device. Photographed before and after, as `surfaces-render-the-projection` 4.1 did; that task earned its keep by catching a race nothing failed on.
+- [x] 5.1 Done on a real device, once the date fixes made an overdue task expressible at all. Overdue, due and undated all render with their bands; the series shows as `every weekday at 09:00`; a verb-only capture stays a note until somebody says otherwise. The undated one arrived by accepting a below-floor suggestion, which puts `promote::accept` on hardware for the first time. *Done* is deliberately absent from this screen — a finished task leaves the bands, which is the behaviour, not a gap.
 - [~] 5.2 **The property is proved; the on-device leg is not.** `two_devices.rs` now corrects a kind on one device, syncs over a real socket with real identities, and asserts the other agrees *and* that two further sweeps on the receiving side do not take it back — which is the failure worth catching, and it is deterministic. Driving the same path through an emulator and a real `capture` daemon is still outstanding. **Emulator or `dev.capture.dev` only** — never the real archive.
 - [x] 5.3 Measured: **22.5ms** for 300 open tasks (100 overdue, 100 undated), debug build, as an ignored test rather than a CI threshold. Same order as the timeline's 16ms for 100 rows, which is what one indexed query against `promotions` should cost.

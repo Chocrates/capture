@@ -28,5 +28,5 @@
 
 ## 6. Seeing it
 
-- [ ] 6.1 The five captures that started this, on a device, as one of each kind. **`dev.capture.dev` only.**
+- [x] 6.1 On a Pixel 8 Pro against `dev.capture.dev`. `pay the acme invoice on 2026-09-20` — the form that was completely unread — lands in **Overdue** as `task · due 2026-09-20`. All three bands on one screen, plus the series rendering `every weekday at 09:00` on its timeline row and the verb-only capture staying a note until asked.
 - [x] 6.2 Over the 614-capture corpus: 30 read as dated, 5 of those as tasks with a due date. Kept as an ignored test beside the near-miss measurements.
