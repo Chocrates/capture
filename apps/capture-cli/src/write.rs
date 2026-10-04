@@ -806,3 +806,31 @@ pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> 
     }
     Ok(())
 }
+
+/// Read whatever has not been read yet.
+///
+/// A command somebody should never need, and that is the point of it: where a
+/// daemon runs, it has already happened, and where one does not, this is what
+/// the staleness line on a read has to be able to name. §3.1 defers the parse
+/// so the capture gesture never waits for it, and §8.8 keeps reads off the
+/// writer — between them there is nothing a read can do about being behind
+/// except say so and point here.
+///
+/// Reports the count rather than succeeding silently, because "it read nothing"
+/// and "it could not look" are different answers and conflating them is the
+/// bug `settle` exists to stop. A held lock is an error and says who holds it.
+pub fn settle(paths: &StorePaths, json: bool) -> Result<()> {
+    let n = capture_store::promote::settle(paths)?;
+
+    if json {
+        say!("{{\"promoted\":{n}}}");
+        return Ok(());
+    }
+
+    match n {
+        0 => say!("Nothing was waiting to be read."),
+        1 => say!("Read 1 capture."),
+        n => say!("Read {n} captures."),
+    }
+    Ok(())
+}

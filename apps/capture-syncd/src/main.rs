@@ -178,6 +178,28 @@ fn run() -> Result<(), capture_store::Error> {
         let until = now() + BLOB_WINDOW_MS;
         let spent = || now() >= until;
 
+        // Read whatever has not been read, before anything about peers.
+        //
+        // The sweep used to reach a store only through `round::reconcile`, and
+        // `round::tick` gives up before that whenever there is nothing to sync
+        // with: no roster secret, no members, or nothing reachable. So
+        // promotion was a side effect of *having a peer*, and a single device
+        // with this daemon running was swept never. Captured a dated task,
+        // asked for your tasks, told there were none.
+        //
+        // §2.5.1 asks for `parse` to be triggered immediately with a sixty
+        // second budget, and the trigger already exists: the wait below breaks
+        // out as soon as `wrote_something` sees a local write, so a capture
+        // settles on the next wake rather than on the idle timer.
+        match capture_store::promote::settle(&paths) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(promoted = n, "read captures nothing had read"),
+            // A round that fails is a round, and the same goes for this. The
+            // writer lock is held by whoever is capturing or by the overlay,
+            // and the next round finds it free.
+            Err(e) => tracing::debug!(%e, "could not read captures this round"),
+        }
+
         if let Err(e) = tick(&paths, &identity, &mut beacon, round, port, &now, &spent) {
             // A round that fails is a round. The next one may find a different
             // network, a woken peer, or a released lock.

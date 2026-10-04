@@ -70,11 +70,20 @@ use crate::{Result, db};
 /// fill them from. The same rebuild also applies entity-scoped mutes for the
 /// first time.
 ///
+/// Version 10 adds `read_by`, which records that the sweep read a note at all
+/// — not only that it promoted one. Without it a note the recognizer declines
+/// stays in the sweep's queue for ever, and since that queue is bounded at two
+/// hundred and ordered newest-first, the sweep re-read the same recent
+/// unpromotable notes on every open and never reached anything behind them.
+/// Nothing to migrate: the table is a record of what *this build* has looked
+/// at, so an empty one is the honest starting state and the first few sweeps
+/// after this fill it in.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 9;
+pub const PROJECTION_SCHEMA: u32 = 10;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -384,6 +393,43 @@ CREATE TABLE IF NOT EXISTS promotion_at (
   counter INTEGER NOT NULL
 ) STRICT;
 
+-- That a note was read, and by which grammar — whatever the reading found.
+--
+-- # Without this the sweep is inert, and that is not a figure of speech
+--
+-- A promotion is written only when the floor is cleared, and `promote.rs`
+-- declines to write one otherwise: an event per ordinary capture, recording
+-- that the recognizer found what it usually finds. Both of those are right.
+-- Together they left no record of a *negative* result, so `needing_parse` read
+-- a missing promotion as meaning not yet read, and every ordinary note stayed
+-- in the queue for ever.
+--
+-- The queue is `ORDER BY created_wall DESC LIMIT 200`. So the sweep re-read the
+-- newest two hundred unpromotable notes on every session open and never reached
+-- anything behind them. Measured: one dated task, then 250 ordinary notes, then
+-- five sweeps — nothing promoted, 251 still queued, and the task that was
+-- captured first was never read at all. The bound was meant to spread work
+-- across runs; what it actually did was put a horizon on the archive.
+--
+-- # Why it is here and not in the log
+--
+-- It is a fact about what a build has looked at, not about the archive, and it
+-- does not replicate — another device on another grammar has its own answer.
+--
+-- A rebuild drops it, which is correct and not merely tolerable: re-reading
+-- what the current grammar reads costs one pass over the archive and changes no
+-- outcome. It is the same shape as a grammar bump, which the sweep is already
+-- written to spread over several runs.
+--
+-- `wall`/`counter` is the text position it was read at, so an edit makes it
+-- unread again — the same comparison `promotion_at` exists for.
+CREATE TABLE IF NOT EXISTS read_by (
+  tgt     BLOB PRIMARY KEY,
+  grammar INTEGER NOT NULL,
+  wall    INTEGER NOT NULL,
+  counter INTEGER NOT NULL
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS promotions_start ON promotions(start_ms);
 CREATE INDEX IF NOT EXISTS promotions_due   ON promotions(due);
 CREATE INDEX IF NOT EXISTS promotions_kind  ON promotions(kind);
@@ -526,6 +572,52 @@ pub struct OccurrenceRow {
     /// Notes on this occurrence only.
     pub notes: Option<String>,
 }
+
+/// Which captures have not been read by grammar `?1`, as a `FROM` and a `WHERE`.
+///
+/// One predicate, two callers: [`Store::needing_parse`] lists them so the sweep
+/// can read them, and [`Store::unread_count`] counts them so a surface can say
+/// it is behind. Shared rather than restated, because two copies of a staleness
+/// predicate drift and the drift is silent in both directions — a count of zero
+/// over a real backlog, or a warning that no amount of sweeping clears.
+const UNREAD_FROM_WHERE: &str = "FROM notes n
+     LEFT JOIN promotions p ON p.tgt = n.tgt
+     LEFT JOIN promotion_at pa ON pa.tgt = n.tgt
+     LEFT JOIN read_by rb ON rb.tgt = n.tgt
+     WHERE n.text IS NOT NULL
+       -- A pinned promotion is somebody's correction and no later parse
+       -- displaces it (§6), so there is nothing to re-read it for.
+       AND (p.tgt IS NULL OR p.pinned = 0)
+
+       -- Not recorded as read by this grammar, at this text.
+       --
+       -- This clause is what makes the queue finite. It used to be `p.tgt IS
+       -- NULL` — a missing promotion meaning not yet read — which is true of
+       -- every ordinary capture for ever, because reading one writes nothing.
+       -- See `read_by` for what that cost.
+       AND NOT (rb.tgt IS NOT NULL
+                AND rb.grammar >= ?1
+                AND (rb.wall, rb.counter) >= (n.updated_wall, n.updated_counter))
+
+       -- And not carrying a promotion that is already current.
+       --
+       -- `read_by` is local and a rebuild drops it, while `promotions` is
+       -- re-folded from the log — so after a rebuild, and on any device a
+       -- promotion reached by sync rather than by its own sweep, a note has a
+       -- current promotion and no read record. Treating that as unread swept
+       -- the whole archive again and wrote a *duplicate* promote event per
+       -- note saying exactly what the existing one said: the log growing by a
+       -- note per promotion on every rebuild, and syncing the lot to every
+       -- peer. A current promotion is a record that the note was read.
+       --
+       -- The `promotion_at` comparison is the same one `needs_parse` makes in
+       -- the fold, and it has to stay the same or the queue and the decision
+       -- disagree about what is stale.
+       AND NOT (p.tgt IS NOT NULL
+                AND p.grammar IS NOT NULL
+                AND p.grammar >= ?1
+                AND pa.wall IS NOT NULL
+                AND (pa.wall, pa.counter) >= (n.updated_wall, n.updated_counter))";
 
 /// The columns a `NoteRow` is read from, aliased to `n`.
 const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias,
@@ -1620,19 +1712,7 @@ impl Store {
     pub fn needing_parse(&self, grammar: u32, limit: usize) -> Result<Vec<NoteRow>> {
         let sql = format!(
             "SELECT {NOTE_COLUMNS}
-             FROM notes n
-             LEFT JOIN promotions p ON p.tgt = n.tgt
-             LEFT JOIN promotion_at pa ON pa.tgt = n.tgt
-             WHERE n.text IS NOT NULL
-               AND (p.tgt IS NULL
-                    OR (p.pinned = 0
-                        AND ((p.grammar IS NOT NULL AND p.grammar < ?1)
-                             -- Or the text has moved since it was read. The
-                             -- same predicate `needs_parse` applies in the
-                             -- fold, and it has to be the same or the queue
-                             -- and the decision disagree about what is stale.
-                             OR pa.wall IS NULL
-                             OR (pa.wall, pa.counter) < (n.updated_wall, n.updated_counter))))
+             {UNREAD_FROM_WHERE}
              ORDER BY n.created_wall DESC
              LIMIT ?2"
         );
@@ -1643,6 +1723,42 @@ impl Store {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Record that the sweep read this note, and what it read it at.
+    ///
+    /// Called for every note the sweep looks at, **including the ones it
+    /// promotes to nothing** — that is the whole purpose. Writing only on a
+    /// promotion is what left ordinary captures queued for ever; see `read_by`
+    /// in the schema for what that cost and why this is not in the log.
+    pub fn mark_read(&self, tgt: &EventId, grammar: u32, at: (u64, u32)) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO read_by (tgt, grammar, wall, counter)
+             VALUES (?1,?2,?3,?4)",
+            params![tgt.0.to_vec(), grammar as i64, at.0 as i64, at.1 as i64],
+        )?;
+        Ok(())
+    }
+
+    /// How many captures have not been read.
+    ///
+    /// The same question [`Store::needing_parse`] answers, counted instead of
+    /// listed, and **deliberately available on a read-only handle**. That is
+    /// the whole point of it: a surface has to be able to say "there are three
+    /// captures nobody has read yet" without becoming a writer, because §8.8
+    /// puts reads on a path that does not involve the writer at all — and
+    /// because the moment this most needs saying is the moment the writer has
+    /// not been running.
+    ///
+    /// Shares `UNREAD_FROM_WHERE` with the sweep's own queue rather than
+    /// restating it. Two copies of this predicate would drift, and the drift
+    /// would read as "nothing outstanding" over a backlog, or as a line that
+    /// never goes away however often the sweep runs.
+    pub fn unread_count(&self, grammar: u32) -> Result<usize> {
+        let sql = format!("SELECT COUNT(*) {UNREAD_FROM_WHERE}");
+        Ok(self
+            .conn
+            .query_row(&sql, params![grammar as i64], |r| r.get::<_, i64>(0))? as usize)
     }
 
     /// A note's name.

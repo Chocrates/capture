@@ -45,6 +45,38 @@ pub fn open(paths: &StorePaths) -> Result<Store> {
     projection::current(paths)
 }
 
+/// One line, where this answer is drawn from state nothing has caught up.
+///
+/// §3.1 puts the parse after the commit, so a capture is not a promotion until
+/// something reads it; §8.8 puts reads off the writer, so a read cannot be the
+/// thing that reads it. What is left is saying so — and an empty answer that
+/// admits it is incomplete is a different statement from an empty answer, which
+/// is the whole difference between a working system and one that looks working.
+///
+/// Read-only and deliberately so. A report of staleness that needed the writer
+/// would be unavailable exactly when the writer has not been running, which is
+/// the only time it matters.
+///
+/// Printed after the answer, never instead of it. Suppressing the output would
+/// make a read fail when the sweep is behind, which is §8.8's failure with the
+/// sign flipped.
+fn say_if_behind(store: &Store) {
+    let n = match store.unread_count(capture_parse::GRAMMAR_VERSION) {
+        Ok(0) => return,
+        Ok(n) => n,
+        // A count that cannot be taken is not worth a warning of its own. The
+        // answer above it still stands, and a store too broken to count is
+        // `capture verify`'s business, not this line's.
+        Err(_) => return,
+    };
+    say!();
+    match n {
+        1 => say!("1 capture has not been read yet, so this may be incomplete."),
+        n => say!("{n} captures have not been read yet, so this may be incomplete."),
+    }
+    say!("Read them with:  capture settle");
+}
+
 // ----------------------------------------------------------------- agenda ---
 
 /// What occurs and what is due, for one day.
@@ -183,6 +215,7 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     say!("{date}");
     if rows.is_empty() && due.is_empty() && overdue.is_empty() && owed.is_empty() {
         say!("  nothing");
+        say_if_behind(&store);
         return Ok(());
     }
 
@@ -229,6 +262,7 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
             );
         }
     }
+    say_if_behind(&store);
     Ok(())
 }
 
@@ -274,7 +308,16 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
                 ))
             })
             .collect();
-        say!("[{}]", items.join(","));
+        // An object rather than the bare array it used to be, so the count can
+        // ride along. A consumer reading an empty list as "no tasks" was being
+        // told something that might not be true.
+        say!(
+            "{{\"tasks\":[{}],\"unread\":{}}}",
+            items.join(","),
+            store
+                .unread_count(capture_parse::GRAMMAR_VERSION)
+                .unwrap_or(0)
+        );
         return Ok(());
     }
 
@@ -284,6 +327,7 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
         say!("A capture becomes one on its own where a verb and a day agree —");
         say!("\"call the dentist tomorrow\". A verb with no day is a suggestion");
         say!("and nothing more, so say it yourself with: capture task <name> [due]");
+        say_if_behind(&store);
         return Ok(());
     }
     for (tgt, descriptor) in rows {
@@ -296,6 +340,7 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
             text.as_deref().map(first_line).unwrap_or_default()
         );
     }
+    say_if_behind(&store);
     Ok(())
 }
 
@@ -1257,11 +1302,11 @@ fn backlink_json(b: &Backlink) -> String {
 pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     use capture_store::notifier::{Delivery, deliver_late};
 
-    // Open a session first, which sweeps.
+    // Read what has not been read, and *say so if that fails*.
     //
     // §3.1 puts parsing after the commit so the capture gesture never waits
     // for the recognizer — which means a capture is not promoted until
-    // *something* opens a session afterwards, and a read does not. So a fresh
+    // something reads it, and a read does not. So a fresh
     // `dentist thursday 2pm` was not yet an event, was therefore not yet
     // alertable, and this command reported nothing due.
     //
@@ -1270,8 +1315,13 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     // does not need this — it runs inside the due-work drain, which is itself
     // on the far side of a session open — but a person asking "why did nothing
     // happen" is asking before any of that.
-    let swept = capture_store::session::Session::open(paths.clone());
-    drop(swept);
+    //
+    // This used to be `let swept = Session::open(…); drop(swept)`, which threw
+    // the `Result` away. So a store somebody else was writing gave no sweep, no
+    // error and an answer from stale state — the one outcome this command must
+    // never produce, since "nothing is due" is exactly what the person is here
+    // to disbelieve. §8.8's argument, in the command it was written for.
+    let settled = capture_store::promote::settle(paths);
 
     let store = open(paths)?;
     let now = now_ms();
@@ -1307,6 +1357,10 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     if rows.is_empty() {
         say!("Nothing due.");
         say!();
+        // Before the explanation, because it changes what the explanation
+        // means. "Nothing due" over captures nobody has read is not an answer
+        // about scheduling at all.
+        say_if_unsettled(&store, &settled);
         say!("A capture speaks when it names a time — \"dentist thursday 2pm\".");
         say!("One with no time never becomes overdue.");
         return Ok(());
@@ -1346,7 +1400,25 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
         n if n == rows.len() => say!("{n} due."),
         n => say!("{n} due, {} more coming.", rows.len() - n),
     }
+    say_if_unsettled(&store, &settled);
     Ok(())
+}
+
+/// What this command could not read, and therefore cannot speak for.
+///
+/// Two different admissions and they are not interchangeable. If the settle
+/// *failed* — somebody else holds the writer — then nothing was read and the
+/// list below may be missing entries for a reason that has nothing to do with
+/// scheduling; say who has the store. If it succeeded, a non-zero count is the
+/// ordinary staleness line.
+fn say_if_unsettled(store: &Store, settled: &Result<usize>) {
+    if let Err(e) = settled {
+        say!();
+        say!("Captures could not be read first: {e}");
+        say!("So this may be missing something. Try again once that finishes.");
+        return;
+    }
+    say_if_behind(store);
 }
 
 /// The local hour, for the delivery decision.

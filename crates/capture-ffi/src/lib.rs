@@ -744,6 +744,15 @@ impl Archive {
         Ok(capture_store::ops::Ops::open_read(&self.paths.ops)?.get(key)?)
     }
 
+    /// How many captures nothing has read yet.
+    ///
+    /// Read-only and no writer involved, which is the whole point: a surface
+    /// has to be able to say "this may be incomplete" at the moment the writer
+    /// has not been running, and a report that needed the writer could not.
+    pub fn unread(&self) -> Result<u32> {
+        Ok(self.read()?.unread_count(capture_parse::GRAMMAR_VERSION)? as u32)
+    }
+
     /// What has come due by a moment, oldest first.
     ///
     /// Operation-shaped: the caller says when, and gets back what may be said
@@ -753,14 +762,21 @@ impl Archive {
     /// `within_ms` looks ahead. Zero is "what has arrived", which is what the
     /// alarm receiver asks; a week is what a screen showing the schedule asks.
     pub fn due(&self, within_ms: i64) -> Result<Vec<Alert>> {
-        // Sweeping first, because §3.1 puts parsing after the commit: a
-        // capture made a moment ago is not yet a promotion, and a promotion is
-        // what carries the time. Without this the alarm that fires two minutes
-        // after a capture would find nothing due and be right.
-        {
-            let _w = self.write_lock()?;
-            let _ = capture_store::session::Session::open(self.paths.clone())?;
-        }
+        // Reading first, because §3.1 puts parsing after the commit: a capture
+        // made a moment ago is not yet a promotion, and a promotion is what
+        // carries the time. Without this the alarm that fires two minutes after
+        // a capture would find nothing due and be right.
+        //
+        // Load-bearing on this platform specifically. There is no sync daemon
+        // on Android, so nothing else is running to do this; the alarm receiver
+        // arrives in the background with no guarantee the foreground pass has
+        // happened. So [`Archive::settle`] here as well as on foreground — that
+        // covers the screens, and this covers the alarm.
+        //
+        // Through `settle` rather than opening a throwaway session inline,
+        // which is what this was. One named operation, so a third caller that
+        // needs the same thing finds it instead of growing its own.
+        self.settle()?;
 
         let store = self.read()?;
         let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
@@ -2597,6 +2613,15 @@ impl Archive {
     /// Called when the application comes to the foreground and on the sync
     /// tick. On the desktop this happens on every command that writes; a phone
     /// has no equivalent, so it is asked for explicitly.
+    ///
+    /// The promotions happen inside `Session::open`, which sweeps on the way
+    /// in — so this is also what reads a capture made since the app was last
+    /// open. That is why there is no daemon-shaped hole on this platform and
+    /// there was one on the desktop, where nothing owned the sweep at all.
+    ///
+    /// The returned count is the *due work* drained, not the captures read. A
+    /// surface asking whether it is looking at stale state wants
+    /// [`Archive::unread`], which answers without taking the writer lock.
     pub fn settle(&self) -> Result<u64> {
         let _w = self.write_lock()?;
         let mut s = capture_store::session::Session::open(self.paths.clone())?;

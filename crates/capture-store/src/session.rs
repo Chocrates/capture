@@ -52,6 +52,17 @@ pub struct Session {
     clock: HlcState,
     /// What the store looked like when it was opened.
     pub startup: crate::startup::State,
+    /// How many captures the opening sweep read.
+    ///
+    /// Recorded because opening already does the work and the count was being
+    /// thrown away. [`crate::promote::settle`] needs to report it, and sweeping
+    /// a second time to find out would read everything twice and then report
+    /// nothing — the first pass having already dealt with it all.
+    ///
+    /// Captures *read*, not promotions written: most captures are ordinary
+    /// notes that promote to nothing, and this has to agree with what
+    /// `unread_count` calls outstanding.
+    pub read_at_open: usize,
     /// Held for as long as the session is. Dropping it releases the store.
     _writer: Writer,
 }
@@ -135,6 +146,7 @@ impl Session {
             state: projection_store,
             clock,
             startup: state,
+            read_at_open: 0,
             _writer: writer,
         };
 
@@ -208,6 +220,9 @@ impl Session {
         // and the gesture must never wait for it, so the one path that must stay
         // fast opts out and every other one catches the store up.
         if catch_up {
+            // `read_at_open` is set by the sweep itself — captures read, which
+            // is a different number from the promotions logged here and must
+            // not be overwritten with it.
             match crate::promote::sweep(&mut s) {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(promoted = n, "notes read at startup"),

@@ -223,6 +223,7 @@ pub fn needs_parse(note: &Note, grammar: u32) -> bool {
 pub fn sweep(s: &mut Session) -> Result<usize> {
     let grammar = capture_parse::GRAMMAR_VERSION;
     let mut written = 0;
+    let mut read = 0;
 
     // An indexed query rather than a fold. This folded the whole log until the
     // projection learned to store a promotion; it was honest and temporary and
@@ -266,6 +267,18 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
         let captured = note.created.0 as i64;
 
         let r = capture_parse::recognize(text, captured, zone);
+
+        // Read, whatever reading found.
+        //
+        // Before the match, so the paths that promote *nothing* are recorded
+        // too. They are the common case — most captures are ordinary notes —
+        // and leaving them unrecorded is what made this queue infinite: no
+        // promotion was read as not-yet-read, so the newest two hundred
+        // unpromotable notes were re-read on every open and nothing behind them
+        // was ever reached. See `read_by` in the projection schema.
+        s.state.mark_read(&note.tgt, grammar, note.updated)?;
+        read += 1;
+
         let as_ = match promoted_from(&r, zone, captured) {
             Some(as_) => as_,
 
@@ -299,7 +312,55 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
         written += 1;
     }
 
+    // Both counts, because they answer different questions and conflating them
+    // misreports. `written` is how many promotions this wrote, which is what
+    // the startup log line has always said. `read` is how many captures it
+    // looked at — which is the number that has to agree with
+    // `Store::unread_count`, or "3 captures have not been read" is followed by
+    // "read 1 capture" and neither statement explains the other.
+    s.read_at_open = read;
     Ok(written)
+}
+
+/// Read whatever has not been read, on a store nothing currently holds open.
+///
+/// [`sweep`] needs a session, and a session is a *writer*. That made the sweep
+/// a side effect of opening the store to write — so whether a capture ever got
+/// read depended on what the next process to do so happened to be, and on a
+/// single-device archive nothing is. Captured, then looked for, then not there:
+///
+/// ```text
+/// capture + 'call the dentist tomorrow'
+/// capture tasks   → No tasks.
+/// capture pin <slug>          # anything at all, unrelated
+/// capture tasks   → call-dentist-tomorrow-…   task · due …
+/// ```
+///
+/// So this exists to be *called on purpose*, by the processes that are already
+/// writers for other reasons — the sync daemon on its round, the Android
+/// application on foreground, and a person running `capture settle` where
+/// neither is there. Not by a capture, which §3.1 and this module's own header
+/// forbid, and not by a read, which §8.8 forbids.
+///
+/// Returns how many captures it **read**, not how many it promoted — the same
+/// number [`crate::projection::Store::unread_count`] reports as outstanding, so
+/// that the staleness line and this agree. Most captures are ordinary notes and
+/// promote to nothing; reporting promotions would answer "3 captures have not
+/// been read" with "read 1 capture".
+///
+/// **A held writer lock is an error, not a zero**: the caller that cannot tell
+/// "read it, found nothing" from "never got to look" is the caller that reports
+/// stale state as settled, which is the bug this function is named after.
+pub fn settle(paths: &StorePaths) -> Result<usize> {
+    // Opening is the sweep. `catch_up` already ran it, so calling [`sweep`]
+    // again here would read the whole backlog a second time and then report
+    // *zero*, the first pass having promoted all of it — a count that is
+    // wrong in the direction that hides the bug.
+    //
+    // So the session records what it read and this reports it. What this adds
+    // over a bare `Session::open` is a name, that count, and an error the
+    // caller cannot drop on the floor.
+    Ok(Session::open(paths.clone())?.read_at_open)
 }
 
 /// Assign a type by hand, and pin it.

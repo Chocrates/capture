@@ -56,6 +56,10 @@ pub enum Command {
     Tasks {
         json: bool,
     },
+    /// Read whatever has not been read yet.
+    Settle {
+        json: bool,
+    },
     /// Every note naming a person, a project, or carrying a tag.
     Mentions {
         name: String,
@@ -505,6 +509,17 @@ where
                     flag: extra.clone(),
                 }),
                 None => Ok(Command::Tasks { json }),
+            }
+        }
+        "settle" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            match rest.iter().find(|a| *a != "--json") {
+                Some(extra) => Err(Bad::UnknownFlag {
+                    command: "settle".into(),
+                    flag: extra.clone(),
+                }),
+                None => Ok(Command::Settle { json }),
             }
         }
         "done" | "undone" => {
@@ -1157,6 +1172,7 @@ TIME AND TASKS
   capture tasks                  open tasks, newest first
   capture list <tag>             a list: its items, and what is left
   capture due                    what will speak, and when
+  capture settle                 read captures nothing has read yet
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
@@ -1351,6 +1367,20 @@ mod tests {
                 "{args:?} reports a missing argument as an unknown flag"
             );
         }
+    }
+
+    #[test]
+    fn settle_takes_nothing_but_json() {
+        assert!(matches!(
+            p(&["settle"]).unwrap(),
+            Command::Settle { json: false }
+        ));
+        assert!(matches!(
+            p(&["settle", "--json"]).unwrap(),
+            Command::Settle { json: true }
+        ));
+        let msg = p(&["settle", "now"]).unwrap_err().message();
+        assert!(msg.contains("does not take"), "{msg}");
     }
 
     #[test]
