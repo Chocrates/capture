@@ -78,14 +78,6 @@ pub enum State {
 }
 
 impl State {
-    /// Whether this device may append under its current origin.
-    pub fn may_append(&self) -> bool {
-        matches!(
-            self,
-            State::Fresh | State::Normal | State::WatermarkBehind { .. }
-        )
-    }
-
     /// Whether a new origin has to be minted before anything is written.
     pub fn needs_new_origin(&self) -> bool {
         matches!(self, State::StoreWentBackwards { .. })
@@ -179,7 +171,6 @@ mod tests {
             detect(true, true, 40, 41),
             State::WatermarkBehind { log_head: 41 }
         );
-        assert!(detect(true, true, 40, 41).may_append());
         assert!(!detect(true, true, 40, 41).needs_new_origin());
     }
 
@@ -203,7 +194,7 @@ mod tests {
             }
         );
         assert!(
-            !s.may_append(),
+            s.needs_new_origin(),
             "nothing may be written under the old origin"
         );
         assert!(s.needs_new_origin());
@@ -223,10 +214,12 @@ mod tests {
         // longer holds, and pairing is what would fix it.
         let s = detect(false, true, 0, 400);
         assert_eq!(s, State::IdentityMissing);
-        assert!(!s.may_append());
-        // And minting an origin would not help: a new origin under no key is
-        // not on the roster either.
+        // Minting an origin would not help: a new origin under no key is not on
+        // the roster either. So this is the one unresolved state that is not a
+        // job for `needs_new_origin`, and what carries the capture meanwhile is
+        // `commit_body` spooling when the store cannot be opened at all.
         assert!(!s.needs_new_origin());
+        assert!(s.message().is_some(), "an unresolved state says so");
     }
 
     #[test]
@@ -247,17 +240,21 @@ mod tests {
     }
 
     #[test]
-    fn the_states_that_permit_appending_are_exactly_the_resolved_ones() {
-        assert!(State::Fresh.may_append());
-        assert!(State::Normal.may_append());
-        assert!(State::WatermarkBehind { log_head: 1 }.may_append());
-        assert!(!State::IdentityMissing.may_append());
+    fn only_a_store_that_went_backwards_needs_a_new_origin() {
+        // This was written against `may_append`, which classified the same
+        // states from the other side and was called by nothing — the guard the
+        // module describes is enforced by `needs_new_origin` at the one place
+        // that resolves the state, plus `commit_body` spooling on any failure
+        // to open. Asserted here against the predicate that actually runs.
+        assert!(!State::Fresh.needs_new_origin());
+        assert!(!State::Normal.needs_new_origin());
+        assert!(!State::WatermarkBehind { log_head: 1 }.needs_new_origin());
         assert!(
-            !State::StoreWentBackwards {
+            State::StoreWentBackwards {
                 remembered: 2,
                 log_head: 1
             }
-            .may_append()
+            .needs_new_origin()
         );
     }
 }

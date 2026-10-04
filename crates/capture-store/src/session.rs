@@ -214,6 +214,33 @@ impl Session {
             }
         }
 
+        // The generations a rebuild left behind.
+        //
+        // A rebuild writes beside the current generation and moves the pointer
+        // afterwards — never renaming over an open database, because readers
+        // keep the file they already opened. That is right, and nothing ever
+        // came back for the file it replaced: `discard_generation` was written
+        // to do it and was called by nothing, so every projection this store
+        // had ever built was still on disk. §1.3 makes rebuild-not-migrate the
+        // whole migration strategy, so that is one full copy of the archive's
+        // derived state per schema version, for ever, on every device.
+        //
+        // The current one and one spare are kept. A reader resolves the pointer
+        // and opens the file as two steps — §8.8 will not let it hold the
+        // writer lock across them — so deleting the moment something is
+        // superseded turns that gap into a failed read. Keeping a spare means a
+        // read would have to be delayed across two full re-folds to be caught.
+        //
+        // Not fatal. A generation that cannot be removed is disk to reclaim
+        // next time, not a reason to refuse a store that is otherwise fine.
+        if let Ok(generation) = Ops::open(&s.paths.ops).and_then(|o| o.generation()) {
+            match crate::projection::discard_superseded(&s.paths.state, generation) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(n, "removed superseded projection generation(s)"),
+                Err(e) => tracing::warn!(%e, "a superseded generation could not be removed"),
+            }
+        }
+
         // Read anything nothing has read yet, or that an older grammar read.
         //
         // Every startup except a capture's. §3.1 puts parsing after the commit

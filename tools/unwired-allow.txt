@@ -6,4 +6,24 @@
 #
 #   name: reason
 
-# (empty — nothing is currently exempt)
+# --- reachable in a way the scan cannot see -------------------------------
+#
+# `Pair`/`End` in capture-sync are an in-src test transport, the same category
+# as `capture-core/src/testing.rs`, which this tool already exempts as
+# SCAFFOLDING. Unlike that file they are not feature-gated and not in a file of
+# their own, so the existing mechanism does not reach them. Moving them to
+# `crates/capture-sync/src/testing.rs` behind a feature would remove both of
+# these lines; until then they are claims rather than an oversight.
+
+close: Pair is capture-sync's in-src test transport. Every caller is a test by construction, and this one causes a close mid-conversation, which Drop for End cannot express.
+ends: the only way to obtain an End from Pair, capture-sync's in-src test transport. Used by four protocol test files; shipping code gets its Transport from a socket.
+
+# --- known gaps, recorded ---------------------------------------------------
+#
+# Both of these are real: a capability the design states and no surface can
+# reach. They are listed here rather than deleted because deleting them would
+# destroy the only written statement of behaviour the system is supposed to
+# have, and listed rather than fixed because each needs its own change.
+
+evict: DESIGN §5.6 makes LRU blob eviction on constrained devices a shipped behaviour — "constrained devices evict on an LRU with a size cap and a 30-day default" — and no surface, policy or caller exists. The phone never frees blob space. Recorded 2026-10-03; needs its own change, with blobs::destroy (see below).
+is_aside: the only read of the log's durable `aside` column. Every reader goes to the projection's `quarantine` table instead, and `projection::rebuild` never repopulates it — so after `capture rebuild` the set-aside events are invisible to every surface and `Gate::reconsider`'s re-admission remedy finds nothing to re-admit. Recorded 2026-10-03; needs its own change.

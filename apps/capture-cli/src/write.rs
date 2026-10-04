@@ -23,8 +23,7 @@
 use capture_core::{
     EventId,
     body::{
-        AliasBody, EditBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody,
-        UnflagBody, UntagBody,
+        AliasBody, EditBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody, UntagBody,
     },
     event::Kind,
 };
@@ -571,18 +570,10 @@ pub fn resolve(paths: StorePaths, name: &str) -> Result<()> {
 /// to override it — but nothing should be able to re-flag a note somebody has
 /// already cleared, or it would drop out of backups again on the next rebuild.
 pub fn unflag(paths: StorePaths, name: &str) -> Result<()> {
-    let mut s = Session::open(paths)?;
-    let tgt = find(&s, name)?;
-    let note = s
-        .state
-        .note(&tgt)?
-        .ok_or_else(|| Error::NotFound(name.to_string()))?;
-    if !note.credential {
-        return Err(Error::Usage(format!("{name} is not flagged")));
-    }
-    s.append(Kind::UNFLAG, Some(tgt), None, |nonce| {
-        encode(&UnflagBody { nonce })
-    })?;
+    // The store decides, this says so. There were two implementations of this
+    // — one here and one in `mutate` that nothing called — and they agreed
+    // only by having been written from each other.
+    capture_store::mutate::unflag(&paths, name)?;
     say!("{name} will be included in the next export");
     Ok(())
 }

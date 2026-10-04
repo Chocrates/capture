@@ -89,6 +89,39 @@ CALLERS = (
 
 DEF = re.compile(r"^\s*pub(?:\(crate\))?\s+fn\s+(\w+)")
 
+# `#[cfg(test)]` on its own line, which is how every test module here opens.
+CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]\s*$")
+
+
+def split_out_tests(body: str):
+    """Shipping code, and the `#[cfg(test)]` modules lifted out of it.
+
+    Brace-counted rather than parsed. A test module that happens to contain an
+    unbalanced brace inside a string would confuse it; none here do, and the
+    failure mode is counting too much as test code, which makes the check
+    stricter rather than blinder.
+    """
+    lines = body.splitlines(keepends=True)
+    keep, moved = [], []
+    i = 0
+    while i < len(lines):
+        if not CFG_TEST.match(lines[i]):
+            keep.append(lines[i])
+            i += 1
+            continue
+        # Everything from here to the end of the item it annotates.
+        start = i
+        depth, opened = 0, False
+        while i < len(lines):
+            depth += lines[i].count("{") - lines[i].count("}")
+            if "{" in lines[i]:
+                opened = True
+            i += 1
+            if opened and depth <= 0:
+                break
+        moved.extend(lines[start:i])
+    return "".join(keep), "".join(moved)
+
 # Everything from a `//` to the end of the line. Crude about `://` inside a
 # string, which costs nothing here: a name that only appears inside a URL is
 # not a caller either.
@@ -165,8 +198,28 @@ def main() -> int:
     # from having its own surface checked, and is still shipping code when it
     # calls something.
     shipping = set(ALL)
-    src = {p: p.read_text() for p in shipping}
+    src, inline = {}, {}
+    for p in shipping:
+        body = p.read_text()
+        keep, moved = split_out_tests(body)
+        src[p] = keep
+        if moved:
+            inline[p] = moved
     tests = {p: p.read_text() for p in CALLERS if p not in shipping}
+    # A file's own `#[cfg(test)] mod tests` is test code that happens to live in
+    # `src/`, and counting it as shipping is the difference between this check
+    # working and this check always passing.
+    #
+    # It is how `OccState::visible` survived. That method carries §6's rule that
+    # a move beats a cancel; nothing outside its own test module called it, so
+    # the rule was true in the fold and absent from the column every surface
+    # filters on — and the scan saw its unit test and called it wired.
+    tests.update({p: body for p, body in inline.items()})
+
+    def crate_of(path):
+        """Which crate or app a file belongs to, for attributing a caller."""
+        rel = path.relative_to(ROOT).parts
+        return (rel[0], rel[1]) if len(rel) > 1 else rel
 
     def mentions(name, corpus, method):
         n = 0
@@ -207,6 +260,47 @@ def main() -> int:
         # so the command's own call site made the store method look wired even
         # when nothing called it. A check with a blind spot should say where.
         if len(where) > 1:
+            # Two definitions with one name cannot be told apart by matching
+            # names — but they can often be told apart by *where a caller could
+            # be*. A crate that defines its own `visible` is not evidence that
+            # anybody calls somebody else's, so attribute each definition to its
+            # crate and look for callers only outside the crates that have their
+            # own.
+            #
+            # This is what the blind spot cost: `OccState::visible` in
+            # capture-core carried §6's rule that a move beats a cancel, the
+            # overlay happens to have an unrelated `visible`, and the overlay's
+            # own call made the core's look reachable. Nothing read the core's
+            # at all, so the rule was true in the fold and absent from the
+            # column every surface filters on.
+            #
+            # Still conservative: it reports only when a definition has no
+            # possible caller anywhere outside the crates that shadow the name.
+            # Where that cannot be established it falls back to saying so, which
+            # is what the "not checked" line is for.
+            owners = {crate_of(w) for w in where}
+            unresolved = []
+            for w in where:
+                mine = crate_of(w)
+                # A call written `mutate::unflag(..)` names *this* definition
+                # whatever else shares the name, so it counts from anywhere —
+                # including a crate that shadows it. Without this the shadowing
+                # crate's own call to the real one looked like no call at all.
+                qualified = f"{w.stem}::{name}"
+                if any(qualified in body for body in src.values()):
+                    continue
+                elsewhere = {
+                    f: body
+                    for f, body in src.items()
+                    if crate_of(f) not in (owners - {mine})
+                }
+                if mentions(name, elsewhere, method) == 0:
+                    unresolved.append(w)
+            if len(unresolved) == 1 and len(where) > 1:
+                at = unresolved[0].relative_to(ROOT)
+                only_tests = mentions(name, tests, method) > 0
+                (tested_only if only_tests else dead).append((name, at))
+                continue
             ambiguous.append((name, [w.relative_to(ROOT) for w in where]))
             if show_blind:
                 print(f"    blind: {name} in {', '.join(str(w.relative_to(ROOT)) for w in where)}")

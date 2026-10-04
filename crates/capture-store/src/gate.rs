@@ -133,7 +133,7 @@ impl<'a> Gate<'a> {
         if is_membership_shaped(e) {
             return self.admit_membership(e, at);
         }
-        if !self.roster.is_bootstrapped() {
+        if !self.is_open() {
             return Ok(Outcome::Paused);
         }
 

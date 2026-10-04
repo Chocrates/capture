@@ -349,10 +349,6 @@ pub enum Delivery {
 /// `armed` distinguishes a moment somebody set deliberately from one inferred
 /// by the recognizer. `dentist thursday 2pm` at 2am is almost certainly a
 /// misparse; `capture intent at 02:00` is not.
-pub fn deliver(hour: u32, timed: bool, armed: bool) -> Delivery {
-    deliver_late(hour, timed, armed, 0)
-}
-
 /// How long after its moment a timed alert is still worth saying immediately.
 ///
 /// Past this it is not an alarm any more, it is a note about something that
@@ -589,15 +585,15 @@ mod budget {
     #[test]
     fn a_named_time_is_immediate() {
         // "a meeting starting" — §2.6's own example of the immediate case.
-        assert_eq!(deliver(14, true, false), Delivery::Now);
+        assert_eq!(deliver_late(14, true, false, 0), Delivery::Now);
     }
 
     #[test]
     fn a_day_without_a_time_joins_the_next_batch() {
         // `call the dentist tomorrow` names a day. Delivering it at 00:00
         // would obey the letter of a due date and miss what was meant.
-        assert_eq!(deliver(10, false, false), Delivery::At(14));
-        assert_eq!(deliver(15, false, false), Delivery::At(19));
+        assert_eq!(deliver_late(10, false, false, 0), Delivery::At(14));
+        assert_eq!(deliver_late(15, false, false, 0), Delivery::At(19));
     }
 
     #[test]
@@ -606,18 +602,21 @@ mod budget {
         // hours, which 20:00 is not — and it started failing the moment armed
         // became unconditional, correctly: something somebody set a moment for
         // does not wait for tomorrow morning.
-        assert_eq!(deliver(20, false, false), Delivery::At(BATCHES[0]));
+        assert_eq!(deliver_late(20, false, false, 0), Delivery::At(BATCHES[0]));
     }
 
     #[test]
     fn quiet_hours_hold_everything_unarmed() {
         for hour in [22, 23, 0, 3, 6] {
             assert_eq!(
-                deliver(hour, true, false),
+                deliver_late(hour, true, false, 0),
                 Delivery::At(QUIET_UNTIL),
                 "a timed alert at {hour}:00 still waits for morning",
             );
-            assert_eq!(deliver(hour, false, false), Delivery::At(QUIET_UNTIL));
+            assert_eq!(
+                deliver_late(hour, false, false, 0),
+                Delivery::At(QUIET_UNTIL)
+            );
         }
     }
 
@@ -662,7 +661,7 @@ mod budget {
             for timed in [true, false] {
                 for armed in [true, false] {
                     assert_eq!(
-                        deliver(hour, timed, armed),
+                        deliver_late(hour, timed, armed, 0),
                         deliver_late(hour, timed, armed, 0),
                         "deliver is deliver_late with nothing late about it",
                     );
@@ -675,19 +674,23 @@ mod budget {
     fn an_armed_moment_overrides_quiet_hours() {
         // Somebody who set an alarm for 6am meant 6am. A system that decided
         // it knew better would be useless for the one thing an alarm is for.
-        assert_eq!(deliver(6, true, true), Delivery::Now);
-        assert_eq!(deliver(23, true, true), Delivery::Now);
+        assert_eq!(deliver_late(6, true, true, 0), Delivery::Now);
+        assert_eq!(deliver_late(23, true, true, 0), Delivery::Now);
     }
 
     #[test]
     fn the_boundaries_are_where_they_are_written() {
         assert_eq!(
-            deliver(21, true, false),
+            deliver_late(21, true, false, 0),
             Delivery::Now,
             "21:00 is not quiet"
         );
-        assert_eq!(deliver(22, true, false), Delivery::At(QUIET_UNTIL));
-        assert_eq!(deliver(7, true, false), Delivery::Now, "07:00 is morning");
+        assert_eq!(deliver_late(22, true, false, 0), Delivery::At(QUIET_UNTIL));
+        assert_eq!(
+            deliver_late(7, true, false, 0),
+            Delivery::Now,
+            "07:00 is morning"
+        );
     }
 
     /// Everything held is eventually said.
@@ -775,7 +778,7 @@ mod budget {
     #[test]
     fn arriving_at_a_batch_hour_is_the_batch() {
         for b in BATCHES {
-            assert_eq!(deliver(b, false, false), Delivery::Now, "at {b}:00");
+            assert_eq!(deliver_late(b, false, false, 0), Delivery::Now, "at {b}:00");
             assert_eq!(
                 deliver_late(b, true, false, 24 * 60 * 60 * 1000),
                 Delivery::Now,
@@ -787,7 +790,7 @@ mod budget {
     #[test]
     fn a_task_with_a_due_date_is_announced_at_some_point() {
         // The ordinary case, and the one that was silently never delivered.
-        let said_somewhere = (0..24).any(|h| deliver(h, false, false) == Delivery::Now);
+        let said_somewhere = (0..24).any(|h| deliver_late(h, false, false, 0) == Delivery::Now);
         assert!(said_somewhere, "a due date is never announced at any hour");
     }
 
@@ -809,7 +812,7 @@ mod budget {
         for hour in 0..24 {
             for timed in [true, false] {
                 for armed in [true, false] {
-                    if let Delivery::At(h) = deliver(hour, timed, armed) {
+                    if let Delivery::At(h) = deliver_late(hour, timed, armed, 0) {
                         assert!(h < 24, "held until {h}:00, which is not an hour");
                     }
                 }

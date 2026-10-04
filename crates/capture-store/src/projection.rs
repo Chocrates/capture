@@ -664,17 +664,45 @@ const ALERTABLE: &str = "n.text IS NOT NULL
 /// somebody who has declined an item twice has told you, and pressing further
 /// is what §2.7 exists to prevent. A note with no readable text has nothing to
 /// offer. And a note is not due until its interval has elapsed.
-const REVIEW_ELIGIBLE: &str = "n.text IS NOT NULL
+/// Which notes may be offered in review, and when one becomes eligible again.
+///
+/// # The ladder is built from `review::interval_ms`, not restated here
+///
+/// It used to be five milliseconds literals in this string: 86400000, 259200000
+/// and so on, which are exactly 1, 3, 7, 21 and 60 days — exactly what
+/// `interval_ms` returns, written a second time with no arithmetic to read.
+///
+/// That is the shape `tools/unwired.py` was written for and names in its own
+/// docstring: `discovery::backoff` was "replaced at the call site by an
+/// untested copy". Here the tested copy was the orphan and the untested copy
+/// was the one that ran, and nothing anywhere compared them. Either could have
+/// been edited alone and every test would still have passed.
+fn review_eligible() -> String {
+    use std::fmt::Write as _;
+    let mut ladder = String::from("CASE COALESCE(r.engaged, 0)");
+    // The rungs the query names explicitly, and then the one it falls back to.
+    // Kept in step with `interval_ms`'s own arms by asking it for each.
+    for engaged in 0..4u32 {
+        let _ = write!(
+            ladder,
+            "\n                 WHEN {engaged} THEN {}",
+            crate::review::interval_ms(engaged)
+        );
+    }
+    let _ = write!(
+        ladder,
+        "\n                 ELSE {} END",
+        crate::review::interval_ms(4)
+    );
+    format!(
+        "n.text IS NOT NULL
        AND n.muted_until IS NULL
        AND n.redacted_at IS NULL
        AND COALESCE(r.deferred, 0) < 2
        AND (r.last_shown IS NULL
-            OR ?1 - r.last_shown >= CASE COALESCE(r.engaged, 0)
-                 WHEN 0 THEN 86400000
-                 WHEN 1 THEN 259200000
-                 WHEN 2 THEN 604800000
-                 WHEN 3 THEN 1814400000
-                 ELSE 5184000000 END)";
+            OR ?1 - r.last_shown >= {ladder})"
+    )
+}
 
 fn utc() -> capture_time::Zone {
     capture_time::Zone::new("UTC").expect("UTC is always present")
@@ -1477,12 +1505,13 @@ impl Store {
     /// The first tier, and the strongest signal there is: somebody said, in the
     /// note itself, that this was worth coming back to.
     pub fn review_forward(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let eligible = review_eligible();
         let sql = format!(
             "SELECT {NOTE_COLUMNS}
              FROM notes n
              JOIN promotions p ON p.tgt = n.tgt
              LEFT JOIN review r ON r.tgt = n.tgt
-             WHERE {REVIEW_ELIGIBLE}
+             WHERE {eligible}
                AND ((p.start_ms IS NOT NULL AND p.start_ms > ?1)
                  OR (p.start_date IS NOT NULL AND p.start_date > ?3))
              ORDER BY n.created_wall ASC
@@ -1501,11 +1530,12 @@ impl Store {
 
     /// Notes never engaged with since capture, oldest first.
     pub fn review_never_engaged(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let eligible = review_eligible();
         let sql = format!(
             "SELECT {NOTE_COLUMNS}
              FROM notes n
              LEFT JOIN review r ON r.tgt = n.tgt
-             WHERE {REVIEW_ELIGIBLE}
+             WHERE {eligible}
                AND COALESCE(r.engaged, 0) = 0
              ORDER BY n.created_wall ASC
              LIMIT ?2"
@@ -1519,11 +1549,12 @@ impl Store {
     /// (§2.3), so a note captured in this repository is a candidate while you
     /// are in it.
     pub fn review_by_context(&self, now: i64, limit: usize) -> Result<Vec<NoteRow>> {
+        let eligible = review_eligible();
         let sql = format!(
             "SELECT {NOTE_COLUMNS}
              FROM notes n
              LEFT JOIN review r ON r.tgt = n.tgt
-             WHERE {REVIEW_ELIGIBLE}
+             WHERE {eligible}
              ORDER BY n.created_wall ASC
              LIMIT ?2"
         );
@@ -4054,6 +4085,66 @@ pub fn note_folded(store: &Store, events: &[Envelope]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Which generations exist on disk, in order.
+///
+/// The paths are built from a number and were never enumerated, so nothing
+/// could ask what had accumulated — which is how every superseded generation
+/// came to be kept for ever. `rebuild_projection` writes beside the current one
+/// and moves the pointer, correctly, and nothing ever came back for the file it
+/// replaced.
+///
+/// Only names this module writes. A directory holding something else keeps it.
+pub fn generations(base: &Path) -> Result<Vec<u64>> {
+    let dir = base.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(out);
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Exactly `state.<n>.db`, so a sidecar (`-wal`, `-shm`) and anything
+        // else sharing the directory are left alone.
+        if let Some(rest) = name.strip_prefix("state.")
+            && let Some(num) = rest.strip_suffix(".db")
+            && let Ok(n) = num.parse::<u64>()
+        {
+            out.push(n);
+        }
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Remove every generation older than the one before `current`.
+///
+/// Returns how many were removed.
+///
+/// # Why one spare is kept rather than none
+///
+/// A reader does two things that are not one step: it asks `ops` which
+/// generation is current, and it opens that file. §8.8 keeps reads off the
+/// writer lock, so they cannot be made atomic — and that is the right trade,
+/// because a read that needs the writer is a read that fails when the writer
+/// does.
+///
+/// Between those two steps a generation may be superseded. Deleting the file
+/// the moment it stops being current turns that window into a failed read.
+/// Keeping one spare closes it for any realistic reader: to be caught, a read
+/// would have to resolve generation `n` and then be delayed across *two*
+/// rebuilds before opening it, and a rebuild is a full re-fold of the log.
+pub fn discard_superseded(base: &Path, current: u64) -> Result<usize> {
+    let keep = current.saturating_sub(1);
+    let mut n = 0;
+    for g in generations(base)? {
+        if g < keep {
+            discard_generation(base, g)?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Remove a superseded generation.
