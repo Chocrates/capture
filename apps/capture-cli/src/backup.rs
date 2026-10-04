@@ -76,9 +76,38 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
     let flagged: Vec<_> = state.credential_flagged()?;
     let strip: std::collections::BTreeSet<_> = flagged.iter().map(|(id, _)| *id).collect();
 
+    // Notes a redaction names, whether or not the destruction has run yet.
+    //
+    // §1.1 limit 3 says the exporter "applies retained redactions when writing
+    // *new* export files", and it did not: the strip set was credential flags
+    // and nothing else. Redacted content stayed out of exports only
+    // incidentally — once destruction has run, `destroy_bodies` has already
+    // emptied the body, so there is nothing left to write.
+    //
+    // The gap is the interval between ordering and carrying out. Redaction
+    // hides a note from every view immediately and destroys it a window later,
+    // and an export firing in between wrote the full plaintext of a note
+    // already ordered destroyed into a *brand-new* file — one created after the
+    // order, which redaction can never reach afterwards. Nor is the window
+    // necessarily short: §8.7 makes a startup the floor for deferred work, so
+    // with no overlay running the destruction waits for the next command that
+    // writes, and `install.sh --with-export` sets up a daily export.
+    //
+    // From the queue rather than by decoding every RedactBody in the log: the
+    // fold already maintains this, cancellation rule included, and a second
+    // implementation of it here is the shape that has cost this project all
+    // week.
+    let redacted: std::collections::BTreeSet<_> = state
+        .redact_queue()?
+        .into_iter()
+        .filter(|(_, _, _, cancelled)| !cancelled)
+        .map(|(_, tgt, _, _)| tgt)
+        .collect();
+
     let heads = ops.export_heads()?;
     let mut fresh: Vec<Envelope> = Vec::new();
     let mut stripped = 0usize;
+    let mut withheld_by_redaction = 0usize;
 
     // Everything the device physically holds, including what it is refusing to
     // use. A set-aside event occupies a position in its origin's numbering, and
@@ -93,11 +122,21 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
         }
         let touches = e.header.tgt.unwrap_or_else(|| e.header.id());
         let mut e = e;
-        if strip.contains(&touches) && e.body.is_some() {
+        if e.body.is_some() && (strip.contains(&touches) || redacted.contains(&touches)) {
             // Kept in place, emptied. Dropping the event instead would leave a
             // hole in its origin's numbering that nothing can ever fill.
+            //
+            // Counted by reason, because what a person should do about each is
+            // different: a credential flag over-flags on purpose and may be a
+            // false positive to clear, and a redaction is a decision nothing
+            // should undo. One number for both would put "unflag it" beside
+            // notes where that advice is wrong.
+            if strip.contains(&touches) {
+                stripped += 1;
+            } else {
+                withheld_by_redaction += 1;
+            }
             e.body = None;
-            stripped += 1;
         }
         fresh.push(e);
     }
@@ -182,6 +221,17 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
         }
         say!();
         say!("If one of those is an ordinary note:  capture unflag <name>");
+    }
+
+    if withheld_by_redaction > 0 {
+        // Said separately and with no remedy offered. There is nothing to
+        // clear: somebody ordered this destroyed, and the export is doing what
+        // §1.1 says it does.
+        say!();
+        say!(
+            "{withheld_by_redaction} event(s) were written without their text \
+             because a redaction names them."
+        );
     }
     Ok(())
 }

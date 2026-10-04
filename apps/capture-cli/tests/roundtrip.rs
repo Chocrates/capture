@@ -300,3 +300,89 @@ fn a_restore_brings_back_the_structure_too() {
         "and so does a task with a due date: {due}",
     );
 }
+
+// ------------------------------------------- redactions reach the export ----
+//
+// §1.1 limit 3: "The exporter therefore applies retained redactions when
+// writing *new* export files". It did not — the strip set was credential flags
+// and nothing else, and redacted content stayed out of exports only
+// incidentally, because by the time destruction had run the body was already
+// gone.
+//
+// The gap is the interval between ordering a destruction and carrying it out:
+// an export firing in between wrote the full plaintext of a note already
+// ordered destroyed into a brand-new file, one created *after* the order, which
+// redaction can never reach afterwards.
+
+/// Whether a phrase appears anywhere in the export directory's files.
+fn export_contains(s: &Store, needle: &str) -> bool {
+    let dir = s.export_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        if let Ok(bytes) = std::fs::read(e.path())
+            && String::from_utf8_lossy(&bytes).contains(needle)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn an_export_does_not_carry_a_note_already_ordered_destroyed() {
+    let s = Store::fresh("export-redacted");
+    let slug = s.ok(&["+", "the passphrase is correct horse"]);
+    let slug = slug.trim();
+    s.ok(&["settle"]);
+
+    // Ordered, not yet carried out: the window has not elapsed, so the body is
+    // still in the log and this is exactly the interval that leaked.
+    s.ok(&["redact", slug, "--force"]);
+    s.ok(&["export"]);
+
+    assert!(
+        !export_contains(&s, "correct horse"),
+        "an export written after the redaction carried the text anyway"
+    );
+}
+
+#[test]
+fn an_export_still_carries_an_ordinary_note() {
+    // The guard against stripping everything, which would also satisfy the
+    // assertion above.
+    let s = Store::fresh("export-ordinary");
+    s.ok(&["+", "an unremarkable note about tulips"]);
+    s.ok(&["settle"]);
+    s.ok(&["export"]);
+
+    assert!(
+        export_contains(&s, "tulips"),
+        "an ordinary note was withheld from its own backup"
+    );
+}
+
+#[test]
+fn a_cancelled_redaction_exports_whole() {
+    // Cancelling means the note stands, so the export must carry it.
+    let s = Store::fresh("export-cancelled");
+    let slug = s.ok(&["+", "a note about marigolds"]);
+    let slug = slug.trim();
+    s.ok(&["settle"]);
+
+    let out = s.ok(&["redact", slug, "--force"]);
+    // The id the redaction printed, as `--cancel` takes it.
+    let id = out
+        .split_whitespace()
+        .last()
+        .expect("redact prints an id to cancel with")
+        .to_string();
+    s.ok(&["redact", "--cancel", &id]);
+    s.ok(&["export"]);
+
+    assert!(
+        export_contains(&s, "marigolds"),
+        "a cancelled redaction still withheld the note"
+    );
+}
