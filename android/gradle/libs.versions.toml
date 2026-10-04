@@ -6,7 +6,7 @@ agp = "8.5.2"
 kotlin = "2.0.20"
 # The published uniffi runtime must match the generator in capture-ffi. A skew
 # between them produces Kotlin that compiles and fails on the first call.
-jna = "5.14.0"
+jna = "5.17.0"
 androidx-core = "1.13.1"
 androidx-lifecycle = "2.8.4"
 androidx-activity = "1.9.2"
