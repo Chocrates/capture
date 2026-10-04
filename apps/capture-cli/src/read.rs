@@ -1230,7 +1230,7 @@ fn first_line(text: &str) -> String {
 // a serialiser attached to the storage types would make every future field
 // rename a silent breaking change to someone's pipeline.
 
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

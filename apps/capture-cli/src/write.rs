@@ -33,6 +33,7 @@ use capture_store::session::Session;
 
 // One home for what a sigil names; see `read::split_mention`.
 use crate::read::split_mention;
+use crate::read::{now_ms, quote};
 
 /// Resolve a name against the projection, or say it is not there.
 fn find(s: &Session, name: &str) -> Result<EventId> {
@@ -862,4 +863,124 @@ pub fn settle(paths: &StorePaths, json: bool) -> Result<()> {
         n => say!("Read {n} captures."),
     }
     Ok(())
+}
+
+/// Copies kept before a redaction, and bringing one back.
+///
+/// §1.2 keeps a snapshot of what a redaction is about to destroy, for thirty
+/// days, *"so that a misfire is recoverable during the window in which you
+/// would notice it"* — explicitly for the case somebody notices long after the
+/// cancellation window has closed.
+///
+/// Everything around it was built. `take_snapshot` is called before anything is
+/// destroyed, `expire_snapshots` runs on every session open, and `capture
+/// status` reports that the copies exist. The read had no caller at all, so a
+/// plaintext copy of content somebody declared must not exist was kept for a
+/// month, advertised, and unusable. The cost was paid in full and the purpose
+/// was unreachable.
+pub fn recover(paths: StorePaths, id: Option<&str>, json: bool) -> Result<()> {
+    let now = now_ms().max(0) as u64;
+    let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
+    let kept = ops.snapshots(now)?;
+
+    let Some(wanted) = id else {
+        return list_recoverable(&kept, now, json);
+    };
+
+    let matching: Vec<_> = kept
+        .iter()
+        .filter(|s| capture_store::mutate::short(&s.redact).starts_with(wanted))
+        .collect();
+
+    let found = match matching.as_slice() {
+        [one] => *one,
+        [] => {
+            // An id that names nothing and an id whose copy has expired are
+            // different situations, and only one of them is a typo.
+            return Err(Error::NotFound(format!(
+                "no copy is being kept for {wanted} — it may have expired, or the \
+                 redaction may have been cancelled rather than carried out"
+            )));
+        }
+        many => {
+            return Err(Error::Usage(format!(
+                "{} copies start with {wanted}; give more of it",
+                many.len()
+            )));
+        }
+    };
+
+    // A new capture, never a resurrection. The body is gone from the log and
+    // the redaction is *retained* so that it destroys matching events arriving
+    // later — including one carrying this content from a peer. Writing the old
+    // event back would be fought by the system's own machinery, and saying
+    // "restored" would claim the redaction was undone, which is the more
+    // dangerous of the two available lies: somebody would stop looking for the
+    // other copies.
+    let mut s = Session::open(paths.clone())?;
+    let body = capture_store::session::capture_body(&found.text)?;
+    let written = s.capture(&body)?;
+
+    if json {
+        say!("{{\"slug\":{}}}", quote(&written.slug));
+        return Ok(());
+    }
+
+    say!("Written as a new note:  {}", written.slug);
+    say!();
+    say!("The redaction still stands. The original note is still destroyed, and");
+    say!("this is a fresh capture carrying the text the copy held — a different");
+    say!("note, with its own name.");
+    Ok(())
+}
+
+fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool) -> Result<()> {
+    if json {
+        let items: Vec<String> = kept
+            .iter()
+            .map(|s| {
+                format!(
+                    "{{\"id\":{},\"expires_in_ms\":{}}}",
+                    quote(&capture_store::mutate::short(&s.redact)),
+                    s.expires_at.saturating_sub(now)
+                )
+            })
+            .collect();
+        say!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if kept.is_empty() {
+        say!("Nothing is being kept.");
+        say!();
+        say!("A copy is taken before a redaction destroys anything, and expires on");
+        say!("its own. None is inside its retention now.");
+        return Ok(());
+    }
+
+    say!("Copies of content that was destroyed, kept so a misfire is recoverable.");
+    say!();
+    for s in kept {
+        // The first line only. Enough to recognise a note, rather than a second
+        // place the whole of a destroyed note is printed.
+        say!(
+            "  {}  expires in {:<10}  {}",
+            capture_store::mutate::short(&s.redact),
+            ms(s.expires_at.saturating_sub(now)),
+            first_line(&s.text)
+        );
+    }
+    say!();
+    say!("Bring one back with:  capture recover <id>");
+    say!("It is written as a new note; the redaction itself still stands.");
+    Ok(())
+}
+
+/// Coarse enough to decide with, for a retention measured in days.
+fn ms(v: u64) -> String {
+    let hours = v / (60 * 60 * 1000);
+    match hours / 24 {
+        0 => format!("{hours}h"),
+        d => format!("{d}d"),
+    }
 }

@@ -77,6 +77,12 @@ pub enum Command {
     Held {
         json: bool,
     },
+    /// Copies kept before a redaction, and bringing one back.
+    Recover {
+        /// Which redaction, by the prefix it printed. None lists them.
+        id: Option<String>,
+        json: bool,
+    },
     /// An entity's page: what it is called, what backs it, what names it.
     Entity {
         name: String,
@@ -879,6 +885,15 @@ where
         "held" => Ok(Command::Held {
             json: has_json(&args[1..]),
         }),
+        "recover" => {
+            let rest = &args[1..];
+            let json = has_json(rest);
+            // Named by the same prefix `redact --cancel` takes, so the two
+            // recovery routes — inside the window and after it — are reached
+            // the same way.
+            let id = rest.iter().find(|a| *a != "--json").cloned();
+            Ok(Command::Recover { id, json })
+        }
         "rejected" => Ok(Command::Rejected {
             json: has_json(&args[1..]),
         }),
@@ -1245,6 +1260,8 @@ TIME AND TASKS
   capture due                    what will speak, and when
   capture settle                 read captures nothing has read yet
   capture held                   events stored but not folded, and why
+  capture recover                copies kept before a redaction
+  capture recover <id>           write one back as a new note
   capture skip <series> <occ>    not this one; the rule is untouched
                                (unskip puts it back)
   capture tick <tag> <item>      tick one off; untick puts it back
@@ -1563,6 +1580,31 @@ mod tests {
         // A series with no occurrence is the `done` shape, which means a task.
         // There is no task to skip, so it is a refusal rather than a guess.
         assert!(p(&["skip", "standup"]).is_err());
+    }
+
+    #[test]
+    fn recover_takes_an_optional_id() {
+        assert_eq!(
+            p(&["recover"]).unwrap(),
+            Command::Recover {
+                id: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            p(&["recover", "a4f4d4ac"]).unwrap(),
+            Command::Recover {
+                id: Some("a4f4d4ac".into()),
+                json: false
+            }
+        );
+        assert_eq!(
+            p(&["recover", "--json"]).unwrap(),
+            Command::Recover {
+                id: None,
+                json: true
+            }
+        );
     }
 
     #[test]

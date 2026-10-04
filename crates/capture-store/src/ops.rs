@@ -230,6 +230,26 @@ const REFUSALS_BEFORE_UNAVAILABLE: u32 = 3;
 const UNAVAILABLE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Handle to this device's local state.
+/// A copy taken before a redaction, still inside its retention.
+///
+/// Local, never exported, never replicated — the same constraints as the row
+/// it comes from. Carrying the text means a listing can show enough to
+/// recognise a note without a second read, and means the caller decides how
+/// much of it to print.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Snapshot {
+    /// The redaction it was taken before, as `redact --cancel` names one.
+    pub redact: EventId,
+    /// The note it was taken of.
+    pub tgt: EventId,
+    /// When it was taken.
+    pub taken_at: u64,
+    /// When it stops being kept.
+    pub expires_at: u64,
+    /// What was about to be destroyed.
+    pub text: String,
+}
+
 pub struct Ops {
     conn: Connection,
 }
@@ -367,6 +387,48 @@ impl Ops {
             )
             .optional()?;
         Ok(row.map(|b| String::from_utf8_lossy(&b).to_string()))
+    }
+
+    /// Which redactions still have a copy, and what it holds.
+    ///
+    /// `snapshot_count` answered how many and nothing answered *which*, so the
+    /// copies could be reported and never reached. §1.2 puts the whole point of
+    /// keeping them on a misfire being recoverable, and a copy that cannot be
+    /// listed cannot be chosen.
+    ///
+    /// Oldest first: the one about to expire is the one a decision is most
+    /// urgent about.
+    pub fn snapshots(&self, now: u64) -> Result<Vec<Snapshot>> {
+        let mut st = self.conn.prepare(
+            "SELECT redact_evt, tgt, taken_at, expires_at, body FROM snapshots
+             WHERE expires_at > ?1 ORDER BY taken_at",
+        )?;
+        let rows = st.query_map(params![now as i64], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Vec<u8>>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (redact, tgt, taken, expires, body) = r?;
+            if let (Ok(redact), Ok(tgt)) = (
+                <[u8; 32]>::try_from(redact.as_slice()),
+                <[u8; 32]>::try_from(tgt.as_slice()),
+            ) {
+                out.push(Snapshot {
+                    redact: EventId(redact),
+                    tgt: EventId(tgt),
+                    taken_at: taken as u64,
+                    expires_at: expires as u64,
+                    text: String::from_utf8_lossy(&body).to_string(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Discard every snapshot whose retention has elapsed.

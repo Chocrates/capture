@@ -638,15 +638,20 @@ round. No attacker required; one loop in one buggy build does it.
   one that will not enforce it on itself. A per-event cap alone bounds nothing.
 - **Destruction is queued, not immediate.** Receiving replicas mark the target redacted and hide
   it from every view **on ingest, immediately** — that part is not delayed. Physical destruction
-  of the body happens **6 hours after the redact's own HLC**, not 6 hours after local receipt.
+  of the body happens **30 minutes after the redact's own HLC**, not 30 minutes after local receipt.
+The length lives in `capture_core::REDACT_WINDOW_MS` and that constant is the authority: this
+document said six hours in five places while the code said thirty minutes, which is a twelve-fold
+difference in the only safety margin the one irreversible operation has. Corrected here rather
+than in the code, because the code is what people were actually relying on and `capture redact`
+has always printed the true figure.
   Any device may emit `redact_cancel` within that window.
 
 Deriving the deadline from the redact's HLC rather than local arrival matters: with local timers,
-a device that ingests a year-old redaction would grant that plaintext a *fresh* six-hour life on a
+a device that ingests a year-old redaction would grant that plaintext a *fresh* window on a
 brand-new machine, forever, on every future pairing. With an HLC-derived deadline, a redact whose
 window has already closed destroys on ingest — which is also what §1.1's stickiness requires, and
 resolves a contradiction an earlier draft carried between "destroyed on ingest" and "destroyed
-after six hours."
+after the window closes."
 
 **`redact_cancel` is as sticky and as eagerly delivered as `redact`.** An earlier draft made it an
 ordinary fire-and-forget event, which put the safety mechanism on the least reliable channel in
@@ -751,7 +756,7 @@ Resolved by making the two intents distinct operations rather than hoping one co
 | `restore --ignore-redactions-after T` | only those issued at or before T | Deliberate undo of a redact you regret, from a backup predating it. |
 
 The second is a conscious, explicitly-flagged act with a stated timestamp, not a default. The
-6-hour destruction window and the pre-redact snapshot below both cover the common case; this
+destruction window and the pre-redact snapshot below both cover the common case; this
 exists for the case where you notice a month later.
 
 **Offsite is out of scope.** Point restic, borg, rsync or a copy job at the export directory.
@@ -2652,7 +2657,7 @@ accuracy wins.
 #### One live element
 
 A **pending redaction** is time-boxed and actionable, so it gets a live countdown with a cancel
-affordance for the six hours its window is open (§1.1), then disappears entirely. It is the only
+affordance for as long as its window is open (§1.1), then disappears entirely. It is the only
 place in the system where a delay *is* the safety mechanism, which is what earns it the only
 persistent live element in the interface.
 
@@ -3106,7 +3111,7 @@ everything on a machine with a disk costs little, and discards nothing: tone, he
 whatever the transcript got wrong.
 
 **Redaction is the only way a blob is destroyed**, and it is explicit, bounded, and reversible
-for six hours (§1.1). Dropping the last reference to a blob overwrites and unlinks it.
+for the cancellation window (§1.1). Dropping the last reference to a blob overwrites and unlinks it.
 
 The desktop's policy otherwise: fetch everything, it is the archive of record.
 
@@ -3243,7 +3248,7 @@ versions shown side by side. No modal dialog, no blocking, no interruption at ca
 | 12 | **Projection corruption, or a projection schema change** | `state.db` is disposable. Delete and re-fold `events.db`. This is also the entire migration strategy (§1.3) — there is no migration code, only re-folding. |
 | 12a | **Event kind or field the client does not understand** | Quarantined: stored, verified, `heads` advanced, **relayed onward**, excluded from the fold. Unquarantines and folds after an upgrade. A device is never refused sync for being too old or too new (§1.3). |
 | 13 | **Blob evicted locally** (phone LRU, desktop off) | The note still renders with transcript and metadata; audio shows as "not local," fetched when a peer holding it appears. Graceful, not an error — eviction is not deletion. |
-| 13a | **Blob destroyed by age or policy** | Cannot happen. Global expiry was removed (§5.6); the only path that destroys a blob is an explicit `redact`, which is scope-capped and cancellable for six hours. |
+| 13a | **Blob destroyed by age or policy** | Cannot happen. Global expiry was removed (§5.6); the only path that destroys a blob is an explicit `redact`, which is scope-capped and cancellable for the window. |
 | 14 | **Device lost or stolen** | Retire it from any other device. Its past events stay (they are real notes); anything beyond the head named in the retirement is excluded by the hash chain regardless of claimed timestamps, and live sessions with it are torn down (§5.3). Data on the lost device itself is only protected by that device's own disk encryption — BSP cannot revoke what has already been replicated. Strengthening this (at-rest encryption, app lock, expiry wipe) is deferred as a cluster in §9.14. |
 | 15 | **Device reinstalled** (fresh key, same hardware) | Joins as a genuinely new origin. The old origin is retired and sealed once peers confirm they hold its full stream, so the version vector tracks live devices plus a constant rather than lifetime device history. |
 | 16 | **Retired device still running and appending** | Events beyond the head named in `device_retire` are excluded by the hash chain regardless of claimed timestamps, and are quarantined rather than rejected so no `seq` gap forms. Live sessions with it are torn down on ingest of the retirement (§5.3). |
@@ -3264,7 +3269,7 @@ versions shown side by side. No modal dialog, no blocking, no interruption at ca
 | 26b | **Peer unreachable when a redact is issued** | Queued and retried with backoff across restarts; the peer is shown as outstanding in the UI, so incomplete propagation is visible rather than assumed. |
 | 26c | **Device never returns after a redact** | It keeps its copy. Unfixable in any peer-to-peer design; stated rather than papered over. |
 | 26d | **Edit races a redact on the same note** | Redact wins unconditionally. The edit is retained as an event but its body is destroyed like any other. |
-| 26h | **One device issues a mass redact** (bug or compromise) | Bounded: 64 targets per redact, and destruction is queued for six hours during which any device can `redact_cancel`. Content is hidden immediately, so the delay costs nothing against the real threat while making a runaway loop recoverable (§1.1). |
+| 26h | **One device issues a mass redact** (bug or compromise) | Bounded: 64 targets per redact, and destruction is queued for the cancellation window, during which any device can `redact_cancel`. Content is hidden immediately, so the delay costs nothing against the real threat while making a runaway loop recoverable (§1.1). |
 | 26i | **Restore replays events that were later redacted** | They are destroyed on arrival — correct for ordinary recovery. Undoing a regretted redact is a separate, explicitly-flagged operation with a stated cutoff (§1.2), not a silent default. |
 | 26e | **Bad events replicated everywhere by a buggy client** | Not a sync failure — the protocol is working as designed. Recovery is restore-from-export (§1.2), which is why replication alone is not treated as a backup. |
 | 26f | **All devices lost at once** | Export directory plus whatever external tool is pointed at it. Out of the tool's scope by choice. |
@@ -3610,7 +3615,7 @@ destructive gate in the system and warns it must not be trained away — and a f
 is how `while read s; do capture redact --force "$s"; done` becomes the "one loop in one buggy
 build" §1.1 names as the threat. So `--force` is explicitly defined as: the 64-target cap holds,
 the receiver-side rate limit holds (256 targets/hour/origin, then held for confirmation), the
-six-hour window holds, and the pre-redact snapshot is still written. It suppresses a prompt and
+cancellation window holds, and the pre-redact snapshot is still written. It suppresses a prompt and
 nothing else. `capture redact --cancel` accepts a redact event id, and `--cancel --all-since <t>`
 exists precisely because cancelling a runaway loop by hand would otherwise be impossible inside
 the window.
@@ -3623,7 +3628,7 @@ the condition that actually means something is wrong.
 
 ### 8.7 Due work — who runs the clock
 
-Several behaviours are time-driven: redaction destruction six hours after the redaction's own HLC,
+Several behaviours are time-driven: redaction destruction one window after the redaction's own HLC,
 snapshot expiry at thirty days, dead-gesture detection after an idle period. M1 has no daemon — a
 resident overlay, an intermittently-running desktop app, and a transient CLI — and an earlier draft
 left the question of who owns them unanswered, which would have meant "destroyed whenever you
