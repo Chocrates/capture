@@ -271,19 +271,6 @@ impl Log {
         Ok(n > 0)
     }
 
-    /// Whether this device holds the event and is refusing to use it.
-    pub fn is_aside(&self, id: &EventId) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT aside FROM events WHERE id = ?1",
-                params![id.0.to_vec()],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten())
-    }
-
     /// Append an event authored locally.
     ///
     /// Local events are always the next in sequence, so this is ingest without
@@ -1121,10 +1108,10 @@ mod tests {
                 .any(|e| e.header.id() == aside_id),
             "the event was not stored at all"
         );
-        assert_eq!(
-            log.is_aside(&aside_id).unwrap().as_deref(),
-            Some("post_retire")
-        );
+        let aside = log.aside_rows().unwrap();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(aside[0].id, aside_id);
+        assert_eq!(aside[0].reason, "post_retire");
 
         // Releasing it is the reissued-retirement remedy, and needs no peer.
         assert!(log.release_aside(&aside_id).unwrap());

@@ -946,8 +946,15 @@ mod tests {
                 .any(|(id, _, _)| *id == second.header.id()),
             "after a rebuild the reissued retirement released nothing"
         );
+        // The log's own mark, not only the report. Releasing the row without
+        // clearing the mark would look like success and change nothing: the
+        // event would stay out of every fold with nothing saying so.
         assert!(
-            b.log.is_aside(&second.header.id()).unwrap().is_none(),
+            !b.log
+                .aside_rows()
+                .unwrap()
+                .iter()
+                .any(|r| r.id == second.header.id()),
             "the event is still marked aside in the log"
         );
     }

@@ -27,4 +27,3 @@ ends: the only way to obtain an End from Pair, capture-sync's in-src test transp
 # have, and listed rather than fixed because each needs its own change.
 
 evict: DESIGN §5.6 makes LRU blob eviction on constrained devices a shipped behaviour — "constrained devices evict on an LRU with a size cap and a 30-day default" — and no surface, policy or caller exists. The phone never frees blob space. Recorded 2026-10-03; needs its own change, with blobs::destroy (see below).
-is_aside: the only read of the log's durable `aside` column. Every reader goes to the projection's `quarantine` table instead, and `projection::rebuild` never repopulates it — so after `capture rebuild` the set-aside events are invisible to every surface and `Gate::reconsider`'s re-admission remedy finds nothing to re-admit. Recorded 2026-10-03; needs its own change.
