@@ -984,3 +984,52 @@ fn ms(v: u64) -> String {
         d => format!("{d}d"),
     }
 }
+
+/// Let a destruction the ceiling held go ahead.
+///
+/// §1.1 holds what is over the ceiling *pending explicit confirmation*, and
+/// this is the confirming. It is deliberately a second command: the ceiling's
+/// whole shape is that it costs a deliberate act to release and nothing to
+/// ignore, so a person clearing out a year of notes types one more line and a
+/// runaway loop stops and stays stopped.
+///
+/// Local, and never an event. A release says this device is satisfied, which is
+/// not a fact about the archive — and a compromised device able to emit
+/// releases would release its own runaway, which is handing the attacker the
+/// key to the lock.
+pub fn release_redaction(paths: StorePaths, id_prefix: &str) -> Result<()> {
+    let ops = capture_store::ops::Ops::open(&paths.ops)?;
+    let held = ops.held_redactions()?;
+
+    let mut matching: Vec<_> = held
+        .iter()
+        .map(|(r, _)| *r)
+        .filter(|r| capture_store::mutate::short(r).starts_with(id_prefix))
+        .collect();
+    matching.sort_by_key(|r| r.0);
+    matching.dedup();
+
+    let redact = match matching.as_slice() {
+        [one] => *one,
+        [] => {
+            return Err(Error::NotFound(format!(
+                "nothing is being held under {id_prefix} — capture status lists what is"
+            )));
+        }
+        many => {
+            return Err(Error::Usage(format!(
+                "{} held redactions start with {id_prefix}; give more of it",
+                many.len()
+            )));
+        }
+    };
+
+    let n = held.iter().filter(|(r, _)| *r == redact).count();
+    ops.release_redaction(&redact, now_ms().max(0) as u64)?;
+
+    say!("Released. {n} destruction(s) will be carried out on the next drain.");
+    say!();
+    say!("Nothing has been destroyed yet. It happens when the archive next");
+    say!("settles — or immediately, with:  capture settle");
+    Ok(())
+}

@@ -16,6 +16,22 @@ use capture_core::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// One of an origin's redactions, for the destruction ceiling.
+///
+/// Ordered by `(at, seq)`, which is a total order within one origin, because
+/// the ceiling has to be able to say which redactions came *before* this one.
+/// §1.1 holds "further" redactions beyond the bound — so the first that fit
+/// proceed and the rest wait, and that needs an order rather than a set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RedactionIssued {
+    /// When it was issued, by its own clock.
+    pub at: u64,
+    /// Its position in the origin's sequence, which breaks ties on `at`.
+    pub seq: u64,
+    /// How many targets it names.
+    pub targets: usize,
+}
+
 /// An event the log is holding and refusing to use.
 ///
 /// Authentic, occupying its position, and excluded from every fold. What the
@@ -570,6 +586,56 @@ impl Log {
     /// it along with everything else leaves a note whose content is gone and
     /// nothing anywhere saying why, or that anything further should be
     /// destroyed when it turns up.
+    /// One origin's redactions, with how many targets each names.
+    ///
+    /// The ceiling's history, and the log is the only place it can come from.
+    /// Redaction bodies are *retained* — `destroy_bodies` excludes `REDACT` and
+    /// `REDACT_CANCEL` — precisely so a redaction goes on destroying matching
+    /// events that arrive later, which is what leaves the targets countable
+    /// long after the notes they named are gone.
+    ///
+    /// It used to come from the projection, from a table redactions never
+    /// reach, so it was empty and the ceiling never fired. The projection is
+    /// also the wrong place on principle: it is derived and rebuilt, and a
+    /// ceiling that resets when a projection is rebuilt is not a ceiling.
+    ///
+    /// A body this build cannot decode counts as one target. It is a redaction
+    /// either way, and counting it as nothing would let an unreadable body be
+    /// the way past the bound.
+    pub fn redactions_by(&self, dev: &Dev) -> Result<Vec<RedactionIssued>> {
+        let mut st = self.conn.prepare(
+            "SELECT hlc_wall, seq, body FROM events
+             WHERE kind = ?1 AND dev = ?2 AND body IS NOT NULL
+             ORDER BY hlc_wall, seq",
+        )?;
+        let rows = st.query_map(
+            params![
+                capture_core::event::Kind::REDACT.0 as i64,
+                crate::projection::dev_hex(dev)
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (at, seq, body) = r?;
+            let targets = minicbor::decode::<capture_core::body::RedactBody>(&body)
+                .map(|b| b.targets.len().max(1))
+                .unwrap_or(1);
+            out.push(RedactionIssued {
+                at: at as u64,
+                seq: seq as u64,
+                targets,
+            });
+        }
+        Ok(out)
+    }
+
     /// Every event this device has set aside, and why.
     ///
     /// The authoritative record. `aside` is a column on the log, which is never

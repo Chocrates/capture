@@ -87,6 +87,26 @@ CREATE TABLE IF NOT EXISTS redact_intent (
 -- be cancelled is real. Local by definition: they are never replicated, and a
 -- device that rebuilt from the log would have no way to recreate content the
 -- log no longer contains.
+-- Redactions the ceiling stopped, and the ones somebody has said to go ahead
+-- with anyway.
+--
+-- Local, and deliberately not events. A release says only that this device is
+-- satisfied, which is not a fact about the archive — and a compromised device
+-- able to emit releases would simply release its own runaway, handing the
+-- attacker the key to the lock. Each replica decides for itself, which is what
+-- §1.1 means by the bound being enforced by the receiver.
+CREATE TABLE IF NOT EXISTS held_redactions (
+  redact_evt BLOB NOT NULL,
+  tgt        BLOB NOT NULL,
+  first_held INTEGER NOT NULL,
+  PRIMARY KEY (redact_evt, tgt)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS released_redactions (
+  redact_evt BLOB PRIMARY KEY,
+  released_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS snapshots (
   redact_evt BLOB NOT NULL,
   tgt        BLOB NOT NULL,
@@ -347,6 +367,73 @@ impl Ops {
             ],
         )?;
         Ok(())
+    }
+
+    /// Record that the ceiling stopped this destruction.
+    ///
+    /// Written so a surface can say what is waiting. `Drained.held` was
+    /// incremented and read by nothing, so a ceiling that fired — which this
+    /// one never did — would have stopped an archive in a state no surface
+    /// explained.
+    pub fn hold_redaction(&self, redact: &EventId, tgt: &EventId, at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO held_redactions (redact_evt, tgt, first_held)
+             VALUES (?1,?2,?3)",
+            params![redact.0.to_vec(), tgt.0.to_vec(), at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// What the ceiling is holding, as (redaction, target) pairs.
+    pub fn held_redactions(&self) -> Result<Vec<(EventId, EventId)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT redact_evt, tgt FROM held_redactions ORDER BY first_held")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (a, b) = r?;
+            if let (Ok(a), Ok(b)) = (
+                <[u8; 32]>::try_from(a.as_slice()),
+                <[u8; 32]>::try_from(b.as_slice()),
+            ) {
+                out.push((EventId(a), EventId(b)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Say that this redaction may proceed despite the ceiling.
+    ///
+    /// §1.1's "explicit confirmation". It costs a deliberate act, which is the
+    /// shape the ceiling wants: a person clearing out a year of notes types one
+    /// more command, and a runaway loop stops and stays stopped.
+    pub fn release_redaction(&self, redact: &EventId, at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO released_redactions (redact_evt, released_at)
+             VALUES (?1,?2)",
+            params![redact.0.to_vec(), at as i64],
+        )?;
+        self.conn.execute(
+            "DELETE FROM held_redactions WHERE redact_evt = ?1",
+            params![redact.0.to_vec()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether somebody has said this one may proceed.
+    pub fn redaction_released(&self, redact: &EventId) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM released_redactions WHERE redact_evt = ?1",
+                params![redact.0.to_vec()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Keep a copy of what is about to be destroyed.

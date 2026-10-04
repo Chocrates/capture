@@ -86,6 +86,7 @@ fn run(command: Command) -> Result<()> {
         Command::Settle { json } => write::settle(&paths()?, json),
         Command::Held { json } => ops::held(&paths()?, json),
         Command::Recover { id, json } => write::recover(paths()?, id.as_deref(), json),
+        Command::ReleaseRedaction { id } => write::release_redaction(paths()?, &id),
         Command::Skip { name, occ, skipped } => write::skip(&paths()?, &name, occ, skipped),
         Command::List { tag, json } => read::list(&paths()?, &tag, json),
         Command::Due { json } => read::due(&paths()?, json),

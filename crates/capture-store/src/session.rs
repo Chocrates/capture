@@ -592,30 +592,84 @@ impl Session {
     /// destruction was *queued* — which is indistinguishable from the content
     /// still being on disk, and is the one outcome the feature exists to
     /// prevent.
+    /// How much this redaction's origin named around the time it did, if that
+    /// is over the ceiling.
+    ///
+    /// `None` means proceed. `Some(already)` is how many targets the origin had
+    /// already named inside the window, which is what a surface reports.
+    ///
+    /// A redaction whose event cannot be found is not held: it is queued, so it
+    /// was folded, and refusing to destroy something because its own event has
+    /// gone missing would turn a damaged log into a stuck one.
+    fn over_ceiling(&self, redact: &capture_core::EventId) -> Result<Option<usize>> {
+        let Some(e) = self.log.by_id(redact)? else {
+            return Ok(None);
+        };
+        let targets = e
+            .body
+            .as_ref()
+            .and_then(|b| minicbor::decode::<capture_core::body::RedactBody>(b).ok())
+            .map(|b| b.targets.len().max(1))
+            .unwrap_or(1);
+
+        // Only what this origin issued *before* this one.
+        //
+        // §1.1 holds "further" redactions beyond the bound, which means the
+        // ones that fit proceed and the rest wait. Counting every redaction in
+        // the window regardless of order makes the check order-independent, so
+        // with 266 of them each sees the other 265 and *all* are held — no
+        // first 256, and a bulk clear-out that is one over the line stops
+        // completely rather than stopping where the line is. That is what the
+        // first version did, and the test caught it.
+        //
+        // `(at, seq)` is a total order within one origin, so every replica
+        // picks the same ones to hold.
+        let before: Vec<crate::ratelimit::Issued> = self
+            .log
+            .redactions_by(&e.header.dev)?
+            .into_iter()
+            .filter(|r| (r.at, r.seq) < (e.header.hlc.wall, e.header.seq))
+            .map(|r| (r.at, r.targets))
+            .collect();
+
+        match crate::ratelimit::check(&before, targets, e.header.hlc.wall) {
+            crate::ratelimit::Verdict::Hold { already } => Ok(Some(already)),
+            crate::ratelimit::Verdict::Proceed => Ok(None),
+        }
+    }
+
     pub fn drain_due_at(&mut self, now: u64) -> Result<crate::due::Drained> {
         let ops = Ops::open(&self.paths.ops)?;
         let mut done = crate::due::Drained::default();
 
-        // What each origin has already destroyed, for the ceiling below.
-        let history = self.state.redaction_history()?;
-
         for work in crate::due::due(&self.state.redact_queue()?, now) {
             match work {
                 crate::due::Work::Destroy { redact, target } => {
-                    // The ceiling is checked here, at the moment of
-                    // destruction, rather than when the redaction was written.
-                    // A redaction can arrive from another device long after it
-                    // was issued, and what matters is how much is being
-                    // destroyed *now* — a hundred redactions arriving together
-                    // after a month offline is exactly the shape of the runaway
-                    // this bounds, whatever their timestamps say.
-                    if let crate::ratelimit::Verdict::Hold { already } =
-                        crate::ratelimit::check(&history, 1, now)
+                    // The ceiling, asked about the origin that issued this and
+                    // measured around *its* timestamp rather than the clock
+                    // now.
+                    //
+                    // Both halves used to be wrong. The history came from a
+                    // projection table redactions never reach, so it was always
+                    // empty and the ceiling never once fired — 400 redactions
+                    // in a minute produced a history of zero rows and a verdict
+                    // of Proceed. And the window was measured from the drain,
+                    // so a runaway's thousand redactions arriving after a month
+                    // offline would each score nothing and all proceed, which
+                    // is the receiving-replica case §1.1 says the bound is for.
+                    //
+                    // A rate is a fact about when things were issued. Measuring
+                    // it that way also makes two replicas draining the same
+                    // batch at different moments reach the same verdict, which
+                    // a receiver-enforced bound needs.
+                    if !ops.redaction_released(&redact)?
+                        && let Some(held) = self.over_ceiling(&redact)?
                     {
                         tracing::warn!(
-                            already,
-                            "redaction held: this origin has destroyed a great deal in the last hour"
+                            already = held,
+                            "redaction held: this origin named a great deal within an hour"
                         );
+                        ops.hold_redaction(&redact, &target, now)?;
                         done.held += 1;
                         continue;
                     }

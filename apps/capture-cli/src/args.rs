@@ -77,6 +77,10 @@ pub enum Command {
     Held {
         json: bool,
     },
+    /// Let a redaction the ceiling held go ahead.
+    ReleaseRedaction {
+        id: String,
+    },
     /// Copies kept before a redaction, and bringing one back.
     Recover {
         /// Which redaction, by the prefix it printed. None lists them.
@@ -904,6 +908,20 @@ where
         "unflag" => one_name(&args[1..], "unflag", |name, _| Command::Unflag { name }),
         "redact" => {
             let rest = &args[1..];
+            // Beside `--cancel` rather than a command of its own: both are
+            // things you do to a redaction by the id it printed, and putting
+            // them together is what makes the pair findable.
+            if let Some(i) = rest.iter().position(|a| a == "--release") {
+                let Some(id) = rest.get(i + 1) else {
+                    return Err(Bad::Value {
+                        command: "redact".into(),
+                        problem: "--release needs the id the redaction printed, \
+                                  as capture status lists it"
+                            .into(),
+                    });
+                };
+                return Ok(Command::ReleaseRedaction { id: id.clone() });
+            }
             if let Some(i) = rest.iter().position(|a| a == "--cancel") {
                 if rest.get(i + 1).map(String::as_str) == Some("--all-since") {
                     let Some(v) = rest.get(i + 2) else {
@@ -1260,6 +1278,7 @@ TIME AND TASKS
   capture due                    what will speak, and when
   capture settle                 read captures nothing has read yet
   capture held                   events stored but not folded, and why
+  capture redact --release <id>  let a destruction the ceiling held go ahead
   capture recover                copies kept before a redaction
   capture recover <id>           write one back as a new note
   capture skip <series> <occ>    not this one; the rule is untouched

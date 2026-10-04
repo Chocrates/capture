@@ -437,6 +437,27 @@ pub fn status(paths: &StorePaths) -> Result<()> {
             worth_knowing.push(format!("{n} event(s) set aside: {reason}"));
         }
     }
+    // Destruction the ceiling stopped. Tier one because it is waiting on a
+    // person: §1.1 holds what is over the ceiling "pending explicit
+    // confirmation", and a hold nobody is told about is an archive stuck in a
+    // state no surface explains.
+    let held_redactions = ops.held_redactions()?;
+    if !held_redactions.is_empty() {
+        let mut which: Vec<String> = held_redactions
+            .iter()
+            .map(|(r, _)| capture_store::mutate::short(r))
+            .collect();
+        which.sort();
+        which.dedup();
+        attention.push(format!(
+            "{} destruction(s) held: one origin named a great deal within an hour.\n\
+             Nothing was destroyed. If you meant it:  capture redact --release <id>\n\
+             Waiting: {}",
+            held_redactions.len(),
+            which.join(", ")
+        ));
+    }
+
     let snapshots = ops.snapshot_count(now)?;
     if snapshots > 0 {
         // Worth knowing rather than worth acting on. These are plaintext copies

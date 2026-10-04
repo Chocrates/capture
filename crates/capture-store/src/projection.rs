@@ -2752,27 +2752,6 @@ impl Store {
         Ok(out)
     }
 
-    /// When redactions were issued, and how many targets each named.
-    ///
-    /// Feeds the hourly ceiling. Derived from the log like everything else
-    /// here, so a restored device rebuilds the history rather than starting
-    /// with a clean allowance — which is what a device that had just been
-    /// compromised would otherwise get by being restored.
-    pub fn redaction_history(&self) -> Result<Vec<(u64, usize)>> {
-        let mut st = self.conn.prepare(
-            "SELECT v.hlc_wall, COUNT(*) FROM note_versions v
-             WHERE v.kind = ?1 GROUP BY v.event_id, v.hlc_wall",
-        )?;
-        let rows = st.query_map(params![capture_core::event::Kind::REDACT.0 as i64], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as usize))
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
     /// Redactions waiting for their window to elapse.
     ///
     /// Kept here rather than in local state, and that placement is the whole
