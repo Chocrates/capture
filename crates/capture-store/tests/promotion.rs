@@ -99,6 +99,32 @@ fn promotion_never_touches_the_captured_text() {
 }
 
 #[test]
+fn a_marker_that_could_not_be_read_still_keeps_the_text() {
+    // The recognizer refuses to guess at a `>` marker it cannot read, and the
+    // refusal must cost the person nothing: §3.1.3's verbatim guarantee is what
+    // makes a reading that declined to happen survivable, exactly as it makes a
+    // wrong one survivable. Asserted here rather than in capture-parse because
+    // that crate takes a `&str` and returns no text — it cannot alter a capture
+    // even in principle, so the claim is only observable once stored.
+    let sc = Scratch::new("unreadable-marker");
+    let p = sc.paths();
+    let text = "review the draft thursday >asdf";
+    let slug = capture(&p, text);
+
+    let mut s = Session::open_for_capture(p.clone()).unwrap();
+    promote::sweep(&mut s).unwrap();
+    drop(s);
+
+    let n = note_of(&p, &slug);
+    assert_eq!(n.text.as_deref(), Some(text), "the text was rewritten");
+    assert!(
+        n.promotion.is_none(),
+        "an unreadable marker promoted something anyway: {:?}",
+        n.promotion
+    );
+}
+
+#[test]
 fn sweeping_twice_writes_nothing_the_second_time() {
     // A sweep that re-promoted everything it had already promoted would add an
     // event per note per run, forever.

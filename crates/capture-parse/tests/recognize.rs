@@ -572,6 +572,104 @@ fn a_sigil_date_is_still_fully_confident() {
     assert_eq!(read("dentist >2026-09-20").confidence, 100);
 }
 
+// NOW is Monday 1 June 2026, so Thursday is the 4th and Friday the 5th. The
+// pair is deliberate: these tests are about a sigil and the prose naming
+// *different* days, which nothing tested in any spelling before — every sigil
+// test above uses an ISO date, where the defect cannot appear.
+
+#[test]
+fn a_sigil_weekday_beats_the_prose_date() {
+    // The grammar has always promised `">" ( iso_date | day_ref )` and
+    // `day_ref` had no implementation, so the marker was recorded and dropped
+    // and the prose supplied a date instead — the inference §3.1.1 says shall
+    // not be recorded at all when a sigil disagrees with it. Somebody writing
+    // `>fri` to correct a line that says "thursday" got Thursday.
+    match read("dentist thursday >fri").shape {
+        Shape::Point(When::Date(d)) => assert_eq!(format!("{d}"), "2026-06-05"),
+        other => panic!("expected the coming Friday, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sigil_weekday_is_a_date_at_all() {
+    // Not merely the wrong date: with nothing in the prose to fall back on,
+    // an explicitly dated capture came out undated and unconfident.
+    let r = read("meeting >fri");
+    assert_eq!(
+        r.confidence, 100,
+        "the marker was written, so there is nothing to be unsure about"
+    );
+    match r.shape {
+        Shape::Point(When::Date(d)) => assert_eq!(format!("{d}"), "2026-06-05"),
+        other => panic!("expected the coming Friday, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sigil_day_word_is_read() {
+    match read("call the bank >tomorrow").shape {
+        Shape::Task { due: Some(d) } => assert_eq!(format!("{d}"), "2026-06-02"),
+        other => panic!("expected a task due tomorrow, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_sigil_and_the_prose_read_a_weekday_the_same_way() {
+    // The test that fails if somebody later gives the sigil a weekday rule of
+    // its own. "Which Friday is friday" is one decision, and a second copy of
+    // it is free to drift from the first — `make duplicated` cannot see a
+    // divergence between two *correct-looking* implementations, only this can.
+    let sigil = read(">friday").shape;
+    let prose = read("friday").shape;
+    assert_eq!(
+        sigil, prose,
+        "the marker and the prose named different days"
+    );
+}
+
+#[test]
+fn a_marker_that_names_nothing_readable_does_not_let_the_prose_decide() {
+    // The defect, in its general form. The marker could not be followed, so
+    // the honest answer is no date — not the date somebody was overriding.
+    let r = read("review the draft thursday >asdf");
+    match r.shape {
+        Shape::Task { due: None } | Shape::Nothing => {}
+        other => panic!("expected no date, got {other:?}"),
+    }
+    assert!(
+        r.confidence < (CONFIDENCE_FLOOR * 100.0) as u32,
+        "an unreadable marker promoted something anyway"
+    );
+}
+
+#[test]
+fn a_word_that_merely_begins_like_a_weekday_is_not_one() {
+    // `weekday_bit` matches "sat", "mon" and "sun" as three-letter prefixes,
+    // which is safe only behind the scanner's closed-list classification.
+    // Reached straight from a marker value it would read every one of these as
+    // a day. This is the test that holds the vocabulary closed (§3.1.5).
+    for text in [
+        "launch the >satellite",
+        "check the >monitor",
+        "watch the >sunset",
+    ] {
+        match read(text).shape {
+            Shape::Nothing | Shape::Task { due: None } => {}
+            other => panic!("{text:?} named a day: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn vocabulary_not_yet_admitted_stays_unreadable() {
+    // Widening what a day reference may say is a deliberate edit, not a
+    // runtime inference. `>q2` reads as nothing until somebody decides it does.
+    match read("plan the offsite >q2").shape {
+        Shape::Nothing | Shape::Task { due: None } => {}
+        other => panic!("expected no date, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_date_written_in_full_is_read_in_prose() {
     // A hyphen between digits is the range operator, so `2026-09-20` used to be

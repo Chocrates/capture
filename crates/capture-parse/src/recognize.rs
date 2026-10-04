@@ -218,7 +218,9 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
     // *which date*, the verb says *what kind of thing this is*, and nothing
     // about reading both makes an inference compete with a sigil. The date it
     // names is the date, at full confidence, either way.
-    if let Some(d) = markers.date.as_deref().and_then(FloatingDate::parse) {
+    if let Some(v) = markers.date.as_deref()
+        && let Some(d) = sigil_day(v, now, zone)
+    {
         return Recognition {
             shape: if head_is_verb {
                 Shape::Task { due: Some(d) }
@@ -231,7 +233,24 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         };
     }
 
-    if let Some((shape, confidence)) = temporal(&tokens, now, zone, head_is_verb) {
+    // A marker that named nothing readable reaches here, and the grammar tier
+    // is skipped for it. Falling through to the prose is what the first version
+    // did, and it is the defect: `>asdf` beside the word "thursday" promoted
+    // Thursday, confidently and silently. A marker is an instruction, and an
+    // instruction that could not be followed is not permission to substitute a
+    // different answer (§3.1.5).
+    //
+    // Skipped rather than consulted-and-filtered: the tier returns a shape and
+    // a confidence together — a recurrence, a range, a point — and picking the
+    // date back out of a shape afterwards is the kind of partial undo that goes
+    // wrong the next time a shape is added.
+    //
+    // The capture is not refused and its text is untouched (§3.1, §3.1.3). It
+    // simply carries no date, and a task verb still reads as a task with none —
+    // below the floor, so it offers rather than asserts.
+    if markers.date.is_none()
+        && let Some((shape, confidence)) = temporal(&tokens, now, zone, head_is_verb)
+    {
         return Recognition {
             shape,
             confidence,
@@ -253,6 +272,35 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         markers,
         grammar: crate::GRAMMAR_VERSION,
     }
+}
+
+/// The day a `>` marker names: a full date, a weekday, or a day word.
+///
+/// The published grammar has always said `">" ( iso_date | day_ref )`, and
+/// `day_ref` existed nowhere else in the repo. Only the ISO spelling was read,
+/// so every other one was recorded in `markers.date` and then dropped.
+///
+/// A weekday and a day word resolve through `next_weekday` and `day_word` —
+/// the same two the grammar tier uses for a bare `friday` or `tomorrow`. That
+/// is deliberate rather than convenient: two spellings of "which Friday is
+/// Friday" is one decision made twice, and the second copy is free to drift
+/// from the first.
+///
+/// Matched against `WEEKDAYS` by whole word, not through `weekday_bit`. That
+/// helper's three-letter `starts_with` is safe where it is used, because the
+/// scanner has already classified the token against the closed list; reached
+/// straight from a marker value it reads `>satellite` as Saturday, `>monitor`
+/// as Monday and `>sunset` as Sunday — the approximate matching of an unlisted
+/// word that §3.1.5 forbids in as many words.
+fn sigil_day(v: &str, now: i64, zone: Zone) -> Option<FloatingDate> {
+    if let Some(d) = FloatingDate::parse(v) {
+        return Some(d);
+    }
+    let word = v.to_ascii_lowercase();
+    if crate::WEEKDAYS.iter().any(|k| k.word == word) {
+        return next_weekday(now, zone, &word);
+    }
+    day_word(now, zone, &word)
 }
 
 /// Collect the explicit markers.

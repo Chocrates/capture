@@ -111,7 +111,21 @@ pub use token::{Class, Token, tokenize};
 /// Every capture parsed under 4 or earlier is read again, which is the point:
 /// anything that became an appointment when it was meant to be owed is
 /// corrected by the sweep. A pinned promotion still wins, as always.
-pub const GRAMMAR_VERSION: u32 = 5;
+///
+/// Version 6 reads a day behind the sigil, which the grammar above has promised
+/// all along — `">" ( iso_date | day_ref )` — while `day_ref` existed nowhere
+/// else in the repo. The same pattern as 5, one layer in: a marker that was not
+/// exactly ten bytes was recorded and dropped, and the prose then supplied a
+/// date of its own. So `dentist thursday >fri` promoted **Thursday**, which is
+/// the inference §3.1.1 says shall not be recorded at all when a sigil
+/// disagrees with it — the person had written the marker to prevent exactly
+/// that reading. A marker naming nothing readable now carries no date rather
+/// than deferring to the prose.
+///
+/// This is why the version rises rather than the fix shipping quietly: every
+/// capture already parsed under 5 recorded the prose date, and only a reparse
+/// replaces it. A pinned promotion still wins.
+pub const GRAMMAR_VERSION: u32 = 6;
 
 /// A word the recognizer knows, and what it is worth.
 ///
