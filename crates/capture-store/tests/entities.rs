@@ -4,6 +4,14 @@
 //! reachable before this existed, and each is a page quietly holding half a
 //! history rather than an error anybody would have seen.
 
+// Reading a clock, which the purity lint otherwise refuses. Timing a read is
+// not stamping an event, and the boundary that rule protects is the fold's.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measuring how long a read takes, not stamping an event"
+)]
+
 use capture_core::id::EntId;
 use capture_store::session::Session;
 use capture_store::{StorePaths, mutate, promote};

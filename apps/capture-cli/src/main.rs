@@ -120,6 +120,7 @@ fn run(command: Command) -> Result<()> {
                 args::MuteTarget::Note(n) => write::Muted::Note(n),
                 args::MuteTarget::Tag(t) => write::Muted::Tag(t),
                 args::MuteTarget::Days(a, b) => write::Muted::Days(a, b),
+                args::MuteTarget::Entity(k, n) => write::Muted::Entity(k, n),
             };
             write::mute(paths()?, &what, None)
         }

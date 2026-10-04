@@ -315,6 +315,8 @@ pub enum MuteTarget {
     Note(String),
     Tag(String),
     Days(String, String),
+    /// Everything naming a person or a project.
+    Entity(String, String),
 }
 
 /// Where a capture's text is to come from.
@@ -791,9 +793,33 @@ where
             match rest {
                 // A tag, recognised by the sigil it is written with everywhere
                 // else. Anything else is a note's name.
+                //
+                // `#` stays a *tag* mute rather than an entity one. Both exist
+                // and they are not the same scope: a tag mute covers anything
+                // carrying the tag now or later, which is what somebody writing
+                // `#` means, and the entity scope is what the entity page acts
+                // on. Changing `#` here would silently move an existing
+                // command onto a different scope.
                 [one] if one.starts_with('#') => Ok(Command::Mute {
                     what: MuteTarget::Tag(one.trim_start_matches('#').to_string()),
                 }),
+                // A person or a project. Everything naming them, through the
+                // entity — so a rename or a merge carries the mute with it,
+                // which matching on the spelling could not.
+                [one] if one.starts_with('@') || one.starts_with('^') => {
+                    let mut c = one.chars();
+                    let sigil = c.next().unwrap_or(' ');
+                    let name: String = c.collect();
+                    match capture_core::id::entity_kind(sigil) {
+                        Some(kind) if !name.is_empty() => Ok(Command::Mute {
+                            what: MuteTarget::Entity(kind.to_string(), name),
+                        }),
+                        _ => Err(Bad::Value {
+                            command: "mute".into(),
+                            problem: format!("'{one}' names nothing after the sigil"),
+                        }),
+                    }
+                }
                 [one] => Ok(Command::Mute {
                     what: MuteTarget::Note(one.clone()),
                 }),
@@ -802,7 +828,9 @@ where
                 }),
                 _ => Err(Bad::Value {
                     command: "mute".into(),
-                    problem: "expected a note, a #tag, or two dates as YYYY-MM-DD".into(),
+                    problem: "expected a note, a #tag, an @person or ^project, \
+                              or two dates as YYYY-MM-DD"
+                        .into(),
                 }),
             }
         }
@@ -1214,6 +1242,8 @@ CHANGING A NOTE
   capture pin|unpin <name>       keep it at the top, or stop
   capture mute <name>            stop it surfacing, without destroying it
   capture mute #<tag>            same, for everything carrying a tag
+  capture mute @sarah            same, for everything naming a person
+                               (or ^project; follows renames and merges)
   capture mute <from> <to>       same, for everything captured between two days
   capture resolve <name>         dismiss a divergence; both versions are kept
 
@@ -1366,6 +1396,46 @@ mod tests {
                 !msg.contains("does not take"),
                 "{args:?} reports a missing argument as an unknown flag"
             );
+        }
+    }
+
+    #[test]
+    fn mute_tells_an_entity_from_a_tag_from_a_note() {
+        // Four scopes behind one verb, and the sigil is what picks. `#` stays a
+        // *tag* mute: both scopes exist, they are not the same thing, and
+        // moving an existing command onto the other one silently would be the
+        // worst kind of change.
+        assert_eq!(
+            p(&["mute", "@sarah"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Entity("person".into(), "sarah".into())
+            }
+        );
+        assert_eq!(
+            p(&["mute", "^acme"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Entity("project".into(), "acme".into())
+            }
+        );
+        assert_eq!(
+            p(&["mute", "#groceries"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Tag("groceries".into())
+            },
+            "a tag is a tag mute, not an entity one"
+        );
+        assert_eq!(
+            p(&["mute", "some-note"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Note("some-note".into())
+            }
+        );
+
+        // A sigil naming nothing is refused rather than muting an entity
+        // called "", which would be every unnamed thing at once.
+        for naming_nothing in [vec!["mute", "@"], vec!["mute", "^"]] {
+            let msg = p(&naming_nothing).unwrap_err().message();
+            assert!(msg.contains("names nothing"), "{naming_nothing:?}: {msg}");
         }
     }
 

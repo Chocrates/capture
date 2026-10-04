@@ -12,6 +12,14 @@
 //! answerable from a read-only handle *while the writer lock is held*. That is
 //! the property most of this file is about.
 
+// Reading a clock, which the purity lint otherwise refuses. Timing a sweep is
+// not stamping an event, and the boundary that rule protects is the fold's.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measuring how long a sweep takes, not stamping an event"
+)]
+
 use capture_store::session::Session;
 use capture_store::{StorePaths, promote};
 

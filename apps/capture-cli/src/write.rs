@@ -32,6 +32,9 @@ use capture_store::{Error, Result, StorePaths};
 
 use capture_store::session::Session;
 
+// One home for what a sigil names; see `read::split_mention`.
+use crate::read::split_mention;
+
 /// Resolve a name against the projection, or say it is not there.
 fn find(s: &Session, name: &str) -> Result<EventId> {
     s.state
@@ -376,29 +379,6 @@ pub fn entity_bind(paths: StorePaths, name: &str, note: Option<&str>) -> Result<
     Ok(())
 }
 
-/// Split `@sarah` into the kind it names and the name itself.
-fn split_mention(name: &str) -> Result<(&'static str, String)> {
-    let mut chars = name.chars();
-    let sigil = chars.next().unwrap_or(' ');
-    let value: String = chars.collect();
-    let kind = match sigil {
-        '@' => "person",
-        '^' => "project",
-        '#' => "tag",
-        _ => {
-            return Err(Error::Usage(format!(
-                "'{name}' is not a mention; use @person, ^project or #tag"
-            )));
-        }
-    };
-    if value.is_empty() {
-        return Err(Error::Usage(format!(
-            "'{name}' names nothing after the sigil"
-        )));
-    }
-    Ok((kind, value))
-}
-
 /// Say that missing an instance of a series leaves something owed.
 ///
 /// Only ever set by a person. §3.6 is explicit that the recognizer must not
@@ -488,6 +468,19 @@ pub fn mute(paths: StorePaths, what: &Muted, until: Option<u64>) -> Result<()> {
             MuteScope::DateRange(from.clone(), to.clone()),
             format!("{from} to {to}"),
         ),
+
+        // Through the store, which resolves the name to an entity id first.
+        //
+        // The id and not the spelling, so the mute survives a rename and a
+        // merge — the thing that makes an entity an identity rather than a
+        // word. Returns early because this one is already written by the time
+        // the id is known, and reaching the shared append below would write it
+        // twice.
+        Muted::Entity(kind, name) => {
+            capture_store::mutate::mute_entity(&paths, kind, name, until)?;
+            said(&format!("everything naming {name}"), until);
+            return Ok(());
+        }
     };
 
     // The append is the store's. This wrote its own until now, and the store's
@@ -496,14 +489,22 @@ pub fn mute(paths: StorePaths, what: &Muted, until: Option<u64>) -> Result<()> {
     // `capture log` for that note.
     capture_store::mutate::mute_scope(&paths, scope, until)?;
 
-    // Says what muting does, because it is easy to read as deletion — and the
-    // whole reason it exists is to be the cheap thing you reach for instead.
+    said(&described, until);
+    Ok(())
+}
+
+/// What muting did, and what it did not do.
+///
+/// Said every time, because muting is easy to read as deletion — and the whole
+/// reason it exists is to be the cheap thing somebody reaches for instead. If
+/// suppression were harder to reach than redaction, the gradient would point at
+/// the irreversible operation.
+fn said(described: &str, until: Option<u64>) {
     match until {
         Some(t) => say!("{described} muted until {t}"),
         None => say!("{described} muted"),
     }
     say!("It stays in the timeline and stops appearing in searches.");
-    Ok(())
 }
 
 /// What a mute applies to.
@@ -515,6 +516,8 @@ pub enum Muted {
     Tag(String),
     /// Everything captured between two days, inclusive.
     Days(String, String),
+    /// Everything naming a person or a project, by kind and written name.
+    Entity(String, String),
 }
 
 /// Dismiss a note's divergence.

@@ -198,6 +198,39 @@ impl EntId {
     }
 }
 
+/// Which kind of entity a sigil names.
+///
+/// `None` for anything that is not a sigil. The caller decides what to do
+/// about that, because what a refusal *is* differs by layer — a usage error on
+/// a command line, a refusal across the binding — but what `^` means does not.
+///
+/// `>`, `!` and `~` are absent and that is the division: a date, a priority and
+/// a duration are properties of the note itself, where a person, a project and
+/// a tag are things a note can be *about*. A page of "everything urgent" is a
+/// query over a field that is not even stored; a page of everything naming
+/// somebody is the axis §3.7 is describing.
+///
+/// # Why this is here and not wherever it is needed
+///
+/// It was written out five times: twice in the command line (byte-identical,
+/// which is the only reason a gate caught it), once in the desktop window, once
+/// behind the binding, and once more in the recognizer in a different shape.
+/// All five agreed, which is the dangerous state rather than the safe one — a
+/// decision made in five places is one that can be *changed* in four.
+///
+/// It belongs beside [`EntId::derive`], which takes the kind this returns:
+/// those two together are the whole of how a written sigil becomes an
+/// identity, and splitting them is how `@acme` and `^acme` would come to be
+/// hashed under a kind nobody meant.
+pub fn entity_kind(sigil: char) -> Option<&'static str> {
+    match sigil {
+        '@' => Some("person"),
+        '^' => Some("project"),
+        '#' => Some("tag"),
+        _ => None,
+    }
+}
+
 /// How a spelling is reduced before it becomes identity.
 ///
 /// ASCII lowercase only, deliberately. Unicode case folding is locale-dependent

@@ -3702,7 +3702,10 @@ mod entity_tests {
             1_700_000_100_000,
         );
 
-        assert_eq!(fold(&[once.clone()]).entity_of(sarah()), chen());
+        assert_eq!(
+            fold(core::slice::from_ref(&once)).entity_of(sarah()),
+            chen()
+        );
         assert_eq!(
             fold(&[once.clone(), twice.clone()]).entity_of(sarah()),
             chen(),

@@ -5,6 +5,14 @@
 //! event stayed in the log and simply stopped matching anything, so nothing
 //! anywhere said it had happened.
 
+// Reading a clock, which the purity lint otherwise refuses. Timing a read is
+// not stamping an event, and the boundary that rule protects is the fold's.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measuring how long a read takes, not stamping an event"
+)]
+
 use capture_store::session::Session;
 use capture_store::{StorePaths, mutate, promote};
 use proptest::prelude::*;
@@ -168,10 +176,10 @@ fn a_tick_can_be_put_back() {
     let slug = capture(&paths, "#shop: milk, eggs");
 
     promote::tick_at(&paths, &slug, 0, true).unwrap();
-    assert_eq!(items(&paths, &slug)[0].1, true);
+    assert!(items(&paths, &slug)[0].1, "ticking did not take");
 
     promote::tick_at(&paths, &slug, 0, false).unwrap();
-    assert_eq!(items(&paths, &slug)[0].1, false, "un-ticking did not take");
+    assert!(!items(&paths, &slug)[0].1, "un-ticking did not take");
 }
 
 proptest! {
@@ -281,7 +289,10 @@ fn an_untagged_checklist_belongs_to_its_capture_alone() {
 
     // Tickable by position, like any other.
     promote::tick_at(&paths, &slug, 1, true).unwrap();
-    assert_eq!(items(&paths, &slug)[1].1, true);
+    assert!(
+        items(&paths, &slug)[1].1,
+        "ticking by position did not take"
+    );
 
     // And gathered into no collection: writing no tag meant no filing, so an
     // empty name must not become a bucket every untagged list falls into.

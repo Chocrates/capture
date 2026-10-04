@@ -2904,12 +2904,12 @@ fn split_mention_or(mention: &str, default_kind: &'static str) -> Result<(&'stat
     let mut chars = mention.chars();
     let sigil = chars.next().unwrap_or(' ');
     let value: String = chars.collect();
-    let (kind, value) = match sigil {
-        '@' => ("person", value),
-        '^' => ("project", value),
-        '#' => ("tag", value),
-        _ if !default_kind.is_empty() => (default_kind, mention.to_string()),
-        _ => {
+    let (kind, value) = match capture_core::id::entity_kind(sigil) {
+        Some(kind) => (kind, value),
+        // A bare name, where the caller already knows what it is naming — the
+        // entity screens ask about a person they are already showing.
+        None if !default_kind.is_empty() => (default_kind, mention.to_string()),
+        None => {
             return Err(CaptureError::Refused {
                 reason: format!("'{mention}' is not a mention; use @person, ^project or #tag"),
             });

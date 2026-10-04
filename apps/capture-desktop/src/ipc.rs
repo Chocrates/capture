@@ -825,14 +825,8 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
 /// One mapping, shared by every command here, so the window cannot decide that
 /// `^` means something different from what the store thinks it means.
 fn entity_kind(sigil: char) -> Result<&'static str> {
-    match sigil {
-        '@' => Ok("person"),
-        '^' => Ok("project"),
-        '#' => Ok("tag"),
-        other => Err(Error::Usage(format!(
-            "'{other}' is not a mention sigil; use @, ^ or #"
-        ))),
-    }
+    capture_core::id::entity_kind(sigil)
+        .ok_or_else(|| Error::Usage(format!("'{sigil}' is not a mention sigil; use @, ^ or #")))
 }
 
 /// Give an entity a name of your choosing.

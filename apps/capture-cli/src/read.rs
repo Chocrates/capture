@@ -414,24 +414,20 @@ pub fn mentions(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Split `@sarah` into the kind it names and the name itself.
+/// A written mention split into the kind it names and the name itself.
 ///
-/// The sigil is required rather than guessed. `capture entity sarah` would have
-/// to pick between a person, a project and a tag, and picking wrong means
-/// answering a question nobody asked.
-fn split_mention(name: &str) -> Result<(&'static str, String)> {
+/// The sigil's meaning comes from `capture-core`, beside `EntId::derive`,
+/// which takes the kind this returns. Those two together are the whole of how
+/// a written sigil becomes an identity; this file only decides what a refusal
+/// reads like on a command line.
+pub(crate) fn split_mention(name: &str) -> Result<(&'static str, String)> {
     let mut chars = name.chars();
     let sigil = chars.next().unwrap_or(' ');
     let value: String = chars.collect();
-    let kind = match sigil {
-        '@' => "person",
-        '^' => "project",
-        '#' => "tag",
-        _ => {
-            return Err(Error::Usage(format!(
-                "'{name}' is not a mention; use @person, ^project or #tag"
-            )));
-        }
+    let Some(kind) = capture_core::id::entity_kind(sigil) else {
+        return Err(Error::Usage(format!(
+            "'{name}' is not a mention; use @person, ^project or #tag"
+        )));
     };
     if value.is_empty() {
         return Err(Error::Usage(format!(

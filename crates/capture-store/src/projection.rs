@@ -3596,19 +3596,12 @@ fn reconcile_ticks(items: &[String], ticks: &[capture_core::fold::ItemTick]) -> 
 
 /// Which kind of entity a sigil names.
 ///
-/// `>`, `!` and `~` are absent and that is the division: a date, a priority and
-/// a duration are properties of the note itself, where a person, a project and a
-/// tag are things a note can be *about*. A page of "everything urgent" is a
-/// query over a field that is not even stored; a page of everything naming
-/// somebody is the axis §3.7 is describing.
-fn entity_kind(sigil: char) -> Option<&'static str> {
-    match sigil {
-        '@' => Some("person"),
-        '^' => Some("project"),
-        '#' => Some("tag"),
-        _ => None,
-    }
-}
+/// `capture_core::id::entity_kind` decides, here and in the window, the
+/// binding and the command line. It sits beside `EntId::derive`, which takes
+/// the kind it returns — and this file is where that id is actually computed
+/// and stored, so a second opinion here would mean entities filed under a kind
+/// nobody wrote.
+use capture_core::id::entity_kind;
 
 /// The entities a note's text names, already resolved through any merges.
 ///
