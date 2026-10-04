@@ -86,6 +86,7 @@ const history = { back: [], forward: [] };
 /// middle was never written down.
 function here() {
   if (current === "wiki") return { view: "wiki", at: wikiAt };
+  if (current === "lists" && listTag) return { view: "lists", tag: listTag };
   if (current === "note" && currentNote) return { view: "note", name: currentNote };
   if (current === "mentions" && currentMention) return { view: "mentions", ...currentMention };
   return null;
@@ -98,6 +99,7 @@ function same(a, b) {
 /// Go to a recorded place.
 function go(entry) {
   if (entry.view === "wiki") return showWiki(entry.at);
+  if (entry.view === "lists") return showLists(entry.tag);
   if (entry.view === "note") return showNote(entry.name);
   if (entry.view === "mentions") return showMentions(entry.sigil, entry.value);
 }
@@ -1367,6 +1369,9 @@ function entityActions(sigil, value, into) {
 /// nothing open yet.
 let wikiAt = null;
 
+/// Which tag the Lists view is showing, kept so the nav button returns to it.
+let listTag = null;
+
 /// The wiki: a sidebar of everything there is to browse, and a page beside it.
 ///
 /// The sidebar is not maintained by anybody. Pages are the notes somebody
@@ -1374,6 +1379,114 @@ let wikiAt = null;
 /// people, projects and tags are whatever the notes happen to say. There is
 /// nothing to file into and nothing to prune, which is §3.7's argument applied
 /// to a sidebar: a list that needs tending is a list that stops being tended.
+/// The items written under a tag, gathered from every capture that wrote them.
+///
+/// The surface whose purpose is working through something, and the one the
+/// window did not have. The note page draws a *single capture's* items, which
+/// answers a different question — a grocery list is spread over however many
+/// times somebody thought of something, and gathering them is the whole point
+/// of a collection.
+///
+/// Ticked by `(slug, ord)`: the same call the note page makes, with the capture
+/// taken from the row rather than from the page. Position alone is meaningless
+/// here, because position 0 exists in every capture under the tag — which is
+/// why the line carries where it came from.
+async function showLists(tag) {
+  const mine = beginRender();
+  current = "lists";
+  listTag = tag || null;
+  view.replaceChildren();
+
+  const index = await call("wiki_index", {});
+  if (stale(mine)) return;
+
+  const frame = el("div", "wiki lists");
+  const side = el("aside", "sidebar");
+  const page = el("div", "page");
+  frame.append(side, page);
+  view.append(frame);
+
+  // The tags, which is where a list lives: §3.6 makes a list a tag with a
+  // display order, so there is no separate thing to enumerate.
+  side.append(el("div", "side-label", "tags"));
+  for (const e of index.tags) {
+    const b = el("button", "side-item", e.name);
+    if (e.count !== null && e.count !== undefined) {
+      b.append(el("span", "side-count", String(e.count)));
+    }
+    if (e.name === listTag) b.classList.add("on");
+    b.addEventListener("click", () => showLists(e.name));
+    side.append(b);
+  }
+
+  if (!index.tags.length) {
+    page.append(el("p", "empty", "Nothing is tagged yet."));
+    return;
+  }
+  if (!listTag) {
+    page.append(el("p", "empty", "Pick a tag to see what is on it."));
+    return;
+  }
+
+  const lines = await call("list", { tag: listTag });
+  if (stale(mine)) return;
+
+  page.append(el("h2", "page-title", listTag));
+  if (!lines.length) {
+    page.append(el("p", "empty", "Nothing written under this tag yet."));
+    return;
+  }
+
+  // Said once, above the list, when it is true. A list of eleven things
+  // gathered from four captures looks exactly like one list of eleven things,
+  // and the difference matters the moment somebody goes to edit it — editing
+  // "the list" means editing one of the four.
+  const captures = new Set(lines.map((l) => l.slug));
+  if (captures.size > 1) {
+    page.append(
+      el("p", "note-aside", `Gathered from ${captures.size} captures.`),
+    );
+  }
+
+  const ul = el("ul", "items tickable");
+  for (const line of lines) {
+    const li = el("li", line.done ? "item done" : "item");
+    // A task that joined the list by carrying the tag has no place in anybody
+    // written order, so there is no position to tick it at. It is already a
+    // task with its own completion, and a checkbox here would have nothing to
+    // address.
+    if (line.ord === null || line.ord === undefined) {
+      li.append(el("span", "item-bullet", "\u00b7"));
+    } else {
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = line.done;
+      box.addEventListener("change", async () => {
+        await call("tick_item_at", {
+          name: line.slug,
+          ord: line.ord,
+          done: box.checked,
+        });
+        showLists(listTag);
+      });
+      li.append(box);
+    }
+    const text = el("span", "text", line.text);
+    li.append(text);
+    const from = el("button", "item-from", line.slug);
+    from.title = "the capture this came from";
+    from.addEventListener("click", () => openNote(line.slug));
+    li.append(from);
+    ul.append(li);
+  }
+  page.append(ul);
+
+  const left = lines.filter((l) => !l.done).length;
+  page.append(
+    el("p", "items-left", left === 0 ? "All done." : `${left} left.`),
+  );
+}
+
 async function showWiki(at) {
   const mine = beginRender();
   current = "wiki";
@@ -1886,6 +1999,7 @@ document.querySelectorAll("nav button[data-view]").forEach((b) => {
     else if (b.dataset.view === "health") showHealth();
     else if (b.dataset.view === "agenda") showAgenda(today());
     else if (b.dataset.view === "review") showReview();
+    else if (b.dataset.view === "lists") showLists(listTag);
     else showTimeline();
   });
 });

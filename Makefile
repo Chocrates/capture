@@ -42,7 +42,7 @@ export CAPTURE_SILENT := 1
 
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios accept purity duplicated deny \
-        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired aside \
+        android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired unreached aside \
         build release install install-chord scratch demo smoke tasks clean distclean
 
 ## help: list these commands
@@ -68,7 +68,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired duplicated aside deny
+ci: fmt-check lint test pty tamper roundtrip spool redact purity unwired unreached duplicated aside deny
 	@echo
 	@echo 'ci: all gates passed'
 	@echo '     (not included: `make android` — it needs an SDK, an NDK and a'
@@ -287,6 +287,28 @@ unwired:
 duplicated:
 	@echo '--- no decision is made twice'
 	@python3 tools/duplicated.py
+
+## unreached: fail when a window command is not reachable from the window
+#
+# `unwired` says in its own docstring that it cannot do this. Two functions
+# sharing a name defeat it, and the desktop's layering hands one operation the
+# same name three times on purpose — the store op, the terminal command, the
+# window command — so a caller of any one satisfies all three. Seventy-six
+# names are in that state and most are this exact shape.
+#
+# Verified by breaking it: removing `ipc::merge_entities` from the handler list
+# leaves `make unwired` green, because `capture-ffi` has a `merge_entities` of
+# its own and a scan matching names cannot tell which was meant.
+#
+# This needs no call graph, because both sides of the window's boundary are
+# enumerable: a command is `#[tauri::command]` over a `pub fn`, it reaches
+# JavaScript only if `generate_handler!` names it, and the page calls it by a
+# string literal. It found `list` (registered, never called, and the wrong
+# shape to be useful) and `tick_item` (ticking by words, in a surface with
+# nowhere to type words).
+unreached:
+	@echo '--- every window command is reachable from the window'
+	@python3 tools/unreached.py
 
 ## aside: fail when a fold or a roster is built from set-aside events
 #

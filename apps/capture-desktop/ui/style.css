@@ -346,6 +346,56 @@ nav .hist:not(:disabled):hover { color: var(--text); }
   margin-left: .5rem;
 }
 
+/* The Lists view: a collection worked through, gathered from every capture
+ * that wrote under the tag.
+ *
+ * The item rules below are scoped to `.note` because the note page and the
+ * timeline were the only places items were drawn. Rather than widen those
+ * selectors and change how two existing surfaces look, this view says it is the
+ * same kind of thing by carrying the same classes under its own root. */
+.lists .items {
+  margin: .5rem 0;
+  padding: 0;
+  list-style: none;
+}
+.lists .item {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  padding: .2rem 0;
+}
+.lists .item.done .text {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+.lists input[type="checkbox"] { cursor: pointer; }
+
+/* A line with no position: a task that joined the list by carrying its tag.
+ * Drawn, and not tickable here — it is already a task with its own completion,
+ * and a checkbox would have nothing to address. */
+.lists .item-bullet { color: var(--dim); }
+
+/* Which capture a line came from. Quiet, because it is provenance rather than
+ * content — but present, because editing "the list" means editing one of them. */
+.lists .item-from {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: .7rem;
+  color: var(--dim);
+  cursor: pointer;
+}
+.lists .item-from:hover { text-decoration: underline; }
+
+.lists .page-title { margin: 0 0 .25rem; font-size: 1rem; }
+.lists .note-aside,
+.lists .items-left {
+  color: var(--dim);
+  font-size: .8rem;
+  margin: .25rem 0;
+}
+
 /* A list's items, on the row that names them. */
 .note .items {
   margin: .25rem 0 .25rem 1.1rem;

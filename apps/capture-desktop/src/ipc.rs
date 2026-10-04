@@ -134,6 +134,7 @@ fn rendered(s: &Store, n: NoteRow) -> Result<Note> {
         // This capture's own items, by one indexed query. The tag-wide view
         // answers the wider question and is a different call — asking it per
         // row costs a full tag gather per row.
+        let own = s.slug_of(&tgt).ok().flatten().unwrap_or_default();
         out.items = s
             .items_of(&tgt)?
             .into_iter()
@@ -141,6 +142,8 @@ fn rendered(s: &Store, n: NoteRow) -> Result<Note> {
                 text: e.text,
                 done: e.done,
                 ord: e.ord,
+                // Every line here came from this capture, by construction.
+                slug: own.clone(),
             })
             .collect();
     }
@@ -625,7 +628,21 @@ pub struct ListLine {
     pub text: String,
     pub done: bool,
     /// Its place in the written order, where it has one.
+    ///
+    /// Absent for a task that joined the list by carrying its tag: it has no
+    /// place in anybody's written order, so there is no position to tick it at.
     pub ord: Option<u32>,
+    /// The capture this line came from.
+    ///
+    /// A collection gathers items from however many captures wrote them, and a
+    /// surface needs to know which — to tick the right one by position, and to
+    /// say that what is on screen is not one person's single list.
+    ///
+    /// Missing until now, which made `list` unusable rather than merely unused:
+    /// `tick_item_at` resolves a capture and *then* finds the item at `ord`
+    /// within it, and position 0 exists in every capture under the tag. The
+    /// binding the phone uses has carried this field all along.
+    pub slug: String,
 }
 
 /// A list: the items written under a tag, then the tasks carrying it.
@@ -641,10 +658,14 @@ pub fn list(tag: String) -> std::result::Result<Vec<ListLine>, String> {
         let s = read_only()?;
         Ok(s.list(&tag, now_ms())?
             .into_iter()
-            .map(|e| ListLine {
-                text: e.text,
-                done: e.done,
-                ord: e.ord,
+            .map(|e| {
+                let slug = s.slug_of(&e.tgt).ok().flatten().unwrap_or_default();
+                ListLine {
+                    text: e.text,
+                    done: e.done,
+                    ord: e.ord,
+                    slug,
+                }
             })
             .collect())
     })())
@@ -652,10 +673,17 @@ pub fn list(tag: String) -> std::result::Result<Vec<ListLine>, String> {
 
 /// Tick an item off a list, or put it back.
 ///
-/// `tick_item` rather than `tick`: this window already has a `tick`, and it is
-/// the slow clock that drains due work. Two unrelated meanings under one name
-/// in one IPC surface is the kind of collision that is obvious today and is a
-/// wrong call site in six months.
+/// `tick_item_at` rather than `tick`: this window already has a `tick`, and it
+/// is the slow clock that drains due work. Two unrelated meanings under one
+/// name in one IPC surface is the kind of collision that is obvious today and
+/// is a wrong call site in six months.
+///
+/// `_at` because an item is addressed by position within its capture, never by
+/// its words. Two items reading the same are ordinary on a shopping list and
+/// their words cannot tell them apart. A by-words command used to sit beside
+/// this one and was reachable by nobody — the window has nowhere to type an
+/// item's words — so it was deleted; the store function and `capture tick` keep
+/// theirs, because typing words is exactly what a terminal is for.
 #[tauri::command]
 pub fn tick_item_at(name: String, ord: u32, done: bool) -> std::result::Result<String, String> {
     wire((|| {
@@ -665,7 +693,8 @@ pub fn tick_item_at(name: String, ord: u32, done: bool) -> std::result::Result<S
                 capture_store::promote::Ticked::Done => "done".to_string(),
                 capture_store::promote::Ticked::Already => "already".to_string(),
                 // Unreachable: a position names exactly one item, which is the
-                // whole reason this sits beside `tick_item`.
+                // whole reason an item is addressed this way rather than by its
+                // words.
                 capture_store::promote::Ticked::Ambiguous(n) => format!("ambiguous:{n}"),
                 capture_store::promote::Ticked::NoSuchItem => "absent".to_string(),
             },
@@ -702,25 +731,6 @@ pub fn accept_suggestion(name: String) -> std::result::Result<String, String> {
 pub fn fix_list(name: String) -> std::result::Result<String, String> {
     wire((|| {
         capture_store::mutate::accept_near_miss(&paths()?, &name)
-    })())
-}
-
-/// Tick an item by its words.
-///
-/// Kept for somebody typing them. A surface should use `tick_item_at`, which
-/// cannot be ambiguous.
-#[tauri::command]
-pub fn tick_item(tag: String, item: String, done: bool) -> std::result::Result<String, String> {
-    wire((|| {
-        let paths = paths()?;
-        Ok(
-            match capture_store::promote::tick(&paths, &tag, &item, done, now_ms())? {
-                capture_store::promote::Ticked::Done => "done".to_string(),
-                capture_store::promote::Ticked::Already => "already".to_string(),
-                capture_store::promote::Ticked::Ambiguous(n) => format!("ambiguous:{n}"),
-                capture_store::promote::Ticked::NoSuchItem => "absent".to_string(),
-            },
-        )
     })())
 }
 

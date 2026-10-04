@@ -779,8 +779,12 @@ fn the_note_page_ticks_items_by_position() {
         "the note page should tick by position",
     );
     // By position and not by words. Two items reading the same are ordinary on
-    // a shopping list and their words cannot tell them apart, which is the
-    // whole reason `tick_item_at` exists beside `tick_item`.
+    // a shopping list and their words cannot tell them apart.
+    //
+    // The by-words command this once sat beside has been deleted: it was a
+    // window command in a surface with nowhere to type an item's words, so it
+    // was reachable by nobody. The assertion stays, because calling a name that
+    // no longer exists fails only when somebody presses the control.
     assert!(
         !js.contains("\"tick_item\""),
         "ticking by words cannot address two identical items",
@@ -801,5 +805,48 @@ fn the_two_offers_do_not_wear_the_same_button() {
     assert!(
         js.contains("Add the colon"),
         "the offer that rewrites text should say what it inserts",
+    );
+}
+
+/// A collection is readable in the window, and tickable where it is drawn.
+///
+/// `ipc::list` was registered and called by nothing, and it could not have
+/// worked if it had been: its `ListLine` carried `{ text, done, ord }` and a
+/// tag-wide list spans captures, so `ord` alone addresses nothing — position 0
+/// exists in every capture under the tag. The binding the phone uses has
+/// carried the capture's slug all along, with a comment saying why.
+#[test]
+fn the_lists_view_ticks_by_capture_and_position() {
+    let js = ui_code("app.js");
+    let html = ui_code("index.html");
+
+    assert!(
+        html.contains("data-view=\"lists\""),
+        "the window should offer a Lists view",
+    );
+    assert!(
+        js.contains("call(\"list\""),
+        "the Lists view should read the tag-wide list",
+    );
+
+    // The capture comes from the row, not from the page. That is the whole
+    // difference between a collection and one capture's items.
+    let at = js.find("showLists").expect("the view exists");
+    let body = &js[at..];
+    assert!(
+        body.contains("name: line.slug"),
+        "an item must be ticked against the capture that wrote it",
+    );
+    assert!(
+        body.contains("ord: line.ord"),
+        "and at its position within that capture",
+    );
+
+    // Said once when true: a list of eleven things gathered from four captures
+    // looks exactly like one list of eleven, and the difference matters the
+    // moment somebody edits it.
+    assert!(
+        body.contains("Gathered from"),
+        "a gathered list should say that it is one",
     );
 }
