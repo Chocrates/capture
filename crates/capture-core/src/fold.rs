@@ -639,11 +639,27 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::REDACT => {
                 let Some(body) = &e.body else { continue };
                 let Ok(r) = minicbor::decode::<RedactBody>(body) else {
+                    // A destruction order nobody can read. It used to be
+                    // skipped, which made it indistinguishable from no order at
+                    // all — and `held` is exactly for an authentic event this
+                    // build will not act on.
+                    proj.held.insert(e.header.id(), Held::Malformed);
                     continue;
                 };
                 // Capped. An uncapped redaction lets one loop destroy the whole
                 // archive everywhere within a single push round.
-                for t in r.targets.iter().take(crate::body::REDACT_TARGET_CAP) {
+                //
+                // Over the cap the whole event is malformed and applies to
+                // nothing. It used to `take` the first 64 and drop the rest
+                // with no record, so a redaction naming a hundred reported
+                // success and left thirty-six intact — a redaction of the first
+                // 64 is not what anybody asked for, and the cap is a property
+                // of the event rather than of each target.
+                if r.targets.len() > crate::body::REDACT_TARGET_CAP {
+                    proj.held.insert(e.header.id(), Held::Malformed);
+                    continue;
+                }
+                for t in r.targets.iter() {
                     ordered_redactions.entry(*t).or_default().push(Ordered {
                         event: e.header.id(),
                         at: e.header.hlc,

@@ -79,11 +79,19 @@ use crate::{Result, db};
 /// at, so an empty one is the honest starting state and the first few sweeps
 /// after this fill it in.
 ///
+/// Version 11 re-keys `redact_queue` on the pair `(redact_evt, tgt)`. It was
+/// keyed by the redaction alone, so every target of a multi-target redaction
+/// overwrote the last and only one was queued — one note destroyed, the rest
+/// keeping their content while the operation reported success. Nothing is lost
+/// in the rebuild and something is regained: the queue is derived from the log,
+/// the log has always carried every target, so a redaction that destroyed one
+/// of three will destroy the other two as it was always ordered to.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 10;
+pub const PROJECTION_SCHEMA: u32 = 11;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -345,11 +353,23 @@ CREATE TABLE IF NOT EXISTS settings (
 -- cancellations, and therefore here rather than in local state: put it in
 -- ops.db and a restore replays the log, marks the notes redacted, and then
 -- never destroys anything, because nothing drives the destruction.
+-- Destructions waiting for their window.
+--
+-- Keyed by the **pair**. It was keyed by `redact_evt` alone, and the fold
+-- writes a row per pending note — so every target of one redaction overwrote
+-- the last and only one was ever queued. A redaction naming three notes
+-- destroyed one and reported success; the other two kept their bodies for ever,
+-- because nothing would queue them again.
+--
+-- Latent while every redaction this build issues names exactly one target, and
+-- not latent at all the moment anything emits the shape §1.1 already specifies,
+-- where a redact names at most 64 targets.
 CREATE TABLE IF NOT EXISTS redact_queue (
-  redact_evt    BLOB PRIMARY KEY,
+  redact_evt    BLOB NOT NULL,
   tgt           BLOB NOT NULL,
   execute_after INTEGER NOT NULL,
-  cancelled     INTEGER NOT NULL DEFAULT 0
+  cancelled     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (redact_evt, tgt)
 ) STRICT;
 
 -- What each note was recognised as, decoded once at write time.

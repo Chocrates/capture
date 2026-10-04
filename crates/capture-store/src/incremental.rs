@@ -168,10 +168,29 @@ fn is_global(e: &Envelope) -> bool {
 /// computed over the target field, so writing it in would change the value
 /// being written.
 fn affected(arriving: &[Envelope]) -> BTreeSet<EventId> {
-    arriving
+    let mut out: BTreeSet<EventId> = arriving
         .iter()
         .map(|e| e.header.tgt.unwrap_or_else(|| e.header.id()))
-        .collect()
+        .collect();
+
+    // A redaction touches every note it names, not only the one in its header.
+    //
+    // The header can hold one target and §1.1 lets a redaction name sixty-four,
+    // so the rest would not be re-written here and their destructions would not
+    // be queued — the note in the header destroyed, the others left intact
+    // until something happened to rebuild. The fold and the queue were both
+    // fixed for this; the cheap path has to agree with them or it is not a
+    // cheap version of the same answer, it is a different one.
+    for e in arriving {
+        if e.header.kind != Kind::REDACT {
+            continue;
+        }
+        let Some(body) = &e.body else { continue };
+        if let Ok(r) = minicbor::decode::<capture_core::body::RedactBody>(body) {
+            out.extend(r.targets);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
