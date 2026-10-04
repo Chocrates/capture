@@ -68,7 +68,7 @@ fn a_dozen_daily_series() {
     drop(s);
 
     let started = std::time::Instant::now();
-    let next = capture_store::projection::rebuild(&paths.state, &all, 0, NOW).unwrap();
+    let next = capture_store::projection::rebuild(&paths.state, &all, &[], 0, NOW).unwrap();
     let elapsed = started.elapsed();
 
     let store = capture_store::projection::Store::open_read(

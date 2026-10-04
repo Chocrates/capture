@@ -763,6 +763,7 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
     let next = projection::rebuild(
         &s.paths.state,
         &events,
+        &s.log.aside_rows()?,
         current,
         jiff::Timestamp::now().as_millisecond().max(0),
     )?;

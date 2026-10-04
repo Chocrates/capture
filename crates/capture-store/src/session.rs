@@ -482,8 +482,17 @@ impl Session {
         let ops = Ops::open(&self.paths.ops)?;
         let current = ops.generation()?;
 
-        let next =
-            crate::projection::rebuild(&self.paths.state, &events, current, now_ms() as i64)?;
+        let next = crate::projection::rebuild(
+            &self.paths.state,
+            &events,
+            // What the log is refusing to use. `events` cannot carry them:
+            // `Log::all` excludes anything set aside by definition, which
+            // is why a rebuild used to produce a projection that reported
+            // none.
+            &self.log.aside_rows()?,
+            current,
+            now_ms() as i64,
+        )?;
         ops.set_generation(next)?;
 
         self.state = Store::open(&projection::generation_path(&self.paths.state, next))?;

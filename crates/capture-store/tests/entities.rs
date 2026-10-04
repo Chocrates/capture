@@ -369,8 +369,14 @@ fn a_rebuild_reproduces_every_entity_exactly() {
     let ops = capture_store::ops::Ops::open(&paths.ops).unwrap();
     let generation = ops.generation().unwrap();
     let log = capture_store::log::Log::open_read(&paths.events).unwrap();
-    capture_store::projection::rebuild(&paths.state, &log.all().unwrap(), generation, NOW as i64)
-        .unwrap();
+    capture_store::projection::rebuild(
+        &paths.state,
+        &log.all().unwrap(),
+        &[],
+        generation,
+        NOW as i64,
+    )
+    .unwrap();
     ops.set_generation(generation + 1).unwrap();
 
     let after: Vec<_> = {

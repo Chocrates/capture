@@ -364,6 +364,7 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
     let next = capture_store::projection::rebuild(
         &s.paths.state,
         &all,
+        &s.log.aside_rows()?,
         generation,
         jiff::Timestamp::now().as_millisecond().max(0),
     )?;

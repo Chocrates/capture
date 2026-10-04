@@ -286,6 +286,7 @@ fn redact_loop(root: &Path) -> Result<()> {
         let g = projection::rebuild(
             &root.join("state.db"),
             &events,
+            &log.aside_rows()?,
             generation,
             (BASE_MS + n) as i64,
         )?;
@@ -326,6 +327,7 @@ fn rebuild_loop(root: &Path) -> Result<()> {
         let next = projection::rebuild(
             &root.join("state.db"),
             &events,
+            &log.aside_rows()?,
             current,
             (BASE_MS + n) as i64,
         )?;

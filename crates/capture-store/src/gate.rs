@@ -802,6 +802,156 @@ mod tests {
         );
     }
 
+    /// A projection built the way a rebuild builds one.
+    ///
+    /// The whole point of the bug: `Log::all` excludes set-aside events, so a
+    /// projection folded from it reports none — and `quarantine` is written
+    /// only by the gate at ingest, which a rebuild is not.
+    fn rebuilt(b: &Bench) -> Store {
+        let g = crate::projection::rebuild(
+            &b.dir.join("state.db"),
+            &b.log.all().unwrap(),
+            &b.log.aside_rows().unwrap(),
+            0,
+            1_800_000_000_000,
+        )
+        .unwrap();
+        Store::open(&crate::projection::generation_path(
+            &b.dir.join("state.db"),
+            g,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn what_was_set_aside_survives_a_rebuild() {
+        // The log keeps the mark; the projection keeps the report. Rebuilding
+        // used to produce a projection with no report at all, so every surface
+        // said nothing was set aside while the events stayed excluded from
+        // every fold.
+        let mut b = bench("aside-survives-rebuild");
+        let mut laptop = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(2);
+
+        let root = laptop.roster_root();
+        let add_phone = laptop.admits(&phone);
+        phone.observe(&add_phone, 1_700_000_001_000);
+        let first = phone.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "one"),
+            1_700_000_002_000,
+        );
+        let second = phone.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "two"),
+            1_700_000_003_000,
+        );
+        let narrow = laptop.retires(
+            &phone,
+            &[(phone.dev(), first.header.seq, first.header.id())],
+        );
+
+        {
+            let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
+            for e in [&root, &add_phone, &first, &narrow] {
+                g.offer(e, 100).unwrap();
+            }
+            // Settles the origin, as the existing re-admission test does.
+            g.reconsider().unwrap();
+            assert_eq!(
+                g.offer(&second, 105).unwrap(),
+                Outcome::SetAside("post_retire")
+            );
+        }
+        assert_eq!(
+            b.state.quarantined().unwrap().len(),
+            1,
+            "set aside at ingest"
+        );
+
+        let fresh = rebuilt(&b);
+        let after = fresh.quarantined().unwrap();
+        assert_eq!(after.len(), 1, "the rebuild reported nothing set aside");
+        assert_eq!(after[0].0, second.header.id());
+        assert_eq!(after[0].1, "post_retire", "the reason was lost");
+    }
+
+    #[test]
+    fn a_reissued_retirement_still_readmits_after_a_rebuild() {
+        // The sharper half. `reconsider` drives off `quarantined_at`, so with
+        // no rows it finds nothing to release and the reissued retirement
+        // silently does nothing. Storing these locally is what removed the
+        // dependency on a peer still holding the events; a rebuild put it back.
+        let mut b = bench("readmit-after-rebuild");
+        let mut laptop = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(2);
+
+        let root = laptop.roster_root();
+        let add_phone = laptop.admits(&phone);
+        phone.observe(&add_phone, 1_700_000_001_000);
+        let first = phone.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "one"),
+            1_700_000_002_000,
+        );
+        let second = phone.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "two"),
+            1_700_000_003_000,
+        );
+        let narrow = laptop.retires(
+            &phone,
+            &[(phone.dev(), first.header.seq, first.header.id())],
+        );
+        let wider = laptop.retires_superseding(
+            &phone,
+            &[(phone.dev(), second.header.seq, second.header.id())],
+            Some(narrow.header.id()),
+        );
+
+        {
+            let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
+            for e in [&root, &add_phone, &first, &narrow] {
+                g.offer(e, 100).unwrap();
+            }
+            // Settles the origin, as the existing re-admission test does.
+            g.reconsider().unwrap();
+            assert_eq!(
+                g.offer(&second, 105).unwrap(),
+                Outcome::SetAside("post_retire")
+            );
+        }
+
+        // The rebuild happens *between* the retirement and its reissue, which
+        // is the ordinary case: a schema bump rebuilds every archive.
+        b.state = rebuilt(&b);
+
+        let mut g = Gate::open(&mut b.log, &mut b.state, &b.ops, OWN).unwrap();
+        g.offer(&wider, 106).unwrap();
+        g.reconsider().unwrap();
+
+        assert!(
+            !b.state
+                .quarantined_at("post_retire")
+                .unwrap()
+                .iter()
+                .any(|(id, _, _)| *id == second.header.id()),
+            "after a rebuild the reissued retirement released nothing"
+        );
+        assert!(
+            b.log.is_aside(&second.header.id()).unwrap().is_none(),
+            "the event is still marked aside in the log"
+        );
+    }
+
     #[test]
     fn a_reissued_retirement_readmits_what_it_now_covers() {
         // The retired device had already propagated events past the named

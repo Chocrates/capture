@@ -76,7 +76,8 @@ fn rebuild(paths: &StorePaths, now: i64) -> capture_store::projection::Store {
         .unwrap()
         .generation()
         .unwrap();
-    let next = capture_store::projection::rebuild(&paths.state, &all, generation, now).unwrap();
+    let next =
+        capture_store::projection::rebuild(&paths.state, &all, &[], generation, now).unwrap();
     capture_store::ops::Ops::open(&paths.ops)
         .unwrap()
         .set_generation(next)

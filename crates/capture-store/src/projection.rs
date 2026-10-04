@@ -4044,7 +4044,13 @@ pub fn generation_path(base: &Path, generation: u64) -> PathBuf {
 /// Returns the new generation number. The caller moves the pointer once this
 /// succeeds, so a rebuild that fails partway leaves the previous generation
 /// untouched and still current.
-pub fn rebuild(base: &Path, events: &[Envelope], current: u64, now: i64) -> Result<u64> {
+pub fn rebuild(
+    base: &Path,
+    events: &[Envelope],
+    aside: &[crate::log::AsideRow],
+    current: u64,
+    now: i64,
+) -> Result<u64> {
     let next = current + 1;
     let path = generation_path(base, next);
     let _ = std::fs::remove_file(&path);
@@ -4052,6 +4058,23 @@ pub fn rebuild(base: &Path, events: &[Envelope], current: u64, now: i64) -> Resu
     let p = capture_core::fold::fold(events);
     let mut store = Store::open(&path)?;
     store.write(&p, now)?;
+
+    // What this device is refusing to use, restored from the log.
+    //
+    // `quarantine` is the *report* of the log's `aside` column, and it was
+    // written only by the gate at ingest — so a rebuild produced a projection
+    // with no report at all. The events stayed set aside, invisible to every
+    // surface, and `Gate::reconsider` had nothing to re-admit when a retirement
+    // was reissued. That remedy was made local precisely so it would not depend
+    // on a peer still holding them, and a rebuild silently put the dependency
+    // back.
+    //
+    // Here rather than in the caller because every producer of a projection has
+    // to produce a complete one. "The caller remembers" is the arrangement that
+    // caused this.
+    for row in aside {
+        store.quarantine(&row.id, &row.dev, row.seq, &row.reason, row.at)?;
+    }
 
     // Record how far each origin has been consumed, so later updates can be
     // incremental rather than starting again.
@@ -4253,8 +4276,8 @@ mod tests {
         // one they opened, and the sidecar files are named from the path.
         let b = base("generations");
         let s = testing::mixed(2, 2, 2, 8);
-        let g1 = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
-        let g2 = rebuild(&b, &s.events, g1, 1_800_000_000_000).unwrap();
+        let g1 = rebuild(&b, &s.events, &[], 0, 1_800_000_000_000).unwrap();
+        let g2 = rebuild(&b, &s.events, &[], g1, 1_800_000_000_000).unwrap();
         assert_eq!((g1, g2), (1, 2));
         assert!(
             generation_path(&b, 1).exists(),
@@ -4268,11 +4291,11 @@ mod tests {
     fn a_rebuild_reproduces_the_same_state() {
         let b = base("reproduce");
         let s = testing::mixed(3, 3, 3, 20);
-        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &s.events, &[], 0, 1_800_000_000_000).unwrap();
         let a = Store::open_read(&generation_path(&b, g)).unwrap();
         let n1 = a.note_count().unwrap();
 
-        let g2 = rebuild(&b, &s.events, g, 1_800_000_000_000).unwrap();
+        let g2 = rebuild(&b, &s.events, &[], g, 1_800_000_000_000).unwrap();
         let c = Store::open_read(&generation_path(&b, g2)).unwrap();
         assert_eq!(n1, c.note_count().unwrap());
         clean(&b);
@@ -4306,7 +4329,7 @@ mod tests {
             testing::capture_body(1, "the deploy keeps timing out on staging"),
             1_700_000_000_000,
         );
-        let g = rebuild(&b, std::slice::from_ref(&e), 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, std::slice::from_ref(&e), &[], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         let hits = store.search("staging", 1_800_000_000_000).unwrap();
         assert_eq!(hits, alloc_vec(&[e.header.id()]));
@@ -4342,7 +4365,7 @@ mod tests {
             1_700_000_001_000,
         );
 
-        let g = rebuild(&b, &[cap, redact], 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &[cap, redact], &[], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
 
         let row = store.note(&tgt).unwrap().expect("the note still exists");
@@ -4386,7 +4409,7 @@ mod tests {
             testing::edit_body(2, "replacement wording with pangolin in it"),
             1_700_000_001_000,
         );
-        let g = rebuild(&b, &[cap, edit], 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &[cap, edit], &[], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         assert_eq!(
             store.search("pangolin", 1_800_000_000_000).unwrap().len(),
@@ -4427,7 +4450,7 @@ mod tests {
             1_700_000_002_000,
         );
 
-        let g = rebuild(&b, &[cap, red], 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &[cap, red], &[], 0, 1_800_000_000_000).unwrap();
         let mut store = Store::open(&generation_path(&b, g)).unwrap();
 
         // A redaction on its own destroys nothing — that is the cancellation
@@ -4469,7 +4492,7 @@ mod tests {
     fn held_events_are_recorded() {
         let b = base("held");
         let s = testing::unknown_kind(4);
-        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &s.events, &[], 0, 1_800_000_000_000).unwrap();
         let store = Store::open_read(&generation_path(&b, g)).unwrap();
         assert!(store.held_count().unwrap() > 0);
         clean(&b);
@@ -4479,7 +4502,7 @@ mod tests {
     fn discarding_a_generation_removes_its_sidecars() {
         let b = base("discard");
         let s = testing::mixed(5, 1, 1, 2);
-        let g = rebuild(&b, &s.events, 0, 1_800_000_000_000).unwrap();
+        let g = rebuild(&b, &s.events, &[], 0, 1_800_000_000_000).unwrap();
         discard_generation(&b, g).unwrap();
         assert!(!generation_path(&b, g).exists());
         clean(&b);

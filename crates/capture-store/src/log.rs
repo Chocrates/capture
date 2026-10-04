@@ -16,6 +16,25 @@ use capture_core::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// An event the log is holding and refusing to use.
+///
+/// Authentic, occupying its position, and excluded from every fold. What the
+/// projection reports as quarantined is this, re-read — not a second record
+/// kept in step by hand.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AsideRow {
+    /// The event.
+    pub id: EventId,
+    /// Its origin.
+    pub dev: Dev,
+    /// Its position in that origin.
+    pub seq: u64,
+    /// Why it is being refused.
+    pub reason: String,
+    /// When it was authored. See `aside_rows` for why not when it was seen.
+    pub at: u64,
+}
+
 use crate::{Error, Result, db};
 
 /// Schema for the durable log.
@@ -564,6 +583,56 @@ impl Log {
     /// it along with everything else leaves a note whose content is gone and
     /// nothing anywhere saying why, or that anything further should be
     /// destroyed when it turns up.
+    /// Every event this device has set aside, and why.
+    ///
+    /// The authoritative record. `aside` is a column on the log, which is never
+    /// thrown away; the projection's `quarantine` table is the *report* of it,
+    /// and a rebuild used to produce a projection with no report at all —
+    /// leaving events set aside in the log, invisible to every surface, and
+    /// `Gate::reconsider` with nothing to re-admit when a retirement was
+    /// reissued. That remedy was made local precisely so it would not depend on
+    /// a peer still holding the events.
+    ///
+    /// The moment is the event's own `hlc_wall`: when this device first *saw*
+    /// it was only ever in the projection being replaced, and the authored
+    /// instant is stable, so two rebuilds order the report identically.
+    pub fn aside_rows(&self) -> Result<Vec<AsideRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, dev, seq, aside, hlc_wall FROM events
+             WHERE aside IS NOT NULL ORDER BY hlc_wall, seq",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, dev, seq, reason, at) = r?;
+            // The column holds the hex spelling. Parsed back rather than
+            // carried as text, so the row is the same shape every other writer
+            // of a quarantine record uses and there is one conversion rather
+            // than two spellings of an origin in flight.
+            if let (Ok(id), Some(dev)) = (
+                <[u8; 32]>::try_from(id.as_slice()),
+                capture_core::id::unhex_array::<32>(&dev).map(Dev),
+            ) {
+                out.push(AsideRow {
+                    id: EventId(id),
+                    dev,
+                    seq: seq as u64,
+                    reason,
+                    at: at as u64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// The blobs the events of a note reference.
     ///
     /// Read *before* the bodies are destroyed, because the hash lives in
