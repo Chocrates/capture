@@ -101,3 +101,69 @@ claims, whatever peer relayed it. Relaying SHALL NOT confer authority.
 - **THEN** it SHALL be rejected
 - **AND** SHALL be reported as a rejected event (§4.5 tier 1)
 
+### Requirement: The log gains the entity rename, merge and bind kinds
+
+The event log SHALL accept `entity_rename`, `entity_merge` and `entity_bind`.
+Each SHALL have a golden encoding vector written before anything writes one,
+because the encoding is frozen from its first write.
+
+Each SHALL name an entity by its `ent_id` rather than by a spelling, so that a
+later rename cannot orphan an event that was about the entity rather than about
+the word.
+
+None of the three SHALL be inferred. An entity is created by a note naming it,
+and everything else here is somebody deciding.
+
+#### Scenario: A new kind round-trips byte for byte
+- **WHEN** an event of each new kind is encoded and decoded
+- **THEN** the result is identical to the input
+- **AND** its id recomputes to the same value
+
+#### Scenario: An older build holds rather than misreads
+- **WHEN** a build that does not recognise one of these kinds ingests it
+- **THEN** the event is held with a recorded reason
+- **AND** nothing is discarded
+- **AND** the event is re-evaluated after the build is upgraded
+
+#### Scenario: An entity event is not about a note
+- **WHEN** an entity event is folded
+- **THEN** it SHALL apply without requiring a note to exist as its target
+
+### Requirement: Merging is idempotent and order-independent
+
+Two `entity_merge` events joining the same pair SHALL be equivalent to one. Two
+devices merging the same pair while partitioned SHALL converge to one answer
+without either being rejected.
+
+#### Scenario: The same merge twice
+- **WHEN** the same pair is merged twice
+- **THEN** the result is the same as merging once
+
+#### Scenario: Both devices merged the same pair
+- **WHEN** two devices each merge A into B and then sync
+- **THEN** both devices agree which entity survives
+
+### Requirement: Item completion names a position
+
+`item_done` and `item_undone` SHALL identify the item by its position in the
+capture they target. They SHALL keep their kind numbers, and the body SHALL
+retain the item's text as written so that a log dump remains legible.
+
+An event written before this names its item only by text. Such an event SHALL be
+applied where that text still matches an item of the capture, and SHALL be held
+with a recorded reason where it does not — never silently dropped, and never
+applied to a different item because the words happen to match it now.
+
+#### Scenario: A completion survives its words changing
+- **WHEN** an item is ticked and the capture is later edited to reword it
+- **THEN** the completion SHALL still apply to that item
+
+#### Scenario: An older event whose text still matches
+- **WHEN** an event written before this change names an item that still exists
+- **THEN** it SHALL apply to that item
+
+#### Scenario: An older event whose text no longer matches
+- **WHEN** an event written before this change names text no item now has
+- **THEN** it SHALL be held with a recorded reason
+- **AND** SHALL NOT be applied to any other item
+
