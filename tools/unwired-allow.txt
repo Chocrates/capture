@@ -15,6 +15,7 @@
 # `crates/capture-sync/src/testing.rs` behind a feature would remove both of
 # these lines; until then they are claims rather than an oversight.
 
+reaches: kept on purpose and says so. The fold answers "is this edit sequential" from branch tips instead, and this is the primitive the specification describes; it is retained and tested against the tip rule so the equivalence is checked rather than asserted. See its doc comment in crates/capture-core/src/fold.rs.
 close: Pair is capture-sync's in-src test transport. Every caller is a test by construction, and this one causes a close mid-conversation, which Drop for End cannot express.
 ends: the only way to obtain an End from Pair, capture-sync's in-src test transport. Used by four protocol test files; shipping code gets its Transport from a socket.
 

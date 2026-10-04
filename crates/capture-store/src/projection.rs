@@ -694,11 +694,12 @@ fn review_eligible() -> String {
         "\n                 ELSE {} END",
         crate::review::interval_ms(4)
     );
+    let declined = capture_core::fold::DECLINED_AFTER;
     format!(
         "n.text IS NOT NULL
        AND n.muted_until IS NULL
        AND n.redacted_at IS NULL
-       AND COALESCE(r.deferred, 0) < 2
+       AND COALESCE(r.deferred, 0) < {declined}
        AND (r.last_shown IS NULL
             OR ?1 - r.last_shown >= {ladder})"
     )

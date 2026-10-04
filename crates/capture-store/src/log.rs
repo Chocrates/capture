@@ -8,6 +8,7 @@ use std::path::Path;
 
 use capture_core::{
     Dev, EventId,
+    body::CaptureBody,
     envelope::{Envelope, Rejection, Verdict},
     event::Header,
     hlc::Hlc,
@@ -563,6 +564,92 @@ impl Log {
     /// it along with everything else leaves a note whose content is gone and
     /// nothing anywhere saying why, or that anything further should be
     /// destroyed when it turns up.
+    /// The blobs the events of a note reference.
+    ///
+    /// Read *before* the bodies are destroyed, because the hash lives in
+    /// `CaptureBody.blob` and nowhere else — the fold does not track blobs and
+    /// there is no `blob_refs` table. Once `destroy_bodies` has run there is
+    /// nothing left that can say which recording the note had.
+    ///
+    /// Same selection as `destroy_bodies`, so the two cannot disagree about
+    /// which events a purge is about.
+    pub fn blobs_of(&self, tgt: &EventId) -> Result<Vec<[u8; 32]>> {
+        let mut st = self.conn.prepare(
+            "SELECT body FROM events
+             WHERE (tgt = ?1 OR id = ?1)
+               AND body IS NOT NULL
+               AND kind NOT IN (?2, ?3)",
+        )?;
+        let rows = st.query_map(
+            params![
+                tgt.0.to_vec(),
+                capture_core::event::Kind::REDACT.0 as i64,
+                capture_core::event::Kind::REDACT_CANCEL.0 as i64
+            ],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?;
+        let mut out = Vec::new();
+        for body in rows {
+            if let Some(h) = blob_in(&body?) {
+                out.push(h);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Whether any capture other than this note's still references a blob.
+    ///
+    /// §5.6: dropping the *last* reference is what destroys a blob. The hash is
+    /// the address, so the same recording captured twice is one blob with two
+    /// references — and destroying it because one of them was redacted would
+    /// destroy content nobody asked to lose, which is the cardinal failure
+    /// committed by the operation least able to undo it.
+    ///
+    /// A `NULL` body is a note already redacted and is not a reference worth
+    /// keeping bytes for. A body this build cannot decode **is** one: keeping
+    /// bytes nobody wanted is recoverable and destroying bytes somebody
+    /// references is not, so an unreadable body is counted rather than ignored.
+    ///
+    /// A full scan of bodies, which is acceptable here and nowhere else —
+    /// redaction already runs `VACUUM` over the whole database, and it is the
+    /// one operation where being slow and right beats being fast.
+    pub fn blob_referenced_elsewhere(&self, hash: &[u8; 32], tgt: &EventId) -> Result<bool> {
+        // Captures only. A blob reference lives on `CaptureBody` and nowhere
+        // else, and every other kind would fail to decode as one — which, under
+        // the "unreadable counts as a reference" rule below, would make a
+        // redaction's own retained payload look like a reference to every blob
+        // in the archive. It did, and the second of two notes sharing a
+        // recording kept its bytes for ever because of it.
+        let mut st = self.conn.prepare(
+            "SELECT body FROM events
+             WHERE body IS NOT NULL
+               AND kind = ?2
+               AND tgt IS NOT ?1
+               AND id IS NOT ?1",
+        )?;
+        let rows = st.query_map(
+            params![tgt.0.to_vec(), capture_core::event::Kind::CAPTURE.0 as i64],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?;
+        for body in rows {
+            let body = body?;
+            match minicbor::decode::<CaptureBody>(&body) {
+                Ok(c) => {
+                    if c.blob.map(|b| b.hash).as_ref() == Some(hash) {
+                        return Ok(true);
+                    }
+                }
+                // A capture this build cannot read. Counted as a reference:
+                // keeping bytes nobody wanted is recoverable, and destroying
+                // bytes somebody still references is not.
+                Err(_) => return Ok(true),
+            }
+        }
+        Ok(false)
+    }
+
     pub fn destroy_bodies(&mut self, tgt: &EventId) -> Result<usize> {
         let n = self.conn.execute(
             "UPDATE events SET body = NULL
@@ -803,6 +890,18 @@ fn hex_to_bytes(s: &str) -> Vec<u8> {
         .step_by(2)
         .filter_map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
         .collect()
+}
+
+/// The blob a capture body names, if it is a capture and it names one.
+///
+/// Returns `None` for any other kind of body — only a capture carries a blob
+/// reference (§4.3 puts it there so a note's permanent name does not depend on
+/// a later event having arrived).
+fn blob_in(body: &[u8]) -> Option<[u8; 32]> {
+    minicbor::decode::<CaptureBody>(body)
+        .ok()
+        .and_then(|c| c.blob)
+        .map(|b| b.hash)
 }
 
 #[cfg(test)]

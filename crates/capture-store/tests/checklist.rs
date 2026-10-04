@@ -343,7 +343,16 @@ fn carry_out(paths: &StorePaths, now: u64) {
     let mut state = Store::open(&generation_path(&paths.state, g)).unwrap();
     for w in due::due(&state.redact_queue().unwrap(), now) {
         if let due::Work::Destroy { redact, target } = w {
-            purge::execute(&mut log, &mut state, &ops, &redact, &target, now).unwrap();
+            purge::execute(
+                &mut log,
+                &mut state,
+                &ops,
+                &paths.blobs,
+                &redact,
+                &target,
+                now,
+            )
+            .unwrap();
         }
     }
 }

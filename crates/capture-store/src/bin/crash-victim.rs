@@ -296,6 +296,7 @@ fn redact_loop(root: &Path) -> Result<()> {
             &mut log,
             &mut state,
             &ops,
+            &root.join("blobs"),
             &red.header.id(),
             &tgt,
             BASE_MS + n,

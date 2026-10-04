@@ -163,10 +163,12 @@ impl Session {
         // before anything else looks at the store. An interrupted purge is
         // invisible in the log — the redaction event reads the same before and
         // after — so this is the only thing that notices.
+        let blobs_dir = s.paths.blobs.clone();
         match crate::purge::resume(
             &mut s.log,
             &mut s.state,
             &Ops::open(&s.paths.ops)?,
+            &blobs_dir,
             now_ms(),
         ) {
             Ok(0) => {}
@@ -609,10 +611,12 @@ impl Session {
                         continue;
                     }
 
+                    let blobs_dir = self.paths.blobs.clone();
                     crate::purge::execute(
                         &mut self.log,
                         &mut self.state,
                         &ops,
+                        &blobs_dir,
                         &redact,
                         &target,
                         now,

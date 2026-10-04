@@ -59,6 +59,12 @@ pub enum Phase {
     Started,
     /// Derived copies are gone; the body is still there.
     ProjectionPurged,
+    /// The blobs are gone; the bodies that name them are still there.
+    ///
+    /// Between the two on purpose. The hash lives in the capture body, so a
+    /// crash the other way round would leave bytes on disk that nothing could
+    /// ever name again — recoverable in this order, not in the other.
+    BlobsDestroyed,
     /// The body is gone; the database has not been checkpointed.
     BodyDestroyed,
 }
@@ -68,6 +74,7 @@ impl Phase {
         match self {
             Phase::Started => "started",
             Phase::ProjectionPurged => "projection-purged",
+            Phase::BlobsDestroyed => "blobs-destroyed",
             Phase::BodyDestroyed => "body-destroyed",
         }
     }
@@ -76,6 +83,7 @@ impl Phase {
         match s {
             "started" => Some(Phase::Started),
             "projection-purged" => Some(Phase::ProjectionPurged),
+            "blobs-destroyed" => Some(Phase::BlobsDestroyed),
             "body-destroyed" => Some(Phase::BodyDestroyed),
             _ => None,
         }
@@ -91,6 +99,7 @@ pub fn execute(
     log: &mut Log,
     state: &mut Store,
     ops: &Ops,
+    blobs: &std::path::Path,
     redact: &EventId,
     target: &EventId,
     now: u64,
@@ -136,7 +145,35 @@ pub fn execute(
     // unparseable or absent value means zero.
     pause_for_testing();
 
-    // 3. The irreversible step.
+    // 3. The recording, before the body that names it.
+    //
+    // §1.1 says redaction "overwrites the file before unlinking", and
+    // `blobs::destroy` does exactly that and was called by nothing. So
+    // redacting a voice note destroyed the text and left the audio on disk,
+    // in the one operation whose entire purpose is destruction.
+    //
+    // Before `destroy_bodies` because the hash lives in `CaptureBody.blob` and
+    // nowhere else — no `blob_refs` table, and the fold does not track them.
+    // Afterwards there is nothing left that can say which recording this was.
+    // It is also the only order the module's crash rule permits: a crash here
+    // leaves a body that still names a blob and a next run that can finish,
+    // where the reverse leaves bytes nothing can ever name.
+    //
+    // Only the last reference. The hash is the address, so one recording
+    // captured twice is one blob with two references, and destroying it for
+    // one of them would destroy the other note's content (§5.6).
+    for hash in log.blobs_of(target)? {
+        if log.blob_referenced_elsewhere(&hash, target)? {
+            continue;
+        }
+        // A blob this device never fetched, or already destroyed, is not an
+        // error — `destroy` returns `Ok` for a file that is not there, which is
+        // what makes the resume path work.
+        crate::blobs::destroy(blobs, &hash)?;
+    }
+    ops.begin_purge(redact, target, Phase::BlobsDestroyed, now)?;
+
+    // 4. The irreversible step.
     log.destroy_bodies(target)?;
     ops.begin_purge(redact, target, Phase::BodyDestroyed, now)?;
 
@@ -161,7 +198,13 @@ pub fn execute(
 /// Called at startup, before the due-work queue is drained. An interrupted
 /// purge is invisible in the log — the redaction event looks the same before
 /// and after — so without this the surviving copy would never be noticed again.
-pub fn resume(log: &mut Log, state: &mut Store, ops: &Ops, now: u64) -> Result<usize> {
+pub fn resume(
+    log: &mut Log,
+    state: &mut Store,
+    ops: &Ops,
+    blobs: &std::path::Path,
+    now: u64,
+) -> Result<usize> {
     let unfinished = ops.unfinished_purges()?;
     let mut done = 0;
 
@@ -170,7 +213,7 @@ pub fn resume(log: &mut Log, state: &mut Store, ops: &Ops, now: u64) -> Result<u
         // is idempotent, and "start again" has one code path where "resume from
         // step two" has one per phase — three chances to get a rarely-exercised
         // branch wrong, in the one operation that cannot be undone.
-        execute(log, state, ops, &redact, &target, now)?;
+        execute(log, state, ops, blobs, &redact, &target, now)?;
         done += 1;
     }
     Ok(done)

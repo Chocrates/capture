@@ -115,6 +115,7 @@ impl Fixture {
                     &mut self.log,
                     &mut self.state,
                     &self.ops,
+                    &self.paths.blobs,
                     &redact,
                     &target,
                     now,
@@ -276,7 +277,16 @@ fn destroying_twice_is_harmless() {
 
     let queue = f.state.redact_queue().unwrap();
     for (redact, target, _, _) in queue {
-        purge::execute(&mut f.log, &mut f.state, &f.ops, &redact, &target, NOW).unwrap();
+        purge::execute(
+            &mut f.log,
+            &mut f.state,
+            &f.ops,
+            &f.paths.blobs,
+            &redact,
+            &target,
+            NOW,
+        )
+        .unwrap();
     }
     assert!(!f.readable());
     assert_eq!(f.bodies_present(), 1);
@@ -304,7 +314,7 @@ fn an_interrupted_purge_is_finished_on_the_next_run() {
     assert_eq!(f.bodies_present(), 2, "the payloads survived the crash");
     assert_eq!(f.ops.unfinished_purges().unwrap().len(), 1);
 
-    let done = purge::resume(&mut f.log, &mut f.state, &f.ops, NOW).unwrap();
+    let done = purge::resume(&mut f.log, &mut f.state, &f.ops, &f.paths.blobs, NOW).unwrap();
     assert_eq!(done, 1);
     assert_eq!(f.bodies_present(), 1, "only the retained redaction remains");
     assert!(f.ops.unfinished_purges().unwrap().is_empty());
@@ -362,7 +372,16 @@ fn a_copy_is_not_kept_for_something_that_looks_like_a_credential() {
         state.note(&target).unwrap().unwrap().credential,
         "the predicate flagged it"
     );
-    purge::execute(&mut log, &mut state, &ops, &redact, &target, NOW).unwrap();
+    purge::execute(
+        &mut log,
+        &mut state,
+        &ops,
+        &paths.blobs,
+        &redact,
+        &target,
+        NOW,
+    )
+    .unwrap();
 
     assert_eq!(
         ops.snapshot(&redact, NOW).unwrap(),

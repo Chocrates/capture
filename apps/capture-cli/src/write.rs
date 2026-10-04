@@ -606,6 +606,21 @@ pub fn redact(paths: StorePaths, name: &str, force: bool) -> Result<()> {
         if let Some(t) = &note.text {
             say!("  {}", first_line(t));
         }
+
+        // Named, because §1.1 makes this the one confirmation in the system
+        // that must not be trained away — and it can only carry that weight if
+        // it says what actually goes. A person who would hesitate over an audio
+        // recording should not have to infer that it is included.
+        //
+        // It did not used to be included at all: `blobs::destroy` was written
+        // to overwrite and unlink the bytes and was called by nothing, so
+        // redaction destroyed the text and left the recording.
+        let recordings = s.log.blobs_of(&tgt)?.len();
+        match recordings {
+            0 => {}
+            1 => say!("  ...and the recording attached to it."),
+            n => say!("  ...and the {n} recordings attached to it."),
+        }
         say!();
         say!(
             "It cannot be undone after {} minutes.",

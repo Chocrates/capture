@@ -391,8 +391,14 @@ fn a_killed_purge_never_leaves_content_half_destroyed() {
         }
         let mut state = Store::open(&state_path).expect("the projection opens");
         let ops_w = Ops::open(&scratch.path().join("ops.db")).unwrap();
-        purge::resume(&mut log, &mut state, &ops_w, 1_800_000_000_000)
-            .expect("an interrupted purge can always be finished");
+        purge::resume(
+            &mut log,
+            &mut state,
+            &ops_w,
+            &scratch.path().join("blobs"),
+            1_800_000_000_000,
+        )
+        .expect("an interrupted purge can always be finished");
 
         assert!(
             ops_w.unfinished_purges().unwrap().is_empty(),

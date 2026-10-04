@@ -127,6 +127,18 @@ def split_out_tests(body: str):
 # not a caller either.
 CODE = re.compile(r"//.*$")
 
+# A double-quoted string, which is not a caller either.
+#
+# Stripping comments and not strings is how `blobs::destroy` went unreported
+# while nothing called it: `apps/capture-cli/src/write.rs` prints "This will
+# permanently destroy the content of:", and that literal made the function look
+# reached. Redaction left the audio of every voice note on disk.
+#
+# Crude about an escaped quote inside a string, which costs nothing here: the
+# failure mode is stripping slightly too much, and a name that appears only
+# inside a string is not a caller whatever its quoting.
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
 # A trait declaration, and the methods inside it. `pub` is implied on a
 # trait's own methods and never written, so the ordinary pattern never saw
 # them.
@@ -240,7 +252,7 @@ def main() -> int:
                 # the names it was written for: `retire` appears in a dozen
                 # explanations of what retirement is, so removing its only
                 # real caller changed nothing the scan could see.
-                code = CODE.sub("", line)
+                code = STRING.sub('""', CODE.sub("", line))
                 if re.search(rf"\b{re.escape(name)}\b", code):
                     n += 1
         return n

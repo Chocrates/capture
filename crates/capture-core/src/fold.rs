@@ -370,10 +370,21 @@ pub struct ReviewState {
     pub deferred: u32,
 }
 
+/// How many refusals end the offering.
+///
+/// Twice. Somebody who has declined an item twice has told you, and §2.7 has no
+/// graded outcome that a third ask could be justified by.
+///
+/// Public because the projection's review query needs the same number, and it
+/// used to have its own `< 2` written into the SQL beside its own copy of the
+/// resurfacing ladder. One number, one place: the review schedule has already
+/// been two copies once, and that is the shape `tools/unwired.py` exists for.
+pub const DECLINED_AFTER: u32 = 2;
+
 impl ReviewState {
     /// Whether review should stop offering this.
     pub fn declined(&self) -> bool {
-        self.deferred >= 2
+        self.deferred >= DECLINED_AFTER
     }
 }
 

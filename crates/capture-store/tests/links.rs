@@ -106,6 +106,7 @@ fn a_destroyed_note_is_not_offered_to_link_to() {
                 &mut s.log,
                 &mut s.state,
                 &ops,
+                &p.blobs,
                 &redact,
                 &target,
                 u64::MAX / 2,
