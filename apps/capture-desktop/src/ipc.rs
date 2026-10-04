@@ -702,6 +702,62 @@ pub fn tick_item_at(name: String, ord: u32, done: bool) -> std::result::Result<S
     })())
 }
 
+/// Say what a capture is, or that it is nothing in particular.
+///
+/// The other half of the confidence floor, and the half the window did not
+/// have. The recognizer deliberately declines a promotion it is not sure of —
+/// a bare task verb is below the floor, so "send sarah the migration doc" stays
+/// a note — and a person saying otherwise is the ordinary correction rather
+/// than the exceptional one.
+///
+/// Demotion goes through the same call. A thing wrongly promoted is as common
+/// as a thing wrongly left alone, and making one of those cheap and the other a
+/// trip to a terminal is the gradient §8.4 says to avoid.
+///
+/// No due date on this path: saying "this is a task" and saying when it is due
+/// are separate decisions, and `as_task` is the one that takes a day.
+///
+/// The captured text is not touched. Promotion annotates; it never rewrites
+/// (§3.1.3). `correct` writes the promotion pinned, so it beats every later
+/// reparse.
+#[tauri::command]
+pub fn set_kind(name: String, kind: String) -> std::result::Result<(), String> {
+    wire((|| {
+        let as_ = match kind.as_str() {
+            "note" => capture_core::body::Promoted::Note,
+            "task" => capture_core::body::Promoted::Task(capture_core::body::TaskFields {
+                done: false,
+                due: None,
+                order: None,
+            }),
+            // Event and series are not offered: a series needs a rule, and a
+            // free-text prompt for a recurrence is a worse surface than the
+            // capture box, which already reads "every weekday at 9".
+            other => {
+                return Err(Error::Usage(format!(
+                    "'{other}' is not a kind this can set; use note or task"
+                )));
+            }
+        };
+        capture_store::promote::correct(&paths()?, &name, as_)
+    })())
+}
+
+/// Make a capture a task, with a due date or without one.
+///
+/// The due date is a floating day — `2026-09-20` — and never an instant: "due
+/// Friday" is not 00:00 UTC on Friday (§3.6). A malformed one is refused by the
+/// store before anything is written, rather than stored and later found by a
+/// query that quietly matches nothing.
+///
+/// `None` is an ordinary answer rather than a fallback. Most tasks arrive
+/// without a day, which is why the undated band exists, and a surface that
+/// insisted on one would push people into inventing dates.
+#[tauri::command]
+pub fn as_task(name: String, due: Option<String>) -> std::result::Result<(), String> {
+    wire((|| capture_store::promote::as_task(&paths()?, &name, due.as_deref()))())
+}
+
 /// Take the reading the archive offered but would not act on.
 ///
 /// The other half of the confidence floor. Below it a recognition is shown and
@@ -1210,6 +1266,70 @@ impl capture_store::calendar::Timed for Occurrence {
 pub fn set_task_done(name: String, done: bool) -> std::result::Result<(), String> {
     wire((|| {
         capture_store::promote::set_done(&paths()?, &name, done)
+    })())
+}
+
+/// One outstanding task, in the band it belongs to.
+///
+/// Mirrors the binding the phone uses, field for field, because the two are
+/// answering the same question and a shape that differed would invite the two
+/// surfaces to differ with it.
+#[derive(Serialize)]
+pub struct TaskLine {
+    pub slug: String,
+    /// What was captured, verbatim. Absent for the same reasons as elsewhere:
+    /// redacted, queued for redaction, or not yet readable.
+    pub text: Option<String>,
+    /// The projection's one-line rendering, so this surface cannot format the
+    /// fields differently from the timeline or the note page.
+    pub descriptor: String,
+    /// The due date as a floating day, `2026-09-20`, never an instant.
+    pub due: Option<String>,
+    /// `overdue`, `due` or `undated`.
+    ///
+    /// Carried per row rather than answered as three lists: a surface given
+    /// three lists cannot say "nothing outstanding" without consulting all of
+    /// them, and is free to draw them in an order of its own.
+    pub band: &'static str,
+}
+
+/// What is outstanding, banded.
+///
+/// The window was the first-party surface without this, and the gap was not a
+/// missing convenience: a task occupies no time (§3.6) so the agenda cannot
+/// hold it, and the agenda's due band wants a due date — so an *undated* task,
+/// which is the ordinary kind, was reachable here only by scrolling a timeline
+/// ordered by when things were captured.
+#[tauri::command]
+pub fn tasks() -> std::result::Result<Vec<TaskLine>, String> {
+    wire((|| {
+        let s = read_only()?;
+        // Today in the *reading* zone, which is what the overdue boundary is
+        // defined against: a task due today is not overdue, and a day computed
+        // somewhere else is wrong for several hours around midnight.
+        let zone =
+            capture_time::Zone::new(jiff::tz::TimeZone::system().iana_name().unwrap_or("UTC"))
+                .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
+        let today = format!("{}", capture_time::civil_date(now_ms() as i64, zone));
+        let mut out = Vec::new();
+        for row in s.tasks_outstanding(&today)? {
+            out.push(TaskLine {
+                slug: s.slug_of(&row.tgt)?.unwrap_or_default(),
+                // Taken separately from the descriptor, and withheld on the
+                // same terms as everywhere else: `tasks_outstanding` filters on
+                // the promotion alone, so a task whose destruction has been
+                // ordered is still owed and still listed — with its words gone.
+                text: s.text_of(&row.tgt)?,
+                descriptor: row.descriptor,
+                due: row.due,
+                band: match row.band {
+                    projection::Band::Overdue => "overdue",
+                    projection::Band::Due => "due",
+                    projection::Band::Undated => "undated",
+                },
+            });
+        }
+        Ok(out)
     })())
 }
 

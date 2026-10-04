@@ -294,17 +294,38 @@ fn line(text: Option<&str>, o: &projection::OccurrenceRow) -> String {
 /// Notes promoted to tasks.
 pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     let store = open(paths)?;
-    let rows = store.promoted("task", 500)?;
+    // `tasks_outstanding`, not `promoted("task", ..)`. The latter is every task
+    // promotion ever made, flat and in no band — so this command listed
+    // finished tasks ("done · due 2026-09-20") and had none of the three bands
+    // the requirement names, while the query that does both sat beside it with
+    // its boundaries property-tested.
+    //
+    // Found by completing a task and looking, rather than by reading: the
+    // store's own test asserts a finished task leaves `tasks_outstanding`, and
+    // this command was not asking `tasks_outstanding`.
+    // Today in the reading zone, which is what the overdue boundary is defined
+    // against: a task due today is not overdue.
+    let zone = capture_time::Zone::new(&local_zone()).unwrap_or_else(utc);
+    let today = format!("{}", capture_time::civil_date(now_ms(), zone));
+    let rows = store.tasks_outstanding(&today)?;
 
     if json {
         let items: Vec<String> = rows
             .iter()
-            .filter_map(|(tgt, descriptor)| {
-                let slug = store.slug_of(tgt).ok().flatten()?;
+            .filter_map(|row| {
+                let slug = store.slug_of(&row.tgt).ok().flatten()?;
+                // `band` and `due` ride along: a consumer handed only a
+                // descriptor has to parse prose to learn when something is due,
+                // and cannot tell overdue from merely open at all.
                 Some(format!(
-                    "{{\"slug\":{},\"descriptor\":{}}}",
+                    "{{\"slug\":{},\"descriptor\":{},\"band\":{},\"due\":{}}}",
                     quote(&slug),
-                    quote(descriptor)
+                    quote(&row.descriptor),
+                    quote(band_name(row.band)),
+                    row.due
+                        .as_deref()
+                        .map(quote)
+                        .unwrap_or_else(|| "null".into())
                 ))
             })
             .collect();
@@ -322,7 +343,7 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     }
 
     if rows.is_empty() {
-        say!("No tasks.");
+        say!("Nothing outstanding.");
         say!();
         say!("A capture becomes one on its own where a verb and a day agree —");
         say!("\"call the dentist tomorrow\". A verb with no day is a suggestion");
@@ -330,18 +351,43 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
         say_if_behind(&store);
         return Ok(());
     }
-    for (tgt, descriptor) in rows {
-        let slug = store.slug_of(&tgt)?.unwrap_or_default();
-        let text = store.text_of(&tgt)?;
-        say!(
-            "  {:<28}  {:<22}  {}",
-            slug,
-            descriptor,
-            text.as_deref().map(first_line).unwrap_or_default()
-        );
+    // Banded, in the order the requirement states, and the undated band drawn
+    // rather than folded into the others: a task with no due date is the
+    // ordinary case, because a bare task verb is below the confidence floor and
+    // somebody saying "send sarah the migration doc" is not saying when.
+    for (band, label) in [
+        (capture_store::projection::Band::Overdue, "overdue"),
+        (capture_store::projection::Band::Due, "due"),
+        (capture_store::projection::Band::Undated, "no date"),
+    ] {
+        let mine: Vec<&capture_store::projection::TaskRow> =
+            rows.iter().filter(|r| r.band == band).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        say!("{label}");
+        for row in mine {
+            let slug = store.slug_of(&row.tgt)?.unwrap_or_default();
+            let text = store.text_of(&row.tgt)?;
+            say!(
+                "  {:<28}  {:<22}  {}",
+                slug,
+                row.descriptor,
+                text.as_deref().map(first_line).unwrap_or_default()
+            );
+        }
     }
     say_if_behind(&store);
     Ok(())
+}
+
+/// The band, as the one word every surface uses for it.
+fn band_name(b: capture_store::projection::Band) -> &'static str {
+    match b {
+        capture_store::projection::Band::Overdue => "overdue",
+        capture_store::projection::Band::Due => "due",
+        capture_store::projection::Band::Undated => "undated",
+    }
 }
 
 /// Enough of an id to name one plan, the way a short commit hash does.

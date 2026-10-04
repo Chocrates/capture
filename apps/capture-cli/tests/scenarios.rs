@@ -410,3 +410,63 @@ fn splitting_on_something_that_is_not_a_rule_says_so() {
     assert!(code != 0, "a non-rule was accepted");
     assert!(out.contains("not a repeating rule"), "{out}");
 }
+
+/// A finished task leaves the listing, and the listing is banded.
+///
+/// `read::tasks` called `promoted("task", 500)` — every task promotion ever
+/// made, flat and unbanded — rather than `tasks_outstanding`, which bands them
+/// and drops the finished ones. So completing a task left it on screen reading
+/// "done · due 2026-09-20", and the three bands the requirement names were
+/// absent entirely.
+///
+/// The store's own test asserted all of this of `tasks_outstanding` the whole
+/// time. The command simply was not asking `tasks_outstanding`, and nothing
+/// checked what the command did.
+#[test]
+fn completing_a_task_takes_it_out_of_the_listing() {
+    let s = Store::new("tasks-banded");
+
+    let overdue = s.capture("pay the invoice");
+    let later = s.capture("call the plumber");
+    let undated = s.capture("send sarah the migration doc");
+    s.ok(&["settle"]);
+    s.ok(&["task", &overdue, "2026-09-20"]);
+    s.ok(&["task", &later, "2036-12-01"]);
+    s.ok(&["task", &undated]);
+
+    let listed = s.ok(&["tasks"]);
+    for band in ["overdue", "due", "no date"] {
+        assert!(
+            listed.contains(band),
+            "the {band} band is missing:\n{listed}"
+        );
+    }
+    assert!(listed.contains(&overdue), "the overdue task is missing");
+
+    // The one that was wrong: a finished task stays listed.
+    s.ok(&["done", &overdue]);
+    let after = s.ok(&["tasks"]);
+    assert!(
+        !after.contains(&overdue),
+        "a finished task is still outstanding:\n{after}"
+    );
+    assert!(
+        !after.contains("overdue"),
+        "an empty band is still drawn:\n{after}"
+    );
+    assert!(after.contains(&later), "an open task was dropped too");
+
+    // `band` and `due` ride along, because a consumer handed only a descriptor
+    // has to parse prose to learn when something is due.
+    let json = s.ok(&["tasks", "--json"]);
+    assert!(json.contains("\"band\":\"due\""), "{json}");
+    assert!(json.contains("\"due\":\"2036-12-01\""), "{json}");
+    assert!(json.contains("\"band\":\"undated\""), "{json}");
+
+    s.ok(&["done", &later]);
+    s.ok(&["done", &undated]);
+    assert!(
+        s.ok(&["tasks"]).contains("Nothing outstanding"),
+        "an empty surface should say so plainly"
+    );
+}

@@ -1125,6 +1125,47 @@ function actions(n, into = view, promotion = null) {
     });
   }
 
+  // Saying what a capture is, which the recognizer deliberately declines to
+  // guess at. A bare task verb is below the floor by design — "send sarah the
+  // migration doc" is a task and the parser will not say so — and until now the
+  // only way to correct that from the window was not to.
+  //
+  // Distinct from accepting a suggestion, which takes the reading the
+  // recognizer *made* and was not confident enough to apply. That control needs
+  // there to be a reading; this one is for when there is none, which is exactly
+  // when somebody needs it.
+  if (promotion?.kind !== "task") {
+    add("Make a task…", async () => {
+      // Empty is an ordinary answer, not a refusal: deciding a thing is owed
+      // and deciding when it is owed are different decisions, and most tasks
+      // arrive without a day. A prompt that insisted would push people into
+      // inventing dates.
+      const due = prompt(
+        "Due when? YYYY-MM-DD, or leave empty for no date.",
+        "",
+      );
+      if (due === null) return;
+      await call("as_task", { name: n.slug, due: due.trim() || null });
+      toast("A task now. The text is unchanged.");
+      showNote(n.slug, into);
+    });
+  }
+
+  // Demotion, which the requirement names specifically: a thing wrongly
+  // promoted is as common as a thing wrongly left alone.
+  //
+  // Offered for a series too — demoting one needs no rule, which is what
+  // separates it from the other direction. Making something a series means
+  // writing a recurrence, and a free-text prompt for one is a worse surface
+  // than the capture box, which already reads "every weekday at 9".
+  if (promotion && promotion.kind && promotion.kind !== "note") {
+    add("Make a note", async () => {
+      await call("set_kind", { name: n.slug, kind: "note" });
+      toast("A plain note now. The text is unchanged.");
+      showNote(n.slug, into);
+    });
+  }
+
   add("Rename", async () => {
     const alias = prompt("A chosen name (blank clears it):", n.alias || "");
     if (alias === null) return;
@@ -1391,6 +1432,74 @@ let listTag = null;
 /// taken from the row rather than from the page. Position alone is meaningless
 /// here, because position 0 exists in every capture under the tag — which is
 /// why the line carries where it came from.
+/// What is outstanding, in the three bands.
+///
+/// The window was the first-party surface without this, and the gap was not a
+/// missing convenience. A task occupies no time (§3.6) so the agenda cannot
+/// hold it, and the agenda's due band wants a due date — so an *undated* task,
+/// which is the ordinary kind, was reachable here only by scrolling a timeline
+/// ordered by when things were captured rather than by whether they are owed.
+///
+/// Beside Agenda deliberately: the two answer the halves of one question, and
+/// §3.6's whole discriminator is that a thing you attend and a thing you owe
+/// are different.
+async function showTasks() {
+  const mine = beginRender();
+  current = "tasks";
+  view.replaceChildren();
+
+  const rows = await call("tasks", {});
+  if (stale(mine)) return;
+
+  const frame = el("div", "tasks");
+  view.append(frame);
+
+  if (!rows.length) {
+    // Plainly, and not as a failure. Nothing outstanding is the good state.
+    frame.append(el("p", "empty", "Nothing outstanding."));
+    return;
+  }
+
+  // In this order, and the undated band present rather than folded into the
+  // others: a task with no due date is the ordinary case, because the
+  // recognizer refuses to promote a bare task verb and a person saying "send
+  // sarah the migration doc" is not saying when.
+  const bands = [
+    ["overdue", "Overdue"],
+    ["due", "Due"],
+    ["undated", "No date"],
+  ];
+
+  for (const [key, label] of bands) {
+    const mine_ = rows.filter((r) => r.band === key);
+    if (!mine_.length) continue;
+    // The agenda's own band label, not a second one that looks nearly the
+    // same: these are the same idea on two surfaces.
+    frame.append(el("div", "band-label", label));
+    const ul = el("ul", "task-rows");
+    for (const row of mine_) {
+      const li = el("li", "task-row");
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = false;
+      box.title = "done";
+      box.addEventListener("change", async () => {
+        // The same write the command line and the phone make. The view has the
+        // slug to hand and could author the event itself; two paths to one
+        // state is how two surfaces come to disagree about it.
+        await call("set_task_done", { name: row.slug, done: box.checked });
+        showTasks();
+      });
+      const open = el("button", "task-text", row.text || row.descriptor);
+      open.addEventListener("click", () => openNote(row.slug));
+      li.append(box, open);
+      if (row.due) li.append(el("span", "task-due", row.due));
+      ul.append(li);
+    }
+    frame.append(ul);
+  }
+}
+
 async function showLists(tag) {
   const mine = beginRender();
   current = "lists";
@@ -2000,6 +2109,7 @@ document.querySelectorAll("nav button[data-view]").forEach((b) => {
     else if (b.dataset.view === "agenda") showAgenda(today());
     else if (b.dataset.view === "review") showReview();
     else if (b.dataset.view === "lists") showLists(listTag);
+    else if (b.dataset.view === "tasks") showTasks();
     else showTimeline();
   });
 });

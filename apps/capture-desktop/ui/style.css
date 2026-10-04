@@ -455,6 +455,39 @@ nav .hist:not(:disabled):hover { color: var(--text); }
   padding-bottom: 0.4rem;
   margin-bottom: 0.4rem;
 }
+/* What is outstanding, banded. A task occupies no time, so it is not on the
+ * agenda — this is the other half of that question. */
+.tasks { padding: .5rem 0; }
+.tasks .band-label { margin: .9rem 0 .3rem; }
+.tasks .band-label:first-child { margin-top: 0; }
+.task-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-row {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  padding: .2rem 0;
+}
+.task-row input[type="checkbox"] { cursor: pointer; }
+.task-text {
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.task-text:hover { text-decoration: underline; }
+.task-due {
+  margin-left: auto;
+  font-size: .75rem;
+  color: var(--dim, #8a8f98);
+}
+
 .band-label {
   font-size: 0.7rem;
   text-transform: uppercase;

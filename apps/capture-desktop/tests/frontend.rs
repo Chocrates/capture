@@ -850,3 +850,98 @@ fn the_lists_view_ticks_by_capture_and_position() {
         "a gathered list should say that it is one",
     );
 }
+
+/// The window answers what is outstanding, in the three bands.
+///
+/// It was the first-party surface without one, and the gap was not a missing
+/// convenience: a task occupies no time (§3.6) so the agenda cannot hold it,
+/// and the agenda's due band wants a due date — so an *undated* task, which is
+/// the ordinary kind, was reachable here only by scrolling a timeline ordered
+/// by when things were captured.
+#[test]
+fn the_window_shows_outstanding_tasks_in_bands() {
+    let js = ui_code("app.js");
+    let html = ui_code("index.html");
+
+    assert!(
+        html.contains("data-view=\"tasks\""),
+        "the window should offer a Tasks view",
+    );
+
+    let at = js.find("showTasks").expect("the view exists");
+    let body = &js[at..];
+
+    assert!(
+        body.contains("call(\"tasks\""),
+        "the view should read what is outstanding",
+    );
+
+    // The undated band present rather than folded into the others. This is the
+    // one the window had no way to reach at all.
+    assert!(
+        body.contains("\"undated\""),
+        "the undated band must be drawn, not folded in",
+    );
+    assert!(body.contains("\"overdue\"") && body.contains("\"due\""));
+
+    // Completed through the write the other surfaces make. The view has the
+    // slug to hand and could author the event itself; two paths to one state is
+    // how two surfaces come to disagree about it.
+    assert!(
+        body.contains("set_task_done"),
+        "completing should be the same write the command line makes",
+    );
+
+    // Nothing outstanding reads as nothing, not as a failure.
+    assert!(
+        body.contains("Nothing outstanding"),
+        "an empty surface should say so plainly",
+    );
+}
+
+/// A wrong kind is correctable from the window, both directions.
+///
+/// The window had the half that comes from the recognizer — accepting a
+/// suggestion it made but was not confident enough to apply — and neither of
+/// the halves that come from a person. Saying "this is a task" is the ordinary
+/// correction, because a bare task verb is below the confidence floor by
+/// design: the parser will not call "send sarah the migration doc" a task, and
+/// until now the window could not either.
+#[test]
+fn the_note_page_can_correct_a_kind() {
+    let js = ui_code("app.js");
+
+    let at = js.find("function actions(").expect("the action row exists");
+    let body = &js[at..];
+
+    assert!(
+        body.contains("call(\"as_task\""),
+        "a note should be makeable into a task",
+    );
+    assert!(
+        body.contains("call(\"set_kind\", { name: n.slug, kind: \"note\" })"),
+        "a promoted capture should be demotable to a note",
+    );
+
+    // Empty is an ordinary answer. Deciding a thing is owed and deciding when
+    // it is owed are different decisions, and most tasks arrive without a day —
+    // which is why the undated band exists at all.
+    assert!(
+        body.contains("due: due.trim() || null"),
+        "the due date must be optional, not demanded",
+    );
+
+    // Not offered where it would do nothing: an action that does nothing
+    // teaches that actions might not work.
+    assert!(
+        body.contains("promotion?.kind !== \"task\""),
+        "making a task should be hidden on something already a task",
+    );
+
+    // Promotion annotates and never rewrites, and the surface says so rather
+    // than leaving somebody to wonder what a correction touched.
+    assert!(
+        body.contains("The text is unchanged"),
+        "the window should say what a correction did not touch",
+    );
+}

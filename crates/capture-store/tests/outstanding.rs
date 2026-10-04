@@ -174,3 +174,49 @@ fn a_finished_task_leaves_the_bands() {
         "a finished task stayed outstanding"
     );
 }
+
+#[test]
+fn a_task_whose_destruction_is_ordered_is_still_outstanding() {
+    // Written to find out. §1.1 withholds a capture's content the moment the
+    // destruction is *ordered*, and `ALERTABLE` honours that — a queued note
+    // may not produce an alert. `tasks_outstanding` filters on neither the
+    // redaction queue nor muting: its WHERE clause is the promotion's kind and
+    // whether it is done.
+    let scratch = Scratch::new("queued");
+    let paths = scratch.paths();
+
+    let slug = capture(&paths, "send sarah the migration doc");
+    promote::as_task(&paths, &slug, Some(&day(5))).unwrap();
+    let today = day(10);
+    assert_eq!(settled(&paths).tasks_outstanding(&today).unwrap().len(), 1);
+
+    capture_store::mutate::redact(&paths, &slug).unwrap();
+
+    let rows = settled(&paths).tasks_outstanding(&today).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a task queued for destruction left the bands — good, but then this \
+         test states the old answer"
+    );
+
+    // What it carries is the promotion's own rendering, not the capture's
+    // words: `descriptor` is composed from the kind and the due date. So the
+    // row says a task is owed and when, and not what it says.
+    assert!(
+        !rows[0].descriptor.contains("sarah"),
+        "the descriptor carried the capture's words: {}",
+        rows[0].descriptor
+    );
+
+    // And the words themselves are withheld, which is what makes the row
+    // acceptable rather than a leak: a surface drawing this task gets "something
+    // is owed, and when", and nothing the redaction was asked to remove.
+    let store = settled(&paths);
+    let tgt = store.resolve(&slug).unwrap().unwrap();
+    assert_eq!(
+        store.text_of(&tgt).unwrap(),
+        None,
+        "a task queued for destruction still answered its text"
+    );
+}
