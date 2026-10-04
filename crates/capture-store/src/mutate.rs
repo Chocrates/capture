@@ -23,7 +23,8 @@ use capture_core::{
     EventId,
     body::{
         AliasBody, EditBody, EntityBindBody, EntityMergeBody, EntityRenameBody, MuteBody,
-        MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody, UntagBody,
+        MuteScope, OccBody, OccMoveBody, PinBody, RedactCancelBody, ResolveBody, TagBody,
+        UntagBody,
     },
     event::Kind,
     id::EntId,
@@ -591,4 +592,84 @@ fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
     let mut b = Vec::new();
     minicbor::encode(v, &mut b).expect("encoding into Vec is infallible");
     b
+}
+
+// ------------------------------------------------- one occurrence ----------
+//
+// Three of the five exception kinds were numbered, encoded, folded, rendered
+// and tested in m2, and two of them were wired to a surface. `occ_done` and
+// `occ_undone` are reachable as `capture done <series> <occ>`; `occ_cancel`,
+// `occ_move` and `occ_edit` were reachable only from a hand-written append
+// inside a test. The browse spec meanwhile describes a cancelled occurrence as
+// "hidden but not gone", which is a state nothing could produce.
+//
+// These are in the store rather than in the command line — where `occurrence`
+// still lives — because §8.4 wants every mutation reachable from the window
+// too, and a second implementation there is how two surfaces come to disagree.
+
+/// Skip one occurrence of a series, leaving the rule alone.
+///
+/// The gesture for "not this Thursday". Editing the rule would change every
+/// future occurrence, and leaving the entry standing shows a meeting that is
+/// not happening — so without this both available answers are wrong.
+///
+/// Named by its original start, which is what an occurrence *is* (§3.5): the
+/// instant the rule would have produced, before any move. A moved occurrence
+/// keeps that name, so skipping one somebody rescheduled still finds it.
+///
+/// Skipping what is already skipped is not an error. It is the state that was
+/// asked for, and a refusal that depends on current state makes a gesture
+/// somebody has to check before using.
+pub fn skip_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = series(&s, name)?;
+    s.append(Kind::OCC_CANCEL, Some(tgt), None, |nonce| {
+        encode(&OccBody { nonce, occ })
+    })?;
+    Ok(())
+}
+
+/// Put a skipped occurrence back.
+///
+/// Written as a *move* to the occurrence's own original start, because that is
+/// how the fold resolves it: `apply_occ` sets `cancelled` and nothing clears
+/// it, and m2 implemented a move beating a cancel on the same occurrence
+/// deliberately — "a resurrected occurrence is visible and one gesture away; a
+/// wrongly cancelled one is invisible and silently missed".
+///
+/// So there is no un-cancel event, and adding one would make that conflict rule
+/// ambiguous rather than simpler. Moving something to where it already was is a
+/// no-op about time and a statement about cancellation.
+pub fn restore_occurrence(paths: &StorePaths, name: &str, occ: i64) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = series(&s, name)?;
+    s.append(Kind::OCC_MOVE, Some(tgt), None, |nonce| {
+        encode(&OccMoveBody {
+            nonce,
+            occ,
+            // Back to its own name, which is its original start by definition.
+            start_ms: occ,
+            // Whatever the rule says. An end invented here would put a length
+            // on the calendar nobody chose, which is the same refusal the
+            // promoter makes about §3.3's "30m default".
+            end_ms: None,
+        })
+    })?;
+    Ok(())
+}
+
+/// The note a series exception is about, refusing anything that is not one.
+///
+/// A plain note has no occurrences, and an exception naming it would sit in the
+/// log for ever recording a mistake that changes nothing when folded — the
+/// system silently right and the person silently wrong.
+fn series(s: &Session, name: &str) -> Result<EventId> {
+    let tgt = find(s, name)?;
+    if s.state.occurrences_of(&tgt)?.is_empty() {
+        return Err(Error::Usage(format!(
+            "'{name}' has no occurrences, so there is nothing to skip. \
+             Occurrences come from a repeating capture — \"standup every weekday at 9\""
+        )));
+    }
+    Ok(tgt)
 }

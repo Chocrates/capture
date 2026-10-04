@@ -85,6 +85,7 @@ fn run(command: Command) -> Result<()> {
         Command::Tasks { json } => read::tasks(&paths()?, json),
         Command::Settle { json } => write::settle(&paths()?, json),
         Command::Held { json } => ops::held(&paths()?, json),
+        Command::Skip { name, occ, skipped } => write::skip(&paths()?, &name, occ, skipped),
         Command::List { tag, json } => read::list(&paths()?, &tag, json),
         Command::Due { json } => read::due(&paths()?, json),
         Command::Tick { tag, item, done } => write::tick(paths()?, &tag, &item, done),

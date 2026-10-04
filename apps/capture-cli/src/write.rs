@@ -211,6 +211,26 @@ pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result
     Ok(())
 }
 
+/// Skip one occurrence of a series, or put it back.
+///
+/// The store decides both, because §8.4 wants every mutation reachable from the
+/// window as well and a second implementation there is how two surfaces come to
+/// disagree. `occurrence` above still writes its own event and should probably
+/// move too; that is a separate tidy rather than something to do halfway here.
+pub fn skip(paths: &StorePaths, name: &str, occ: i64, skipped: bool) -> Result<()> {
+    if skipped {
+        capture_store::mutate::skip_occurrence(paths, name, occ)?;
+        say!("{name} skipped for that occurrence.");
+        say!("The rule is unchanged, and every other occurrence stands.");
+    } else {
+        capture_store::mutate::restore_occurrence(paths, name, occ)?;
+        say!("{name} restored for that occurrence.");
+        // Said because the log is the record and somebody may go looking.
+        say!("The cancellation stays in the log; the move supersedes it.");
+    }
+    Ok(())
+}
+
 /// Record what became of a resurfaced note.
 ///
 /// Three outcomes and no fourth. §2.7 withdrew the graded one — there is

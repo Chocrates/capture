@@ -179,6 +179,15 @@ pub enum Command {
         /// Whether it is complete.
         done: bool,
     },
+    /// Skip one occurrence of a series, or put it back.
+    Skip {
+        /// The series.
+        name: String,
+        /// Which occurrence, as its original start in milliseconds.
+        occ: i64,
+        /// Whether it is skipped.
+        skipped: bool,
+    },
     /// Notes matching a query.
     Search {
         query: String,
@@ -840,6 +849,30 @@ where
         }
         "resolve" => one_name(&args[1..], "resolve", |name, _| Command::Resolve { name }),
         "log" => one_name(&args[1..], "log", |name, json| Command::Log { name, json }),
+        "skip" | "unskip" => {
+            let skipped = args[0] == "skip";
+            match &args[1..] {
+                // Named exactly as `capture done` names one, rather than a
+                // second convention for two of the five exceptions.
+                [name, occ] => occ
+                    .parse::<i64>()
+                    .map(|occ| Command::Skip {
+                        name: name.clone(),
+                        occ,
+                        skipped,
+                    })
+                    .map_err(|_| Bad::UnknownFlag {
+                        command: args[0].clone(),
+                        flag: occ.clone(),
+                    }),
+                _ => Err(Bad::Value {
+                    command: args[0].clone(),
+                    problem: "expected a series and an occurrence, as its original start \
+                              in milliseconds — capture show <series> lists them"
+                        .into(),
+                }),
+            }
+        }
         "quarantine" => Ok(Command::Quarantine {
             json: has_json(&args[1..]),
         }),
@@ -1212,6 +1245,8 @@ TIME AND TASKS
   capture due                    what will speak, and when
   capture settle                 read captures nothing has read yet
   capture held                   events stored but not folded, and why
+  capture skip <series> <occ>    not this one; the rule is untouched
+                               (unskip puts it back)
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
@@ -1505,6 +1540,29 @@ mod tests {
             let msg = p(&naming_nothing).unwrap_err().message();
             assert!(msg.contains("names nothing"), "{naming_nothing:?}: {msg}");
         }
+    }
+
+    #[test]
+    fn skip_names_an_occurrence_the_way_done_does() {
+        assert_eq!(
+            p(&["skip", "standup", "1791208800000"]).unwrap(),
+            Command::Skip {
+                name: "standup".into(),
+                occ: 1_791_208_800_000,
+                skipped: true,
+            }
+        );
+        assert_eq!(
+            p(&["unskip", "standup", "1791208800000"]).unwrap(),
+            Command::Skip {
+                name: "standup".into(),
+                occ: 1_791_208_800_000,
+                skipped: false,
+            }
+        );
+        // A series with no occurrence is the `done` shape, which means a task.
+        // There is no task to skip, so it is a refusal rather than a guess.
+        assert!(p(&["skip", "standup"]).is_err());
     }
 
     #[test]

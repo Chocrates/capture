@@ -777,3 +777,150 @@ fn ticking_an_event_does_not_shorten_it() {
         "ticking it threw away how long it was"
     );
 }
+
+// ------------------------------------------------- skipping one ------------
+//
+// `occ_cancel` and `occ_move` had a frozen kind, a body, a fold arm, a
+// projection column, a conflict rule and tests, and nothing emitted them. The
+// browse spec meanwhile described a cancelled occurrence as "hidden but not
+// gone", which is a state no surface could produce.
+
+#[test]
+fn skipping_one_occurrence_leaves_the_rest_of_the_series_alone() {
+    let sc = Scratch::new("skip");
+    let p = sc.paths();
+    let (name, tgt) = weekday_series(&p);
+
+    let before = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    let target = before[2].occ;
+
+    capture_store::mutate::skip_occurrence(&p, &name, target).unwrap();
+
+    let after = rebuild(&p, NOW).occurrences_of(&tgt).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the rule did not change, so the occurrences it produces did not either"
+    );
+    for (a, b) in after.iter().zip(before.iter()) {
+        assert_eq!(
+            a.occ, b.occ,
+            "an occurrence was renamed by skipping another"
+        );
+        if a.occ == target {
+            assert!(a.cancelled, "the one that was skipped is flagged");
+        } else {
+            assert!(!a.cancelled, "only the named occurrence is skipped");
+        }
+    }
+}
+
+#[test]
+fn a_restored_occurrence_is_visible_again() {
+    // The bug this found: `OccState::visible()` says a move beats a cancel, and
+    // `occurrences_of`'s own comment claims the same — but the expansion wrote
+    // `cancelled` straight through and ignored `moved_to`. So the rule was true
+    // in the fold and absent from the column every surface filters on, and the
+    // designed recovery gesture did nothing. Found by trying to use it.
+    let sc = Scratch::new("restore");
+    let p = sc.paths();
+    let (name, tgt) = weekday_series(&p);
+    let target = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[2].occ;
+
+    capture_store::mutate::skip_occurrence(&p, &name, target).unwrap();
+    assert!(
+        at(&rebuild(&p, NOW), &tgt, target).cancelled,
+        "it should be skipped first, or this proves nothing"
+    );
+
+    capture_store::mutate::restore_occurrence(&p, &name, target).unwrap();
+
+    let row = at(&rebuild(&p, NOW), &tgt, target);
+    assert!(
+        !row.cancelled,
+        "a move beats a cancel, and nothing read that"
+    );
+    assert_eq!(
+        row.start_ms, target,
+        "restoring puts it back where the rule had it"
+    );
+}
+
+#[test]
+fn skipping_is_idempotent_and_so_is_restoring() {
+    // Both are statements about a state rather than toggles. A refusal that
+    // depended on the current state would make a gesture somebody has to check
+    // before using.
+    let sc = Scratch::new("idempotent");
+    let p = sc.paths();
+    let (name, tgt) = weekday_series(&p);
+    let target = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[2].occ;
+
+    capture_store::mutate::skip_occurrence(&p, &name, target).unwrap();
+    capture_store::mutate::skip_occurrence(&p, &name, target).unwrap();
+    assert!(at(&rebuild(&p, NOW), &tgt, target).cancelled);
+
+    capture_store::mutate::restore_occurrence(&p, &name, target).unwrap();
+    capture_store::mutate::restore_occurrence(&p, &name, target).unwrap();
+    assert!(!at(&rebuild(&p, NOW), &tgt, target).cancelled);
+}
+
+#[test]
+fn the_cancellation_stays_in_the_log_after_a_restore() {
+    // "Hidden but not gone" is the spec's phrase, and it is about the log
+    // rather than the view: nothing is destroyed, the move simply supersedes.
+    let sc = Scratch::new("kept");
+    let p = sc.paths();
+    let (name, tgt) = weekday_series(&p);
+    let target = rebuild(&p, NOW).occurrences_of(&tgt).unwrap()[2].occ;
+
+    capture_store::mutate::skip_occurrence(&p, &name, target).unwrap();
+    capture_store::mutate::restore_occurrence(&p, &name, target).unwrap();
+
+    let log = capture_store::log::Log::open_read(&p.events).unwrap();
+    let cancels = log
+        .all()
+        .unwrap()
+        .iter()
+        .filter(|e| e.header.kind == Kind::OCC_CANCEL)
+        .count();
+    assert_eq!(
+        cancels, 1,
+        "the cancellation was rewritten rather than kept"
+    );
+}
+
+#[test]
+fn a_note_with_no_occurrences_is_not_a_series() {
+    // An exception naming a plain note would sit in the log for ever recording
+    // a mistake that changes nothing when folded — the system silently right
+    // and the person silently wrong.
+    let sc = Scratch::new("notaseries");
+    let p = sc.paths();
+    let slug = {
+        let mut s = Session::open(p.clone()).unwrap();
+        let body = capture_store::session::capture_body("an ordinary note").unwrap();
+        s.capture(&body).unwrap().slug
+    };
+    promote::settle(&p).unwrap();
+
+    let e = capture_store::mutate::skip_occurrence(&p, &slug, 0).unwrap_err();
+    assert!(
+        format!("{e}").contains("no occurrences"),
+        "it should say what was expected: {e}"
+    );
+}
+
+/// One occurrence of a series, by its original start.
+fn at(
+    store: &capture_store::projection::Store,
+    tgt: &capture_core::EventId,
+    occ: i64,
+) -> capture_store::projection::OccurrenceRow {
+    store
+        .occurrences_of(tgt)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.occ == occ)
+        .expect("the occurrence is still produced by the rule")
+}

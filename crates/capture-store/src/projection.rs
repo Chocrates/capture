@@ -3367,7 +3367,18 @@ fn expand_occurrences(
                             capture_time::Shift::Gap => "gap",
                             capture_time::Shift::Ambiguous => "ambiguous",
                         }),
-                        ex.map(|e| e.cancelled).unwrap_or(false) as i64,
+                        // `visible()`, not `cancelled`. A move beats a
+                        // cancellation on the same occurrence (§6, and m2's
+                        // task 3.4 implemented it) — a resurrected occurrence
+                        // is visible and one gesture away, where a wrongly
+                        // cancelled one is invisible and silently missed.
+                        //
+                        // That rule lived in `OccState::visible()` and was read
+                        // by nothing but its own test. This column is what
+                        // every surface filters on, so the rule was true in the
+                        // fold and absent everywhere it mattered — and the
+                        // comment on `occurrences_of` already claimed it.
+                        ex.map(|e| !e.visible()).unwrap_or(false) as i64,
                         ex.map(|e| e.done).unwrap_or(false) as i64,
                         ex.and_then(|e| e.title.clone()),
                         ex.and_then(|e| e.location.clone()),
@@ -3418,7 +3429,11 @@ fn expand_occurrences(
                 occ,
                 shown,
                 end,
-                state.cancelled as i64,
+                // The same rule as the expansion above: a move beats a cancel.
+                // Both paths write this column and both have to agree, or an
+                // occurrence changes its mind about being cancelled depending
+                // on whether the rule still produces it.
+                !state.visible() as i64,
                 state.done as i64,
                 state.title.clone(),
                 state.location.clone(),
