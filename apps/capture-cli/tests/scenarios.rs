@@ -1502,3 +1502,171 @@ fn people_and_projects_are_counted_separately() {
     assert!(json.contains("\"count\":2"), "{json}");
     assert!(json.contains("\"names\":[\"acme-migration\"]"), "{json}");
 }
+
+/// A mute can be lifted, which is what makes it the cheap operation.
+///
+/// §2.6: suppression exists so that making something go away is cheaper than
+/// destroying it, because "a system that pushes personal content on a schedule
+/// the user is explicitly barred from setting must have a suppress that is not
+/// destruction". It also says a mute "is reversible from any device, at any
+/// time", and `specs/review/spec.md` says "the mute is reversible". Nothing
+/// could lift one until now.
+#[test]
+fn a_mute_can_be_lifted() {
+    let s = Store::new("unmute");
+    let n = s.capture("the thing with @quiet");
+    s.ok(&["settle"]);
+    assert!(s.ok(&["search", "quiet"]).contains(&n));
+
+    s.ok(&["mute", &n]);
+    assert!(
+        !s.ok(&["search", "quiet"]).contains(&n),
+        "a muted note was still in search"
+    );
+    assert!(
+        !s.ok(&["entity", "@quiet"]).contains(&n),
+        "a muted note was still on the page of the person it names"
+    );
+
+    let said = s.ok(&["unmute", &n]);
+    assert!(said.contains("no longer muted"), "{said}");
+
+    // Back in both places. The entity page matters as much as search: a mute
+    // takes a note off every page naming it, so a reversal that restored only
+    // one would be half a reversal.
+    assert!(
+        s.ok(&["search", "quiet"]).contains(&n),
+        "unmuting did not put it back in search"
+    );
+    assert!(
+        s.ok(&["entity", "@quiet"]).contains(&n),
+        "unmuting did not put it back on the entity page"
+    );
+
+    // And no longer marked. The row said `[muted]` while sitting in the
+    // results, which reads as the reversal not having worked.
+    assert!(
+        !s.ok(&["timeline"]).contains("[muted]"),
+        "a lifted mute is still marked: {}",
+        s.ok(&["timeline"])
+    );
+
+    // Once. A note that is not muted has no mute to lift, and saying so beats
+    // appending an event that changes nothing.
+    let (code, said) = s.run(&["unmute", &n]);
+    assert_ne!(code, 0, "unmuted a note that was not muted: {said}");
+    assert!(said.contains("not muted"), "{said}");
+}
+
+/// A mute with an end comes back on its own.
+///
+/// §2.6's "permanently **or until a stated date**". The second half had no
+/// syntax, so every mute was permanent — and three predicates had quietly come
+/// to assume it, reading "has an end" as "is muted" and never lapsing.
+#[test]
+fn a_mute_with_an_end_comes_back_on_its_own() {
+    let s = Store::new("mute-until");
+    let n = s.capture("the thing with @quiet");
+    s.ok(&["settle"]);
+
+    s.ok(&["mute", &n, "until", "2027-03-01"]);
+
+    // The end is rendered, not printed raw. This said "muted until
+    // 1791295200000" until the syntax existed to reach the branch.
+    let page = s.ok(&["show", &n]);
+    assert!(
+        page.contains("until 2027-03-01"),
+        "the page does not say when the mute ends: {page}"
+    );
+    assert!(
+        !page.contains("indefinitely"),
+        "a mute with an end was reported as permanent: {page}"
+    );
+
+    assert!(
+        !s.at("2027-02-01T12:00:00Z", &["search", "quiet"])
+            .contains(&n)
+    );
+
+    // And afterwards, with nobody having done anything. Both the filter and
+    // the marker, because they were wrong in the same way and separately.
+    let after = s.at("2027-03-02T12:00:00Z", &["search", "quiet"]);
+    assert!(after.contains(&n), "the mute never lapsed: {after}");
+    assert!(
+        !s.at("2027-03-02T12:00:00Z", &["timeline"])
+            .contains("[muted]"),
+        "a lapsed mute is still marked"
+    );
+
+    // A day already gone is refused. Its effect is `unmute`'s, and two
+    // spellings for one operation is worth refusing at the surface.
+    let (code, said) = s.run(&["mute", &n, "until", "2020-01-01"]);
+    assert_ne!(code, 0, "a mute ending in the past was accepted: {said}");
+    assert!(said.contains("capture unmute"), "{said}");
+}
+
+/// A tag mute is lifted without untagging.
+///
+/// Two ways out of a tag mute, and they are not the same: `untag` stops the
+/// note matching the rule, `unmute` ends the rule. `fold.rs`'s
+/// `untagging_lifts_a_tag_mute` covers the first. Nothing covered the second,
+/// because it did not exist.
+#[test]
+fn a_tag_mute_is_lifted_without_untagging() {
+    let s = Store::new("unmute-tag");
+    let n = s.capture("something I do not want to see");
+    s.ok(&["settle"]);
+
+    // Tagged by the command rather than by writing `#noise` in the capture.
+    // Those are not the same thing today: a `#` in the text becomes a mention,
+    // `apply_mutes` matches on the `tags` table, and so a tag mute silently
+    // misses every note that tagged itself inline. That is a defect, recorded
+    // separately — asserting it here would make it look intended.
+    s.ok(&["tag", &n, "noise"]);
+    s.ok(&["mute", "#noise"]);
+    assert!(!s.ok(&["search", "something"]).contains(&n));
+
+    s.ok(&["unmute", "#noise"]);
+    assert!(
+        s.ok(&["search", "something"]).contains(&n),
+        "lifting a tag mute did not restore the notes carrying it"
+    );
+    // Still tagged. The note was never changed — only the rule over it.
+    assert!(s.ok(&["show", &n]).contains("noise"), "the tag was removed");
+
+    // A coarse scope is accepted whether or not it was muted. Whether a tag is
+    // currently muted is not a question the projection can answer: a coarse
+    // mute is recorded as its effect on each note it covers, and nothing
+    // distinguishes a note suppressed by a tag mute from one suppressed by its
+    // own. Refusing would need a record that does not exist.
+    s.ok(&["unmute", "#never-muted"]);
+}
+
+/// An entity mute is lifted by any spelling that reaches the same entity.
+///
+/// Which is what makes an entity an identity rather than a word, and the
+/// reason the mute is written against the id and not the spelling.
+#[test]
+fn an_entity_mute_is_lifted_by_another_spelling() {
+    let s = Store::new("unmute-entity");
+    let n = s.capture("@sarah-chen sent the contract");
+    // Both spellings have to exist before they can be merged: an entity exists
+    // because a note names it, so there is nothing to merge a name nobody
+    // wrote.
+    s.capture("ask @sarah about the invoice");
+    s.ok(&["settle"]);
+    s.ok(&["entity-merge", "@sarah-chen", "@sarah"]);
+
+    s.ok(&["mute", "@sarah-chen"]);
+    assert!(
+        !s.ok(&["search", "contract"]).contains(&n),
+        "muting an entity did not suppress the notes naming it"
+    );
+
+    // A different spelling, the same entity, and therefore the same mute.
+    s.ok(&["unmute", "@sarah"]);
+    assert!(
+        s.ok(&["search", "contract"]).contains(&n),
+        "a spelling that reaches the entity could not lift its mute"
+    );
+}

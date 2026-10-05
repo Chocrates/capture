@@ -931,7 +931,7 @@ fn utc() -> capture_time::Zone {
 /// There were four copies. The one in the overlay was made by reading the one
 /// twelve lines away in this file, which is the mechanism rather than the
 /// accident.
-fn local_zone() -> String {
+pub(crate) fn local_zone() -> String {
     capture_store::notifier::local_zone()
 }
 
@@ -1038,7 +1038,7 @@ pub fn timeline(paths: &StorePaths, limit: Option<usize>, json: bool) -> Result<
             say!("{day}");
             current_day = day;
         }
-        say!("  {}", row(n, width));
+        say!("  {}", row(n, width, now_ms() as u64));
     }
     Ok(())
 }
@@ -1091,7 +1091,7 @@ fn empty_state() {
 }
 
 /// One listing line: the name, then the text, then the state.
-fn row(n: &NoteRow, width: usize) -> String {
+fn row(n: &NoteRow, width: usize, now: u64) -> String {
     let mut marks = Vec::new();
     if n.pinned {
         marks.push("pinned".to_string());
@@ -1099,7 +1099,10 @@ fn row(n: &NoteRow, width: usize) -> String {
     if let Some(at) = n.redacted_at {
         marks.push(format!("redacted {}", date_of(at, n.tz.as_deref())));
     }
-    if n.muted_until.is_some() {
+    // In force, not merely present. A note whose mute has ended — or that was
+    // unmuted — was still marked `[muted]` in every listing, which said the
+    // reversal had not worked while the note sat there in the results.
+    if n.is_muted(now) {
         marks.push("muted".to_string());
     }
     if n.divergences > 0 {
@@ -1334,7 +1337,7 @@ pub fn search(paths: &StorePaths, query: &str, json: bool) -> Result<()> {
     }
     let width = name_width(&rows);
     for n in &rows {
-        say!("{}", row(n, width));
+        say!("{}", row(n, width, now_ms() as u64));
     }
     Ok(())
 }
@@ -1358,7 +1361,7 @@ fn date_of(ms: u64, tz: Option<&str>) -> String {
     ts.to_zoned(zone(tz)).strftime("%Y-%m-%d %a").to_string()
 }
 
-fn stamp(ms: u64, tz: Option<&str>) -> String {
+pub(crate) fn stamp(ms: u64, tz: Option<&str>) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(ms as i64) else {
         return "unknown time".to_string();
     };

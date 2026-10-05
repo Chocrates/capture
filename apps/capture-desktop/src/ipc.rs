@@ -87,11 +87,14 @@ impl From<NoteRow> for Note {
             "incomplete"
         } else if n.divergences > 0 {
             "diverged"
-        } else if n.muted_until.is_some() {
+        } else if n.is_muted(now_ms()) {
             "muted"
         } else {
             "ordinary"
         };
+
+        // Taken before the fields move out of `n`.
+        let muted = n.is_muted(now_ms());
 
         Note {
             slug: n.slug,
@@ -102,7 +105,7 @@ impl From<NoteRow> for Note {
             tz: n.tz,
             tags: n.tags,
             pinned: n.pinned,
-            muted: n.muted_until.is_some(),
+            muted,
             redacted: n.redacted_at.is_some(),
             redacted_ms: n.redacted_at,
             divergences: n.divergences,

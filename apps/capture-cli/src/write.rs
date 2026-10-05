@@ -554,10 +554,118 @@ pub fn mute(paths: StorePaths, what: &Muted, until: Option<u64>) -> Result<()> {
 /// the irreversible operation.
 fn said(described: &str, until: Option<u64>) {
     match until {
-        Some(t) => say!("{described} muted until {t}"),
+        // Rendered, not printed raw. This said "muted until 1791295200000"
+        // until now, and nothing caught it because `until` was always `None`:
+        // no syntax could set an end, so the only branch anybody ever reached
+        // was the other one. Through `read::stamp` rather than a second
+        // formatter, so the end reads the same here as on the note's page.
+        Some(t) => say!(
+            "{described} muted until {}",
+            crate::read::stamp(t, Some(&crate::read::local_zone()))
+        ),
         None => say!("{described} muted"),
     }
     say!("It stays in the timeline and stops appearing in searches.");
+}
+
+/// Lift a mute.
+///
+/// A `MUTE` whose end is the present instant, rather than a new event kind.
+/// §2.6 requires this — "it is reversible from any device, at any time" — and
+/// the machinery was already here: mutes are applied in timestamp order with
+/// the newest one touching a note winning, and an end that has passed reads as
+/// not muted. A second kind would need its own rule for what an unmute means
+/// against a coarser mute still in force, and "newest wins" already answers
+/// that once.
+pub fn unmute(paths: StorePaths, what: &Muted) -> Result<()> {
+    let now = now_ms().max(0) as u64;
+
+    let (scope, described) = match what {
+        Muted::Note(name) => {
+            // Refused where the answer is knowable. A note carries its mute as
+            // a field, so "this was not muted" is a true thing to say rather
+            // than a guess.
+            let tgt = {
+                let s = Session::open(paths.clone())?;
+                let tgt = find(&s, name)?;
+                let muted = s.state.note(&tgt)?.and_then(|n| n.muted_until);
+                match muted {
+                    Some(0) => {}
+                    Some(ends) if ends > now => {}
+                    _ => {
+                        return Err(Error::NotFound(format!("{name} is not muted")));
+                    }
+                }
+                tgt
+            };
+            (MuteScope::Note(tgt), name.clone())
+        }
+
+        // The three coarser scopes are accepted without checking, because the
+        // projection cannot answer whether they are in force. A coarse mute is
+        // recorded only as its effect on each note it covers, and nothing
+        // distinguishes a note suppressed by a tag mute from one suppressed by
+        // its own. There was a `mutes` table once and nothing read or wrote it.
+        //
+        // So these say what was written rather than what changed. Inventing a
+        // scope-level record to improve an error message would be the wrong
+        // trade.
+        Muted::Tag(tag) => {
+            let tag = tag.trim_start_matches('#').to_string();
+            (MuteScope::Tag(tag.clone()), format!("#{tag}"))
+        }
+        Muted::Days(from, to) => (
+            MuteScope::DateRange(from.clone(), to.clone()),
+            format!("{from} to {to}"),
+        ),
+        Muted::Entity(kind, name) => {
+            capture_store::mutate::mute_entity(&paths, kind, name, Some(now))?;
+            lifted(&format!("everything naming {name}"));
+            return Ok(());
+        }
+    };
+
+    capture_store::mutate::mute_scope(&paths, scope, Some(now))?;
+    lifted(&described);
+    Ok(())
+}
+
+/// What lifting a mute did.
+///
+/// Says that nothing was destroyed on the way back either, for the same reason
+/// `said` does: the operation has to read as the cheap reversible one it is.
+fn lifted(described: &str) {
+    say!("{described} is no longer muted.");
+    say!("It appears in searches and on its pages again.");
+}
+
+/// When a mute written today should stop.
+///
+/// A day rather than an instant, because that is how somebody says it ("not
+/// until Monday") and what §2.6 asks for: "permanently or until a stated
+/// date". Resolved to the start of that day in this machine's zone, which is
+/// the same conversion an all-day date gets everywhere else.
+///
+/// A day already gone is refused rather than accepted. Its effect would be
+/// identical to `capture unmute`, and two spellings for one operation is the
+/// shape `tools/duplicated.py` exists to object to — here at the surface,
+/// where it would also read as a typo somebody got away with.
+pub fn mute_ends(day: &str) -> Result<u64> {
+    let date = capture_time::FloatingDate::parse(day)
+        .ok_or_else(|| Error::Usage(format!("'{day}' is not a day; use YYYY-MM-DD")))?;
+    let zone = local_zone();
+    let at = capture_time::at_local(date, 0, 0, zone)
+        .ok_or_else(|| Error::Usage(format!("{day} does not start in this timezone")))?;
+
+    let now = now_ms();
+    if at <= now {
+        return Err(Error::Usage(format!(
+            "{day} has already begun, so a mute until then would end immediately.\n\
+             \n\
+             To lift a mute now:  capture unmute <name>"
+        )));
+    }
+    Ok(at as u64)
 }
 
 /// What a mute applies to.

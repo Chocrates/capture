@@ -132,15 +132,14 @@ fn run(command: Command) -> Result<()> {
         Command::Untag { name, tag } => write::untag(paths()?, &name, &tag),
         Command::Alias { name, alias } => write::alias(paths()?, &name, alias.as_deref()),
         Command::Pin { name, pinned } => write::pin(paths()?, &name, pinned),
-        Command::Mute { what } => {
-            let what = match what {
-                args::MuteTarget::Note(n) => write::Muted::Note(n),
-                args::MuteTarget::Tag(t) => write::Muted::Tag(t),
-                args::MuteTarget::Days(a, b) => write::Muted::Days(a, b),
-                args::MuteTarget::Entity(k, n) => write::Muted::Entity(k, n),
+        Command::Mute { what, until } => {
+            let until = match until {
+                Some(day) => Some(write::mute_ends(&day)?),
+                None => None,
             };
-            write::mute(paths()?, &what, None)
+            write::mute(paths()?, &muted(what), until)
         }
+        Command::Unmute { what } => write::unmute(paths()?, &muted(what)),
         Command::Resolve { name } => write::resolve(paths()?, &name),
         Command::Log { name, json } => ops::log(&paths()?, &name, json),
         Command::Quarantine { json } => ops::quarantine(&paths()?, json),
@@ -255,4 +254,18 @@ fn init() -> Result<()> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// One translation from the argument enum to the write one.
+///
+/// Both exist on purpose — `args` holds what somebody typed and `write` holds
+/// what the store is being asked for — but the mapping between them is one
+/// decision, and it was about to be written twice once `unmute` needed it.
+fn muted(what: args::MuteTarget) -> write::Muted {
+    match what {
+        args::MuteTarget::Note(n) => write::Muted::Note(n),
+        args::MuteTarget::Tag(t) => write::Muted::Tag(t),
+        args::MuteTarget::Days(a, b) => write::Muted::Days(a, b),
+        args::MuteTarget::Entity(k, n) => write::Muted::Entity(k, n),
+    }
 }

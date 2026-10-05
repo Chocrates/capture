@@ -260,6 +260,15 @@ pub enum Command {
     /// Suppress something from surfacing.
     Mute {
         what: MuteTarget,
+        /// The day the mute ends, as written. Resolved to an instant where
+        /// there is a clock and a zone to resolve it against — this layer
+        /// checks the shape and not the meaning, so it stays testable without
+        /// either.
+        until: Option<String>,
+    },
+    /// Lift a mute.
+    Unmute {
+        what: MuteTarget,
     },
     /// Stop every redaction issued since a moment.
     RedactCancelSince {
@@ -837,8 +846,54 @@ where
             name,
             pinned: false,
         }),
-        "mute" => {
+        "mute" | "unmute" => {
+            let lifting = args[0] == "unmute";
             let rest = &args[1..];
+
+            // A trailing `until <day>` is taken off first, so every target
+            // form below keeps working unchanged and none of them has to know
+            // about it. Parsing it into the arms instead would mean four more
+            // patterns and four chances for them to disagree.
+            let (rest, until) = match rest {
+                [front @ .., kw, day] if kw == "until" => {
+                    if lifting {
+                        return Err(Bad::Value {
+                            command: "unmute".into(),
+                            problem: "lifting a mute takes no 'until'; \
+                                      to change when one ends, mute it again"
+                                .into(),
+                        });
+                    }
+                    if !looks_like_a_day(day) {
+                        return Err(Bad::Value {
+                            command: "mute".into(),
+                            problem: format!("'{day}' is not a day; use YYYY-MM-DD"),
+                        });
+                    }
+                    (front, Some(day.clone()))
+                }
+                // `until` with nothing after it, which is a half-written
+                // command rather than a target called "until".
+                [.., kw] if kw == "until" => {
+                    return Err(Bad::Value {
+                        command: "mute".into(),
+                        problem: "expected a day after 'until', as YYYY-MM-DD".into(),
+                    });
+                }
+                _ => (rest, None),
+            };
+
+            let built = |what: MuteTarget| {
+                if lifting {
+                    Command::Unmute { what }
+                } else {
+                    Command::Mute {
+                        what,
+                        until: until.clone(),
+                    }
+                }
+            };
+
             match rest {
                 // A tag, recognised by the sigil it is written with everywhere
                 // else. Anything else is a note's name.
@@ -849,9 +904,9 @@ where
                 // `#` means, and the entity scope is what the entity page acts
                 // on. Changing `#` here would silently move an existing
                 // command onto a different scope.
-                [one] if one.starts_with('#') => Ok(Command::Mute {
-                    what: MuteTarget::Tag(one.trim_start_matches('#').to_string()),
-                }),
+                [one] if one.starts_with('#') => Ok(built(MuteTarget::Tag(
+                    one.trim_start_matches('#').to_string(),
+                ))),
                 // A person or a project. Everything naming them, through the
                 // entity — so a rename or a merge carries the mute with it,
                 // which matching on the spelling could not.
@@ -860,23 +915,21 @@ where
                     let sigil = c.next().unwrap_or(' ');
                     let name: String = c.collect();
                     match capture_core::id::entity_kind(sigil) {
-                        Some(kind) if !name.is_empty() => Ok(Command::Mute {
-                            what: MuteTarget::Entity(kind.to_string(), name),
-                        }),
+                        Some(kind) if !name.is_empty() => {
+                            Ok(built(MuteTarget::Entity(kind.to_string(), name)))
+                        }
                         _ => Err(Bad::Value {
-                            command: "mute".into(),
+                            command: if lifting { "unmute" } else { "mute" }.into(),
                             problem: format!("'{one}' names nothing after the sigil"),
                         }),
                     }
                 }
-                [one] => Ok(Command::Mute {
-                    what: MuteTarget::Note(one.clone()),
-                }),
-                [from, to] if looks_like_a_day(from) && looks_like_a_day(to) => Ok(Command::Mute {
-                    what: MuteTarget::Days(from.clone(), to.clone()),
-                }),
+                [one] => Ok(built(MuteTarget::Note(one.clone()))),
+                [from, to] if looks_like_a_day(from) && looks_like_a_day(to) => {
+                    Ok(built(MuteTarget::Days(from.clone(), to.clone())))
+                }
                 _ => Err(Bad::Value {
-                    command: "mute".into(),
+                    command: if lifting { "unmute" } else { "mute" }.into(),
                     problem: "expected a note, a #tag, an @person or ^project, \
                               or two dates as YYYY-MM-DD"
                         .into(),
@@ -1445,6 +1498,8 @@ CHANGING A NOTE
   capture mute @sarah            same, for everything naming a person
                                (or ^project; follows renames and merges)
   capture mute <from> <to>       same, for everything captured between two days
+  capture mute <what> until <day>  until that day, then it comes back on its own
+  capture unmute <what>          lift a mute; takes the same four forms as mute
   capture resolve <name>         dismiss a divergence; both versions are kept
 
 DESTROYING SOMETHING
@@ -1687,26 +1742,30 @@ mod tests {
         assert_eq!(
             p(&["mute", "@sarah"]).unwrap(),
             Command::Mute {
-                what: MuteTarget::Entity("person".into(), "sarah".into())
+                what: MuteTarget::Entity("person".into(), "sarah".into()),
+                until: None
             }
         );
         assert_eq!(
             p(&["mute", "^acme"]).unwrap(),
             Command::Mute {
-                what: MuteTarget::Entity("project".into(), "acme".into())
+                what: MuteTarget::Entity("project".into(), "acme".into()),
+                until: None
             }
         );
         assert_eq!(
             p(&["mute", "#groceries"]).unwrap(),
             Command::Mute {
-                what: MuteTarget::Tag("groceries".into())
+                what: MuteTarget::Tag("groceries".into()),
+                until: None
             },
             "a tag is a tag mute, not an entity one"
         );
         assert_eq!(
             p(&["mute", "some-note"]).unwrap(),
             Command::Mute {
-                what: MuteTarget::Note("some-note".into())
+                what: MuteTarget::Note("some-note".into()),
+                until: None
             }
         );
 
@@ -1716,6 +1775,92 @@ mod tests {
             let msg = p(&naming_nothing).unwrap_err().message();
             assert!(msg.contains("names nothing"), "{naming_nothing:?}: {msg}");
         }
+    }
+
+    #[test]
+    fn an_end_can_be_stated_on_any_of_the_four_scopes() {
+        // Taken off the end before the target is parsed, so the four forms
+        // keep working unchanged and none of them knows about it. Each is
+        // checked rather than one, because "it worked for a note" is how the
+        // other three come to be forgotten.
+        assert_eq!(
+            p(&["mute", "some-note", "until", "2026-12-25"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Note("some-note".into()),
+                until: Some("2026-12-25".into())
+            }
+        );
+        assert_eq!(
+            p(&["mute", "#groceries", "until", "2026-12-25"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Tag("groceries".into()),
+                until: Some("2026-12-25".into())
+            }
+        );
+        assert_eq!(
+            p(&["mute", "@sarah", "until", "2026-12-25"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Entity("person".into(), "sarah".into()),
+                until: Some("2026-12-25".into())
+            }
+        );
+        // The two-day form still reaches the date range, with the end after
+        // it. Three dates in one command, and the first two mean something
+        // different from the third.
+        assert_eq!(
+            p(&["mute", "2026-01-01", "2026-01-31", "until", "2026-12-25"]).unwrap(),
+            Command::Mute {
+                what: MuteTarget::Days("2026-01-01".into(), "2026-01-31".into()),
+                until: Some("2026-12-25".into())
+            }
+        );
+
+        // Shape is checked here; whether the day has already passed is not,
+        // because that needs a clock and this layer has none.
+        let msg = p(&["mute", "some-note", "until", "christmas"])
+            .unwrap_err()
+            .message();
+        assert!(msg.contains("YYYY-MM-DD"), "{msg}");
+
+        let msg = p(&["mute", "some-note", "until"]).unwrap_err().message();
+        assert!(msg.contains("after 'until'"), "{msg}");
+    }
+
+    #[test]
+    fn unmute_takes_the_same_four_forms_as_mute() {
+        // One verb's worth of parsing shared with `mute`, so a target form
+        // cannot be accepted by one and not the other.
+        assert_eq!(
+            p(&["unmute", "some-note"]).unwrap(),
+            Command::Unmute {
+                what: MuteTarget::Note("some-note".into())
+            }
+        );
+        assert_eq!(
+            p(&["unmute", "#groceries"]).unwrap(),
+            Command::Unmute {
+                what: MuteTarget::Tag("groceries".into())
+            }
+        );
+        assert_eq!(
+            p(&["unmute", "@sarah"]).unwrap(),
+            Command::Unmute {
+                what: MuteTarget::Entity("person".into(), "sarah".into())
+            }
+        );
+        assert_eq!(
+            p(&["unmute", "2026-01-01", "2026-01-31"]).unwrap(),
+            Command::Unmute {
+                what: MuteTarget::Days("2026-01-01".into(), "2026-01-31".into())
+            }
+        );
+
+        // An end on a lift is a contradiction, not a no-op. Accepting it
+        // silently would leave somebody believing they had rescheduled a mute.
+        let msg = p(&["unmute", "some-note", "until", "2026-12-25"])
+            .unwrap_err()
+            .message();
+        assert!(msg.contains("takes no 'until'"), "{msg}");
     }
 
     #[test]

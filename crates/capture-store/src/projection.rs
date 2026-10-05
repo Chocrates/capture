@@ -951,6 +951,27 @@ impl NoteRow {
     pub fn is_redacted(&self) -> bool {
         self.redacted_at.is_some()
     }
+
+    /// Whether a mute is still in force.
+    ///
+    /// One decision in one place, because asking it is not as simple as it
+    /// looks and four surfaces had been getting it wrong by asking whether a
+    /// mute *existed*: zero means indefinite rather than "ended in 1970", and
+    /// any other value is an end that may already have passed. §2.6 makes a
+    /// mute hold "permanently or until a stated date", so both readings have to
+    /// be here or a lapsing mute never lapses.
+    ///
+    /// The queries in this file ask it in SQL and cannot call this, which is
+    /// why ten of them spell it out. Keeping those in step is what
+    /// `tools/duplicated.py` is for; this is at least the one copy every Rust
+    /// caller shares.
+    pub fn is_muted(&self, now: u64) -> bool {
+        match self.muted_until {
+            None => false,
+            Some(0) => true,
+            Some(ends) => ends > now,
+        }
+    }
 }
 
 /// A link as written, alongside what its name means now.
