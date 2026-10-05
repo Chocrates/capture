@@ -690,14 +690,16 @@ const ALERTABLE: &str = "n.text IS NOT NULL
        AND (n.muted_until IS NULL
             OR (n.muted_until != 0 AND n.muted_until <= ?2))";
 
-/// What every review tier excludes, and why.
-///
-/// Muting always wins (§2.6): anything you do not want resurfaced stops being
-/// resurfaced, reversibly, without being destroyed. Two deferrals end it —
-/// somebody who has declined an item twice has told you, and pressing further
-/// is what §2.7 exists to prevent. A note with no readable text has nothing to
-/// offer. And a note is not due until its interval has elapsed.
 /// Which notes may be offered in review, and when one becomes eligible again.
+///
+/// # What this excludes, and why
+///
+/// A mute in force wins (§2.6): anything you do not want resurfaced stops
+/// being resurfaced, without being destroyed, and a mute with an end stops
+/// winning once that end passes. Two deferrals end it — somebody who has
+/// declined an item twice has told you, and pressing further is what §2.7
+/// exists to prevent. A note with no readable text has nothing to offer. And a
+/// note is not due until its interval has elapsed.
 ///
 /// # The ladder is built from `review::interval_ms`, not restated here
 ///
@@ -796,9 +798,6 @@ pub struct PromotionRow {
     pub confidence: Option<u32>,
 }
 
-/// absence: a note with no readable text is not the same thing as a note that
-/// was redacted, and rendering either as a blank row loses the distinction the
-/// reader most needs.
 /// A moment a capture named, and what to say when it arrives.
 ///
 /// Derived rather than stored. An `alert` event per dated capture would make
@@ -1111,7 +1110,6 @@ impl Store {
     }
 
     /// Replace everything with a freshly folded projection.
-    /// Write a folded projection.
     ///
     /// `now` is taken as a value rather than read, because it decides the
     /// occurrence horizon and nothing that decides what a store contains may
@@ -1915,11 +1913,10 @@ impl Store {
         )? as u64)
     }
 
-    /// Every name the projection knows, with the moment it started existing.
+    /// The names among these that the projection knows.
     ///
     /// Feeds an incremental fold, which sees only the events of the notes that
     /// changed and would otherwise resolve every link to nothing.
-    /// The names among these that the projection knows.
     ///
     /// Bounded on purpose. An incremental fold asks its seed
     /// two questions — what a `[[link]]` in these events points at, and whether

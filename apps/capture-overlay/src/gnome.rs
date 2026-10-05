@@ -64,12 +64,11 @@ pub struct Registration {
 pub trait Settings {
     fn get(&self, key: &str) -> Result<String>;
     fn set(&self, key: &str, value: &str) -> Result<()>;
-    /// Every custom keybinding, as `(path, name, chord)`.
+    /// Every custom keybinding, as `(path, name, binding, command)`.
     ///
     /// The path is what identifies *our* entry. Trying to recognise it by its
     /// command instead is how the conflict check ends up asking whether our own
     /// command is ours — which it always is — and reporting nothing, ever.
-    /// Every custom keybinding, as `(path, name, binding, command)`.
     fn existing_bindings(&self) -> Result<Vec<(String, String, String, String)>>;
 }
 

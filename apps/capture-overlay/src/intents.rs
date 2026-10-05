@@ -79,7 +79,7 @@ fn look(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
 /// capture gesture avoiding.
 ///
 /// Subject to the same budget as everything else (§2.6). The decision belongs
-/// to `notifier::deliver` rather than here, so the desktop and the phone
+/// to `notifier::deliver_late` rather than here, so the desktop and the phone
 /// cannot come to different conclusions about what hour it is safe to speak.
 fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
     use capture_store::notifier::{Delivery, deliver_late};

@@ -2754,7 +2754,6 @@ impl Offer {
     }
 }
 
-/// The first bytes of a key, which is how every surface names a device.
 /// Where the location permission is remembered.
 const LOCATION_PERMITTED: &str = "android.location_permitted";
 

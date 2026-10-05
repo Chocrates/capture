@@ -331,24 +331,6 @@ pub enum Delivery {
     Stale,
 }
 
-/// Decide when something due may actually be said.
-///
-/// # The two rules, and which wins
-///
-/// **Time-critical is immediate.** §2.6 splits immediate from batched with
-/// examples rather than a rule — "an alarm, a meeting starting". The rule here
-/// is that a capture which named a *time of day* meant that time; one that
-/// named only a day did not mean midnight.
-///
-/// **Quiet hours hold everything except an armed moment.** Somebody who set an
-/// alarm for 6am meant 6am, and a system that decided it knew better would be
-/// useless for the one thing an alarm is for. Everything else waits for
-/// morning: §2.6 puts anxiety on the ledger, and a notification at 3am spends
-/// from it at the worst possible rate.
-///
-/// `armed` distinguishes a moment somebody set deliberately from one inferred
-/// by the recognizer. `dentist thursday 2pm` at 2am is almost certainly a
-/// misparse; `capture intent at 02:00` is not.
 /// How long after its moment a timed alert is still worth saying immediately.
 ///
 /// Past this it is not an alarm any more, it is a note about something that
@@ -389,7 +371,24 @@ pub const STILL_PROMPT_MS: i64 = 30 * 60 * 1000;
 /// list that shows what is outstanding; it has simply stopped interrupting.
 pub const STALE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-/// The same decision, told how late the moment is.
+/// Decide when something due may actually be said, and how late it is.
+///
+/// # The two rules, and which wins
+///
+/// **Time-critical is immediate.** §2.6 splits immediate from batched with
+/// examples rather than a rule — "an alarm, a meeting starting". The rule here
+/// is that a capture which named a *time of day* meant that time; one that
+/// named only a day did not mean midnight.
+///
+/// **Quiet hours hold everything except an armed moment.** Somebody who set an
+/// alarm for 6am meant 6am, and a system that decided it knew better would be
+/// useless for the one thing an alarm is for. Everything else waits for
+/// morning: §2.6 puts anxiety on the ledger, and a notification at 3am spends
+/// from it at the worst possible rate.
+///
+/// `armed` distinguishes a moment somebody set deliberately from one inferred
+/// by the recognizer. `dentist thursday 2pm` at 2am is almost certainly a
+/// misparse; `capture intent at 02:00` is not.
 ///
 /// `late_by` is milliseconds since the moment passed; zero or negative means
 /// it is arriving on time.

@@ -337,7 +337,6 @@ impl Session {
         Ok(s)
     }
 
-    /// Store a capture, and return the note it became.
     /// Commit a prepared capture body.
     ///
     /// Takes the encoded body rather than the text because the body must be
