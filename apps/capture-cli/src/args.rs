@@ -1607,12 +1607,34 @@ mod tests {
         // and being told to run something that answers "is not a command" ends
         // the search in the wrong place.
         //
-        // Over this file's own text rather than over a list someone maintains,
-        // because a hand-kept list of the commands we mention is the thing that
-        // went stale in the first place.
-        let src = include_str!("args.rs");
+        // Over every source file in this binary, read from disk at run time
+        // rather than named in a list.
+        //
+        // It used to scan this file alone, which is where the parser and the
+        // usage text live — and refusals that name a command are written
+        // wherever the refusing happens: `capture redact --release <id>` in
+        // `ops.rs`, `capture recover <id>` in `write.rs`, `capture unflag
+        // <name>` in `backup.rs`, `capture settle` in `read.rs`, `capture
+        // readmit` in `pair.rs`. None of those was checked.
+        //
+        // Read rather than `include_str!`-ed because a list of file names is a
+        // hand-kept list, and this test exists because a hand-kept list went
+        // stale. Adding a module to this binary should not quietly narrow a
+        // check.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let sources: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the source directory is readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .map(|p| std::fs::read_to_string(&p).expect("a source file is readable"))
+            .collect();
+        assert!(
+            sources.len() > 1,
+            "the scan found one file or none, so it is back to where it started"
+        );
         let mut checked = 0;
-        for line in src.lines() {
+        for line in sources.iter().flat_map(|s| s.lines()) {
             // Messages only. Prose in a comment may say "capture text" meaning
             // the text of a capture, and does not promise a command exists.
             let trimmed = line.trim_start();
