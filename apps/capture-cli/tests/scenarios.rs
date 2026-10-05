@@ -1065,3 +1065,168 @@ fn a_person_can_say_a_missed_instance_is_still_owed() {
     let (code, said) = s.run(&["carries-forward", &plain]);
     assert_ne!(code, 0, "a plain note was told to carry forward: {said}");
 }
+
+/// A note's page says what the note was recognised as.
+///
+/// All four kinds through one command, because the interesting cases are the
+/// ones that differ: a task's descriptor opens with its own kind and the other
+/// two do not, and a plain note has no descriptor at all and must therefore
+/// produce no line rather than a label with nothing after it.
+#[test]
+fn a_page_says_what_the_note_was_recognised_as() {
+    let s = Store::new("recognised-as");
+    let task = s.capture("send sarah the migration doc tomorrow");
+    let event = s.capture("standup tomorrow at 9am");
+    let series = s.capture("take the pill every day at 9");
+    let plain = s.capture("an ordinary thought");
+    s.ok(&["settle"]);
+
+    // A task says it is one, and says when. Without the due date this is the
+    // half that was missing: the kind alone does not tell you anything you
+    // could act on.
+    let t = s.ok(&["show", &task]);
+    assert!(t.contains("task"), "a task did not say so: {t}");
+    assert!(t.contains("due 20"), "a task did not say when: {t}");
+    // And says it once. The descriptor already opens with the kind.
+    assert!(!t.contains("task      task"), "the kind is doubled: {t}");
+
+    let e = s.ok(&["show", &event]);
+    assert!(e.contains("event"), "an event did not say so: {e}");
+
+    // A series says its rule, which is the only thing that distinguishes it
+    // from an event on its page.
+    let r = s.ok(&["show", &series]);
+    assert!(r.contains("series"), "a series did not say so: {r}");
+    assert!(
+        r.contains("every day"),
+        "a series did not say its rule: {r}"
+    );
+
+    // A note that was never anything says nothing, because it has no promotion
+    // row at all.
+    let p = s.ok(&["show", &plain]);
+    assert!(
+        !p.lines().any(|l| l.trim_end() == "note"),
+        "a plain note got a kind line: {p}"
+    );
+
+    // A note that *was* something says nothing either, and this is the case
+    // that bites: the reparse demotes by writing a `note` promotion, so the row
+    // exists and its descriptor is empty. Printing the label anyway puts a line
+    // on the page with nothing after it.
+    let demoted = s.capture("budget 40k every friday");
+    s.ok(&["settle"]);
+    assert!(s.ok(&["show", &demoted]).contains("series"), "not a series");
+    s.ok(&["edit", &demoted, "budget 40k"]);
+    s.ok(&["settle"]);
+    let d = s.ok(&["show", &demoted]);
+    assert!(
+        !d.lines().any(|l| l.trim_end() == "note"),
+        "a demoted note got a bare kind line: {d}"
+    );
+    // And the rule it used to have is gone with it. Checked by the kind rather
+    // than by the words: the slug keeps the spelling it was minted from, so
+    // "every" is still on the page and always will be.
+    assert!(
+        !d.contains("series"),
+        "the rule outlived the text that said it: {d}"
+    );
+
+    // Marking it done is a person's answer, so the page says the state changed
+    // and says the answer was theirs.
+    s.ok(&["done", &task]);
+    let after = s.ok(&["show", &task]);
+    assert!(
+        after.contains("done"),
+        "a finished task did not say so: {after}"
+    );
+    assert!(
+        after.contains("(yours)"),
+        "a human answer was not marked as one: {after}"
+    );
+}
+
+/// Binding the note that *is* an entity, and unbinding it.
+///
+/// §4.3 lets one note be the entity rather than merely mention it. The
+/// consequence is that the note has to leave the list of notes *about* the
+/// entity — a row appearing in both places reads as two notes — and has to
+/// come back when the binding is removed. Both halves were covered at store
+/// level and by no command.
+#[test]
+fn the_note_that_is_an_entity_leaves_the_list_of_notes_about_it() {
+    let s = Store::new("entity-bind");
+    let who = s.capture("@sarah is the staff engineer on the migration");
+    let about = s.capture("ask @sarah about the invoice");
+    s.ok(&["settle"]);
+
+    // Two notes name her, and neither is her.
+    let before = s.ok(&["entity", "@sarah"]);
+    assert!(before.contains(&who) && before.contains(&about), "{before}");
+    assert!(s.ok(&["people"]).contains("2 note(s)"));
+
+    s.ok(&["entity-bind", "@sarah", &who]);
+
+    let bound = s.ok(&["entity", "@sarah"]);
+    assert!(
+        bound.contains("the note that is this person"),
+        "the page did not say which note is her: {bound}"
+    );
+    // Named once, in the header, and not again in the list below it.
+    assert_eq!(
+        bound.matches(&who).count(),
+        1,
+        "the backing note is in both places: {bound}"
+    );
+    assert!(bound.contains(&about), "the other note was lost: {bound}");
+
+    // And the count agrees with the list somebody is looking at, rather than
+    // saying two and showing one.
+    assert!(
+        s.ok(&["people"]).contains("1 note(s)"),
+        "the count still includes the backing note"
+    );
+
+    // Unbinding puts it back. Nothing was destroyed to move it.
+    s.ok(&["entity-bind", "@sarah"]);
+    let unbound = s.ok(&["entity", "@sarah"]);
+    assert!(
+        unbound.contains(&who) && unbound.contains(&about),
+        "unbinding did not return the note: {unbound}"
+    );
+    assert!(!unbound.contains("the note that is this person"));
+
+    // An entity exists because a note names it, so there is nothing to bind a
+    // name nothing has written.
+    let (code, said) = s.run(&["entity-bind", "#reading", &who]);
+    assert_ne!(code, 0, "bound a tag no note wrote: {said}");
+}
+
+/// Finishing a task, and saying it is not finished after all.
+///
+/// The reverse was the untested half. A completion that could not be undone
+/// would make `done` the kind of irreversible act §6 reserves for redaction,
+/// which is not what finishing a task is.
+#[test]
+fn a_finished_task_can_be_opened_again() {
+    let s = Store::new("undone");
+    let task = s.capture("send sarah the migration doc tomorrow");
+    s.ok(&["settle"]);
+    assert!(s.ok(&["tasks"]).contains(&task));
+
+    s.ok(&["done", &task]);
+    assert!(
+        !s.ok(&["tasks"]).contains(&task),
+        "a finished task is still outstanding"
+    );
+
+    s.ok(&["undone", &task]);
+    let open = s.ok(&["tasks"]);
+    assert!(open.contains(&task), "undone did not reopen it: {open}");
+
+    // And the page agrees with the listing, which is the half that disagreed
+    // everywhere else this was checked.
+    let page = s.ok(&["show", &task]);
+    assert!(page.contains("task"), "{page}");
+    assert!(!page.contains("done"), "the page still says done: {page}");
+}

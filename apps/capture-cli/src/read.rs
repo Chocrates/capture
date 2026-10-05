@@ -1173,9 +1173,26 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     // second rendering would be a second version of the truth. The desktop's
     // note page reads the same column, so the two surfaces agree by
     // construction rather than by both being kept up to date.
-    if let Some(p) = store.promotion_of(&n.tgt)? {
+    // A plain note is the one kind with nothing to say — `Promoted::Note`
+    // renders to an empty descriptor — and it gets no line rather than a label
+    // with nothing after it, for the reason at the top of this module.
+    if let Some(p) = store.promotion_of(&n.tgt)?.filter(|p| p.kind != "note") {
+        // A task's descriptor already opens with its own kind, and the other
+        // two do not. Printing the label anyway would read "task  task · due
+        // …", so the repeat comes off here rather than being pre-empted in the
+        // renderer, which has surfaces of its own that want the full string.
+        // "done" survives this, because that is a state and not the kind.
+        let rest = p
+            .descriptor
+            .strip_prefix(&p.kind)
+            .map(|r| r.strip_prefix(" · ").unwrap_or(r))
+            .unwrap_or(&p.descriptor);
         let authored = if p.pinned { "  (yours)" } else { "" };
-        say!("{:<10}{}{}", p.kind, p.descriptor, authored);
+        if rest.is_empty() {
+            say!("{}{}", p.kind, authored);
+        } else {
+            say!("{:<10}{}{}", p.kind, rest, authored);
+        }
     }
 
     say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));
