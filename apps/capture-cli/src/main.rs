@@ -226,10 +226,7 @@ fn capture(source: &Source) -> Result<()> {
 
 fn init() -> Result<()> {
     let paths = paths()?;
-    let fresh = store::create(
-        &paths,
-        jiff::Timestamp::now().as_millisecond().max(0) as u64,
-    )?;
+    let fresh = store::create(&paths, read::now_ms() as u64)?;
 
     // The roster root is authored by `create` but not stored by it, because
     // storing is this layer's job. Nothing else can be written until it is in

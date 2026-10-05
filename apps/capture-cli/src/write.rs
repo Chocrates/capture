@@ -836,7 +836,7 @@ fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
 /// thing nobody knows about their own calendar, and it stops being true the
 /// moment an occurrence is cancelled.
 pub fn split_series(paths: StorePaths, name: &str, from: &str, rule_text: &str) -> Result<()> {
-    let now = jiff::Timestamp::now().as_millisecond().max(0);
+    let now = crate::read::now_ms();
     let done = capture_store::promote::split_at(&paths, name, from, rule_text, now, &zone_here())?;
 
     say!("Split {name} at {}.", day_of(done.boundary));

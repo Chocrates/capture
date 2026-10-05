@@ -918,7 +918,49 @@ fn local_zone() -> String {
     capture_store::notifier::local_zone()
 }
 
+/// The clock, read in one place.
+///
+/// Fourteen call sites read it directly before this, which is fourteen chances
+/// to read it differently — and two of them already differed about whether the
+/// answer was an `i64` or a `u64`. The same argument as one `peer_is_stale`:
+/// "what time is it" answered once cannot be answered two ways.
+///
+/// # What this clock decides, and what it does not
+///
+/// Measured rather than assumed, because the first version of this comment got
+/// it wrong. This is the clock the command line *interprets* with: what "today"
+/// is for the agenda and the overdue bands, where a `split` boundary falls, how
+/// long ago a peer was reached. It is **not** what stamps events — the store
+/// keeps its own clock for that (`session::now_ms`), and moving this one leaves
+/// the HLC alone, as a capture made with `CAPTURE_NOW_MS` set to 2030 and
+/// landing on today's timeline demonstrates.
+///
+/// So it also does *not* move the drain: whether a redaction's window has
+/// passed is the store's question, asked with the store's clock. Anything
+/// needing that — `capture recover`, snapshot expiry, the destruction itself —
+/// is still out of reach, and moving the store's clock is a larger decision
+/// than this, because that one would reach the stamps.
+///
+/// # Why the override is not in the binary you install
+///
+/// The precedent is `CAPTURE_PURGE_PAUSE_MS`, which ships unguarded because a
+/// sleep is harmless. This is not quite that harmless: a wrong "now" can put a
+/// series split at a boundary nobody chose, and that writes an event.
+///
+/// Nothing here can corrupt the ordering of an archive, which the first draft
+/// of this comment claimed. It can still make a command do the wrong thing
+/// while looking right, and `cfg(debug_assertions)` costs nothing: a test runs
+/// the debug binary — that is what `CARGO_BIN_EXE_capture` is — and an
+/// installed release ignores the variable because the code reading it is not
+/// compiled.
 pub(crate) fn now_ms() -> i64 {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("CAPTURE_NOW_MS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+    {
+        return ms.max(0);
+    }
     jiff::Timestamp::now().as_millisecond().max(0)
 }
 
@@ -1220,7 +1262,7 @@ fn print_links(out: &[LinkRow], back: &[Backlink]) {
 pub fn search(paths: &StorePaths, query: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     // A lapsed mute suppresses nothing, so "now" decides rather than the row.
-    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let now = now_ms() as u64;
     let hits = store.search(query, now)?;
 
     let rows: Vec<NoteRow> = hits

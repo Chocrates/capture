@@ -390,7 +390,7 @@ pub fn readmit(paths: StorePaths, cosign: Option<&str>, by: Option<&str>) -> Res
 }
 
 fn now() -> u64 {
-    jiff::Timestamp::now().as_millisecond().max(0) as u64
+    crate::read::now_ms() as u64
 }
 
 fn short(k: &[u8; 32]) -> String {

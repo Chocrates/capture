@@ -153,7 +153,9 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
     std::fs::create_dir_all(&paths.export)?;
     let name = format!(
         "{}.brainlog",
-        jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ")
+        jiff::Timestamp::from_millisecond(crate::read::now_ms())
+            .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+            .strftime("%Y%m%dT%H%M%SZ")
     );
     let file = paths.export.join(&name);
     write_file(&file, &fresh)?;
@@ -353,7 +355,7 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
     let mut already = 0usize;
     let mut refused = 0usize;
     let mut aside = 0usize;
-    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let now = crate::read::now_ms() as u64;
 
     let adopt;
     {
@@ -416,7 +418,7 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
         &all,
         &s.log.aside_rows()?,
         generation,
-        jiff::Timestamp::now().as_millisecond().max(0),
+        crate::read::now_ms(),
     )?;
     ops.set_generation(next)?;
 

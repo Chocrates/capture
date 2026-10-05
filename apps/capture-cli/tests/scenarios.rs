@@ -51,6 +51,27 @@ impl Store {
         (out.status.code().unwrap_or(-1), text)
     }
 
+    /// Run a command at a given moment.
+    ///
+    /// `CAPTURE_NOW_MS` is honoured only in a debug build, which is the binary
+    /// a test runs. An installed release ignores it.
+    fn at(&self, when: &str, args: &[&str]) -> String {
+        let ms = when
+            .parse::<jiff::Timestamp>()
+            .expect("a timestamp")
+            .as_millisecond();
+        let out = Command::new(capture())
+            .args(args)
+            .env("CAPTURE_HOME", &self.0)
+            .env("CAPTURE_NOW_MS", ms.to_string())
+            .output()
+            .expect("capture runs");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "capture {args:?} at {when}: {text}");
+        text
+    }
+
     fn capture(&self, text: &str) -> String {
         self.ok(&["+", text]).trim().to_string()
     }
@@ -510,5 +531,45 @@ fn an_agenda_in_json_reports_what_is_unread() {
     assert!(
         behind.contains("\"entries\":"),
         "the entries went missing:\n{behind}"
+    );
+}
+
+/// The overdue boundary is asked against the clock, and a test can move it.
+///
+/// `CAPTURE_NOW_MS` exists because fourteen places read the wall clock directly
+/// and nothing could move any of them, so everything decided against "now" was
+/// only ever exercised at whatever moment the suite happened to run.
+///
+/// A task due on a fixed date is overdue or not depending only on when you ask.
+/// Before this there was no way to ask twice.
+#[test]
+fn a_task_is_overdue_or_not_depending_on_when_you_ask() {
+    let s = Store::new("overdue-clock");
+    let slug = s.capture("pay the invoice");
+    s.ok(&["settle"]);
+    s.ok(&["task", &slug, "2026-10-05"]);
+
+    // The day before: due, not overdue.
+    let before = s.at("2026-10-04T12:00:00Z", &["tasks"]);
+    assert!(before.contains("due"), "{before}");
+    assert!(
+        !before.contains("overdue"),
+        "a task due tomorrow was called overdue: {before}"
+    );
+
+    // The day itself: still not overdue. A task due today is not late, which is
+    // the boundary a handful of hand-picked dates agrees with an off-by-one as
+    // readily as with the fix.
+    let on = s.at("2026-10-05T12:00:00Z", &["tasks"]);
+    assert!(
+        !on.contains("overdue"),
+        "a task due today was called overdue: {on}"
+    );
+
+    // The day after.
+    let after = s.at("2026-10-06T12:00:00Z", &["tasks"]);
+    assert!(
+        after.contains("overdue"),
+        "a task due yesterday is not: {after}"
     );
 }

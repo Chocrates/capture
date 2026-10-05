@@ -214,7 +214,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 
     let health = capture_store::gesture::health(
         mechanism != capture_store::hotkey::Mechanism::None,
-        jiff::Timestamp::now().as_millisecond().max(0) as u64,
+        crate::read::now_ms() as u64,
         ops.gesture_last_fired()?,
         // Derived from the log rather than read from a counter kept beside it:
         // every event names the device that wrote it and when.
@@ -239,7 +239,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     // weeks ago means destruction is not happening while every other surface
     // reports it complete — the failure that put this queue in the projection
     // rather than in local state.
-    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let now = crate::read::now_ms() as u64;
     let queue = state.redact_queue()?;
     let pending: Vec<_> = queue.iter().filter(|(_, _, _, c)| !c).collect();
     if !pending.is_empty() {
@@ -412,7 +412,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 
     let w = identity.watermark();
     let lead = capture_core::hlc::HlcState::restore(w.hlc_wall, w.hlc_counter)
-        .lead_ms(jiff::Timestamp::now().as_millisecond().max(0) as u64);
+        .lead_ms(crate::read::now_ms() as u64);
     if lead > capture_core::hlc::LEAD_REPORT_MS {
         attention.push(format!(
             "this device's clock reads {} behind the events it is writing — \
@@ -593,7 +593,7 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
 
     let members = roster_now(paths)?.keys;
     let addresses = ops.peer_addresses()?;
-    let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let now = crate::read::now_ms() as u64;
 
     let seen = |k: &[u8; 32]| addresses.iter().find(|p| &p.key == k);
 
@@ -803,7 +803,7 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
         &events,
         &s.log.aside_rows()?,
         current,
-        jiff::Timestamp::now().as_millisecond().max(0),
+        crate::read::now_ms(),
     )?;
     ops.set_generation(next)?;
 
@@ -844,7 +844,7 @@ pub fn admission_seen(paths: StorePaths, key: &str) -> Result<()> {
             Ok(())
         }
         [one] => {
-            let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+            let now = crate::read::now_ms() as u64;
             ops.acknowledge_admission(one, now)?;
             say!("Acknowledged {}.", short_key(one));
             say!("Recorded as seen, not as paired — this device still did not admit it.");
