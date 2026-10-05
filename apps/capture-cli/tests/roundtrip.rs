@@ -442,3 +442,106 @@ fn an_export_reports_a_redaction_differently_from_a_credential() {
         "a redaction was reported as a credential flag: {said}"
     );
 }
+
+/// Two machines edit one note, and somebody dismisses the conflict.
+///
+/// `resolve` was the last write verb with no test, and it needed a real
+/// divergence to have anything to do — which only a second machine can
+/// produce. Both stores edit the same version, so neither edit names the other
+/// as its predecessor and the fold has two tips and no way to order them. That
+/// is the case §6 calls the failure worth avoiding, and the one `resolve` is
+/// the answer to.
+#[test]
+fn a_conflict_between_two_machines_is_dismissed_and_nothing_is_lost() {
+    let a = Store::fresh("resolve-a");
+    let b = Store::fresh("resolve-b");
+
+    let slug = a.ok(&["+", "the migration plan"]).trim().to_string();
+    a.ok(&["export"]);
+    b.ok(&["restore", a.export_dir().to_str().unwrap()]);
+    assert!(b.ok(&["show", &slug]).contains("the migration plan"));
+
+    // One note, two machines, neither having seen the other's edit. This is
+    // ordinary rather than exotic: it is what a phone edited on a train and a
+    // laptop edited at a desk produce.
+    a.ok(&["edit", &slug, "the migration plan, revised on a"]);
+    b.ok(&["edit", &slug, "the migration plan, revised on b"]);
+
+    a.ok(&["export"]);
+    b.ok(&["restore", a.export_dir().to_str().unwrap()]);
+
+    // Reported, not prompted. A divergence is information about the note, so
+    // the page says how many versions there are and does not ask anybody to
+    // clear it before reading on.
+    let diverged = b.ok(&["show", &slug]);
+    assert!(
+        diverged.contains("versions  2 independent"),
+        "two independent edits were not reported as a divergence: {diverged}"
+    );
+
+    // What the local machine wrote is what it still shows. Picking the incoming
+    // version would lose an edit silently, which is the whole failure.
+    assert!(
+        diverged.contains("revised on b"),
+        "the local edit was displaced by the incoming one: {diverged}"
+    );
+
+    let before = events_in(&b);
+    let said = b.ok(&["resolve", &slug]);
+    assert!(said.contains("dismissed 1 competing version"), "{said}");
+
+    let after = b.ok(&["show", &slug]);
+    assert!(
+        !after.contains("versions "),
+        "the divergence was still reported after being dismissed: {after}"
+    );
+
+    // "both remain in the log" is the command's own claim, and this is what
+    // makes it checkable: dismissing appends an event and removes none, so the
+    // log only grew and still verifies. Nothing in this system destroys
+    // anything except redaction.
+    assert!(
+        events_in(&b) > before,
+        "dismissing a divergence wrote nothing"
+    );
+    assert!(
+        b.ok(&["verify"]).contains("checks out"),
+        "the log does not verify after a resolve"
+    );
+
+    // Once. A second dismissal has nothing to dismiss, and saying so beats
+    // appending an event that means nothing.
+    let (code, said) = b.raw(&["resolve", &slug]);
+    assert_ne!(code, 0, "resolved a note with no divergence: {said}");
+    assert!(said.contains("no divergence"), "{said}");
+
+    // The machine that was not asked still shows its own edit, and does not
+    // report a divergence it never saw. Whether the dismissal itself travels is
+    // *not* established here: restoring b's export into a is refused, because
+    // a holds no key for b's origin and §5.3 admits a device rather than
+    // trusting an export. That wants the sync tests and a roster, not this one.
+    let untouched = a.ok(&["show", &slug]);
+    assert!(
+        untouched.contains("revised on a"),
+        "the machine that was not asked lost its own edit: {untouched}"
+    );
+    assert!(
+        !untouched.contains("versions "),
+        "a reported a divergence it was never sent: {untouched}"
+    );
+}
+
+/// How many events a store holds, from what `verify` says it checked.
+///
+/// Asked through the binary rather than by opening the database, so the test
+/// stays a test of the command line.
+fn events_in(s: &Store) -> usize {
+    let said = s.ok(&["verify"]);
+    let at = said.find("checked ").expect("verify says what it checked") + "checked ".len();
+    said[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .expect("a count")
+}
