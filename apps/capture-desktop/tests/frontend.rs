@@ -765,11 +765,15 @@ fn every_command_the_page_calls_is_registered() {
 
 /// The note page works a list through, rather than only displaying one.
 ///
-/// The timeline draws items read-only and its comment says why — a row is a
-/// button that opens the note, and nesting a control inside it makes one
-/// gesture ambiguous. It points at the note page as the place a list is worked
-/// through, and the note page did not draw items at all. The one surface meant
-/// for the job was the one surface without it.
+/// It once pointed at the note page as the *only* place a list could be worked
+/// through, because the timeline's rows were read-only: a row was a `button`,
+/// and a checkbox inside a button is invalid HTML. That is no longer true —
+/// the row is a `div` with a button's role, items tick in place, and the
+/// requirement that an item is completed where it is drawn is met everywhere
+/// rather than in one surface.
+///
+/// This test keeps its subject: the note page still ticks by position, which is
+/// the thing the whole arrangement is for.
 #[test]
 fn the_note_page_ticks_items_by_position() {
     let js = ui_code("app.js");
@@ -949,5 +953,72 @@ fn the_note_page_can_correct_a_kind() {
         body.matches("The text is unchanged").count(),
         2,
         "both corrections should say what they did not touch",
+    );
+}
+
+/// An item is completed where it is drawn.
+///
+/// "Each completable in place. This SHALL NOT require navigating to a separate
+/// surface first." The window refused, and the refusal was not fussiness: the
+/// shared row was a `button`, and a checkbox inside a button is invalid HTML
+/// and behaves differently between engines.
+///
+/// So the row is a `div` carrying a button's role and its keyboard handling,
+/// and the ambiguity of one gesture meaning two things is resolved where it
+/// arises — the checkbox stops its own click from reaching the row.
+#[test]
+fn a_row_ticks_its_items_without_opening_the_note() {
+    let js = ui_code("app.js");
+
+    let at = js.find("function noteRow(").expect("the shared row exists");
+    let body = &js[at..js[at..]
+        .find("\nfunction ")
+        .map(|i| at + i)
+        .unwrap_or(js.len())];
+
+    assert!(
+        body.contains("tick_item_at"),
+        "a row should tick its items in place",
+    );
+    // Two controls sit inside this row and both must stop their own click: the
+    // tag buttons, which have nested here all along, and now the checkboxes.
+    //
+    // Counted rather than merely found. The first version looked for
+    // `stopPropagation` anywhere in the row, which the tag handler already
+    // satisfied — so the checkbox could have lost its own and the test would
+    // have passed.
+    assert_eq!(
+        body.matches("stopPropagation").count(),
+        2,
+        "a control inside the row must stop its own click",
+    );
+    assert!(
+        body.contains("\"click\", (e) => e.stopPropagation())"),
+        "it is the click that has to be stopped: the row listens for click",
+    );
+
+    // The position comes from the item's place in the list, not a constant.
+    //
+    // The weakest assertion here, and worth being honest about: this reads the
+    // page as text, so it can see that `ord` is passed and cannot see that the
+    // right one is. Hardcoding `ord: 0` — every item ticking the first — is a
+    // real bug this file cannot catch, and the place that could is a test over
+    // the rendered DOM, which this project does not have.
+    assert!(
+        body.contains("forEach((item, ord)") && body.contains("ord,"),
+        "the position should come from the item's place in the list",
+    );
+
+    // A div with a button's role, because the nesting has to be legitimate.
+    assert!(
+        body.contains("role\", \"button\"") || body.contains("role\",\"button\""),
+        "the row should still announce itself as a button",
+    );
+    // And keyboard access, which a `div` does not bring and a `button` did.
+    // Losing Enter and Space on every row to gain a checkbox would be a poor
+    // trade, and an easy one to make without noticing.
+    assert!(
+        body.contains("keydown") && body.contains("\"Enter\""),
+        "the row lost keyboard access when it stopped being a button",
     );
 }

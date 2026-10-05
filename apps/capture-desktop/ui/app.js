@@ -499,9 +499,34 @@ function stamp(ms, tz) {
 // ------------------------------------------------------------------ notes ---
 
 /// One row. Every state is rendered — never blank, never omitted.
+///
+/// A `div` acting as a button rather than a `button`, so that a list's items
+/// can carry real checkboxes. A checkbox inside a `button` is invalid HTML and
+/// behaves differently between engines, which is the concrete form of the
+/// objection this row used to carry — "nesting a second control inside it would
+/// make one gesture ambiguous". The ambiguity is resolved by the checkbox
+/// stopping its own click rather than by refusing to have one.
+///
+/// Which the row was already doing. The tag buttons a few lines down have been
+/// nested here all along, stopping their own clicks for exactly this reason —
+/// a `button` inside a `button`, just as invalid, and never noticed because it
+/// mostly works. So the objection was already contradicted by the code above
+/// it; what this changes is making the nesting legitimate as well as working.
+///
+/// Keyboard access is kept by hand because a `div` does not bring it. Losing
+/// Enter and Space on every row in the timeline to gain a checkbox would be a
+/// poor trade, and an easy one to make without noticing.
 function noteRow(note, onOpen) {
-  const row = el("button", "note");
+  const row = el("div", "note");
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
   row.addEventListener("click", () => onOpen(note.slug));
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onOpen(note.slug);
+    }
+  });
 
   const head = el("div", "name");
   head.append(note.alias ? `${note.alias}  ·  ${note.slug}` : note.slug);
@@ -558,16 +583,50 @@ function noteRow(note, onOpen) {
   // left to decode `#groceries: milk, eggs, bread` by eye is doing the
   // recognizer's job by hand.
   //
-  // Not tickable here. Completing an item is a write, and this row is a button
-  // that opens the note — nesting a second control inside it would make one
-  // gesture ambiguous. The note page is where a list is worked through.
+  // Tickable here, which is what the requirement asks for: an item is
+  // completed where it is drawn, without navigating to a separate surface
+  // first.
+  //
+  // This row used to refuse, and the reason was real rather than fussy — it was
+  // a `button`, and a checkbox inside a button is invalid HTML. The row is a
+  // `div` with a button's role now, so the nesting is legitimate, and the
+  // ambiguity of one gesture meaning two things is resolved where it arises:
+  // the checkbox stops its own click from reaching the row.
+  //
+  // By position within this capture, never by the item's words. Two items
+  // reading the same are ordinary on a shopping list.
   if (note.items && note.items.length) {
-    const list = el("ul", "items");
-    for (const item of note.items) {
+    const list = el("ul", "items tickable");
+    note.items.forEach((item, ord) => {
       const li = el("li", item.done ? "item done" : "item");
-      li.textContent = item.text;
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = item.done;
+      // The click, not the change: the row listens for `click`, so this is
+      // what stops one gesture meaning two things. Stopping the change as well
+      // was belt-and-braces that made a test unable to tell which of the two
+      // mattered.
+      box.addEventListener("click", (e) => e.stopPropagation());
+      box.addEventListener("change", async () => {
+        await call("tick_item_at", {
+          name: note.slug,
+          ord,
+          done: box.checked,
+        });
+        // The row shows it immediately: the write succeeded, so drawing it
+        // done is true rather than optimistic.
+        //
+        // Said explicitly because `refresh` does not cover every view this row
+        // appears in — it redraws the timeline, health and the agenda, and not
+        // search, a tag page or an entity page. Without this line a tick on one
+        // of those would leave the strike-through showing the state from before
+        // the click.
+        li.classList.toggle("done", box.checked);
+        refresh();
+      });
+      li.append(box, el("span", "text", item.text));
       list.append(li);
-    }
+    });
     row.append(list);
   }
 
