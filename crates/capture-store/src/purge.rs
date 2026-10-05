@@ -191,6 +191,21 @@ pub fn execute(
     }
     ops.begin_purge(redact, target, Phase::BlobsDestroyed, now)?;
 
+    // The second real window, widened on the same terms as the first.
+    //
+    // Between the recording going and the body going there is a state where the
+    // blobs are gone and the capture that names them is not. It is microseconds
+    // wide, and the harness kills at a random point in a process lifetime — so
+    // it *does* land here, just rarely and unpredictably.
+    //
+    // Measured rather than assumed: without this pause, three runs of the crash
+    // test between them reached `started`, `projection-purged`,
+    // `blobs-destroyed` and `body-destroyed`. So this does not make an
+    // unreachable state reachable; it makes a rare one common, which is the
+    // difference between a path that is covered when the dice fall well and one
+    // that is covered every run.
+    pause_for_testing();
+
     // 4. The irreversible step.
     log.destroy_bodies(target)?;
     ops.begin_purge(redact, target, Phase::BodyDestroyed, now)?;

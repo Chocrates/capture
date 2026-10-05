@@ -365,6 +365,15 @@ fn a_killed_purge_never_leaves_content_half_destroyed() {
     let scratch = Scratch::new("purge").with_store();
     let mut rng = Rng(seed());
     let mut ever_purged = false;
+    // Which phases a kill actually landed in.
+    //
+    // "An interrupted purge can always be finished" is a claim about four
+    // phases, and nothing said which ones a run had actually interrupted. It
+    // turns out to be most of them — the kill lands at a random point, so even
+    // the microsecond-wide windows get hit sometimes — but that was invisible,
+    // and a claim nobody can see the evidence for is one that quietly stops
+    // being true.
+    let mut phases_seen: std::collections::BTreeSet<String> = Default::default();
 
     for round in 0..ROUNDS + EXTRA_ROUNDS {
         // Stop once the harness has something to stand on. Every round is a
@@ -460,13 +469,27 @@ fn a_killed_purge_never_leaves_content_half_destroyed() {
             }
         }
 
-        let _ = unfinished;
+        for (_, _, phase) in &unfinished {
+            phases_seen.insert(phase.as_str().to_string());
+        }
     }
 
     assert!(
         ever_purged,
         "nothing was ever destroyed in {} rounds — the harness proved nothing",
         ROUNDS + EXTRA_ROUNDS
+    );
+
+    // Reported rather than required. Which phase a kill lands in is a race, and
+    // failing the suite because a random timing did not cooperate would teach
+    // people to re-run it until it passed — which is how a crash test stops
+    // being read. What matters is that the number is visible: if it only ever
+    // says one phase, the window for the others is too narrow to test and that
+    // is a finding about the harness rather than about the purge.
+    println!("interrupted purges were resumed from: {phases_seen:?}");
+    assert!(
+        !phases_seen.is_empty(),
+        "no purge was ever interrupted mid-flight, so no resume path ran"
     );
 }
 
