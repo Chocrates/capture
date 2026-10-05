@@ -35,7 +35,7 @@ use serde::Serialize;
 /// Deliberately not the storage type. This is a wire format the page depends
 /// on, and letting a storage field rename ripple into the interface is how a
 /// refactor becomes a broken window.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Note {
     pub slug: String,
     pub alias: Option<String>,
@@ -151,7 +151,7 @@ fn rendered(s: &Store, n: NoteRow) -> Result<Note> {
 }
 
 /// A link, with enough to render it broken.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Link {
     pub name: String,
     /// What the name meant when it was written, if that note still exists.
@@ -160,7 +160,7 @@ pub struct Link {
 }
 
 /// A note that points here.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Backlink {
     pub slug: String,
     /// The name it used, which may not be this note's current one.
@@ -173,7 +173,7 @@ pub struct Backlink {
 /// Two scanners over one syntax is two answers to one question: the body would
 /// eventually disagree with the list of links beneath it about what the note
 /// links to, and neither would be visibly wrong.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Piece {
     /// Text as written. For a link this is the name between the brackets.
     pub text: String,
@@ -205,7 +205,7 @@ pub struct Piece {
 }
 
 /// Everything the note page shows.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Page {
     pub note: Note,
     /// The text, split into what to show and what to make clickable.
@@ -224,7 +224,7 @@ pub struct Page {
 /// §3.1.4 keeps the two apart on purpose: the text is the episodic record and
 /// the fields are operationally authoritative, and neither is regenerated from
 /// the other. Showing both is what makes drift visible instead of silent.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Promotion {
     /// `note`, `task`, `event` or `series`.
     pub kind: String,
@@ -238,7 +238,7 @@ pub struct Promotion {
 }
 
 /// One occurrence of a series, as a surface draws it.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Occurrence {
     pub slug: String,
     /// The occurrence's name — its original start.
@@ -275,7 +275,7 @@ pub struct Occurrence {
 }
 
 /// One note offered in a review session.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ReviewItem {
     pub slug: String,
     pub text: Option<String>,
@@ -287,13 +287,13 @@ pub struct ReviewItem {
 }
 
 /// A series that has lapsed often enough to be worth one question.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Nagging {
     pub slug: String,
 }
 
 /// A whole session, which is a fixed small number of items and then over.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ReviewSession {
     pub items: Vec<ReviewItem>,
     /// Asked once, not inferred (§3.6). A parser cannot tell a missed walk from
@@ -303,7 +303,7 @@ pub struct ReviewSession {
 }
 
 /// One thing worth telling the user.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Condition {
     /// `attention` or `worth-knowing`. Tiered so that a surface full of
     /// undifferentiated warnings does not train the reader to ignore all of
@@ -316,7 +316,7 @@ pub struct Condition {
 }
 
 /// The health surface.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Health {
     pub notes: u64,
     pub events: u64,
@@ -332,7 +332,7 @@ pub struct Health {
 }
 
 /// One device in the roster.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Peer {
     /// Enough of the key for a person to compare against another device's
     /// screen. Not the whole thing: a prefix nobody checks is worse than one
@@ -362,7 +362,7 @@ fn approx(ms: u64) -> String {
 }
 
 /// A redaction waiting for its window to elapse.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Pending {
     pub id: String,
     pub slug: String,
@@ -617,7 +617,7 @@ pub fn tagged(tag: String) -> std::result::Result<Vec<Note>, String> {
 }
 
 /// One line of a list.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ListLine {
     pub text: String,
     pub done: bool,
@@ -787,7 +787,7 @@ pub fn fix_list(name: String) -> std::result::Result<String, String> {
 }
 
 /// One entry in the wiki's sidebar.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Entry {
     /// What to show: an alias, or a name without its sigil.
     pub name: String,
@@ -803,7 +803,7 @@ pub struct Entry {
 }
 
 /// The sidebar: everything there is to browse.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Index {
     /// Notes given a name by hand.
     pub pages: Vec<Entry>,
@@ -961,7 +961,7 @@ struct Progress {
 }
 
 /// What the window shows while a pairing is open.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct PairingState {
     /// The digits to read out, while one is running.
     pub code: Option<String>,
@@ -1286,7 +1286,7 @@ pub fn set_task_done(name: String, done: bool) -> std::result::Result<(), String
 /// Mirrors the binding the phone uses, field for field, because the two are
 /// answering the same question and a shape that differed would invite the two
 /// surfaces to differ with it.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct TaskLine {
     pub slug: String,
     /// What was captured, verbatim. Absent for the same reasons as elsewhere:

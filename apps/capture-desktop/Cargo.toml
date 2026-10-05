@@ -10,6 +10,10 @@ publish.workspace = true
 # rather than spoken to over HTTP — there is no server here, and inventing one
 # would put a network boundary inside a single-user desktop application.
 
+[lib]
+name = "capture_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "capture-desktop"
 path = "src/main.rs"

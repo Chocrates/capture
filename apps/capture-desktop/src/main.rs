@@ -8,7 +8,11 @@
 //! Everything the page can do is enumerated in `ipc.rs`. That is the whole
 //! attack surface and the whole capability list, and it fits on a screen.
 
-mod ipc;
+// The capabilities live in the library beside this file, so that something
+// other than the webview can reach them. See `lib.rs`: the window's commands
+// were untestable, and an agenda that put every evening appointment on the
+// wrong day is what that cost.
+use capture_desktop::ipc;
 
 fn main() {
     tracing_subscriber::fmt()
