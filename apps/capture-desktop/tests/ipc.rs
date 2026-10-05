@@ -117,7 +117,83 @@ fn the_window_answers_what_the_store_holds() {
     assert_eq!(milk.len(), 2, "{lines:?}");
     assert_ne!(milk[0], milk[1], "identical items came from one capture");
 
+    // ------------------------------------------------------------------ wiki
+    //
+    // `capture parent` is the one hand-made structure in the system, and the
+    // sidebar is the only thing that reads it — so the command line can set a
+    // parent and has nowhere to show it. That is deliberate (§3.7 stays bounded
+    // by the filing reaching one list and nothing else), and it is also why
+    // this is the only place the verb can be checked at all.
+    let plan = capture(&paths, "how the migration goes");
+    let steps = capture(&paths, "the rollback steps");
+    let loose = capture(&paths, "a thought with no name");
+    capture_store::promote::settle(&paths).unwrap();
+
+    // A page is a note somebody aliased. Until then it is not in the sidebar,
+    // whatever it is filed under.
+    capture_store::mutate::set_parent(&paths, &steps, Some(&plan)).unwrap();
+    let before = ipc::wiki_index().expect("the sidebar answers");
+    assert!(
+        !before
+            .pages
+            .iter()
+            .any(|e| e.slug.as_deref() == Some(steps.as_str())),
+        "an unaliased note is in the sidebar: {:?}",
+        before.pages
+    );
+
+    alias(&paths, &plan, "migration");
+    alias(&paths, &steps, "rollback");
+    let index = ipc::wiki_index().expect("the sidebar answers");
+
+    let page = |alias: &str| {
+        index
+            .pages
+            .iter()
+            .find(|e| e.name == alias)
+            .unwrap_or_else(|| panic!("{alias} is not a page: {:?}", index.pages))
+    };
+    // Listed by the name somebody chose, and nested by the slug, because that
+    // is what every other surface addresses a note by.
+    assert_eq!(page("rollback").parent.as_deref(), Some(plan.as_str()));
+    assert_eq!(page("rollback").slug.as_deref(), Some(steps.as_str()));
+    assert_eq!(
+        page("migration").parent,
+        None,
+        "the top of the tree has none"
+    );
+    // A page is one note, so there is nothing to count. A person has a count
+    // and no slug; the two carry opposite halves and sharing one type is how
+    // that gets confused.
+    assert_eq!(page("migration").count, None);
+
+    // Filing under a note that is not itself a page is allowed, and the branch
+    // is still drawn — by slug, since there is no alias to show. Hiding it
+    // would read as the move not having worked.
+    capture_store::mutate::set_parent(&paths, &steps, Some(&loose)).unwrap();
+    let refiled = ipc::wiki_index().expect("the sidebar answers");
+    let moved = refiled.pages.iter().find(|e| e.name == "rollback").unwrap();
+    assert_eq!(moved.parent.as_deref(), Some(loose.as_str()));
+
+    // And back to the top, which is the reversal and the only way out of a
+    // branch.
+    capture_store::mutate::set_parent(&paths, &steps, None).unwrap();
+    let top = ipc::wiki_index().expect("the sidebar answers");
+    assert_eq!(
+        top.pages
+            .iter()
+            .find(|e| e.name == "rollback")
+            .unwrap()
+            .parent,
+        None,
+        "a page could not be put back at the top"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn alias(paths: &capture_store::StorePaths, name: &str, alias: &str) {
+    capture_store::mutate::set_alias(paths, name, Some(alias)).unwrap();
 }
 
 fn capture(paths: &capture_store::StorePaths, text: &str) -> String {
