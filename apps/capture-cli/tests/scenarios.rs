@@ -628,3 +628,106 @@ fn own_key(json: &str) -> String {
     let at = json.find("\"key\":\"").expect("peers names a key") + 7;
     json[at..].chars().take(8).collect()
 }
+
+/// A rebuild reproduces the archive, which is the claim the design rests on.
+///
+/// §1.3: `state.db` is disposable and rebuilt by re-folding the log. There is
+/// no migration code, ever — and that is only affordable if the rebuild really
+/// does reproduce what was there. `capture rebuild` is the command a person
+/// runs to exercise it, and no test had ever run it.
+///
+/// Asserted against what the surfaces say rather than against a row count,
+/// because a rebuild that produced the right number of wrong notes would
+/// satisfy a count.
+#[test]
+fn a_rebuild_reproduces_what_the_archive_said() {
+    let s = Store::new("rebuild");
+
+    // Something of each kind the projection derives differently: a promotion
+    // with a date, a list, a tag applied by an event, a mention, and a note
+    // somebody muted.
+    let task = s.capture("pay the invoice");
+    s.capture("#shop: milk, eggs, bread");
+    s.capture("lunch with @sarah about ^acme");
+    let muted = s.capture("something I do not want resurfacing");
+    s.ok(&["settle"]);
+    s.ok(&["task", &task, "2026-09-20"]);
+    s.ok(&["tag", &muted, "vault"]);
+    s.ok(&["mute", &muted]);
+
+    let before = (
+        s.ok(&["timeline", "--json"]),
+        s.ok(&["tasks", "--json"]),
+        s.ok(&["list", "shop"]),
+        s.ok(&["mentions", "@sarah"]),
+        s.ok(&["show", &muted]),
+    );
+
+    let said = s.ok(&["rebuild"]);
+    assert!(said.contains("rebuilt"), "{said}");
+    assert!(
+        said.contains("note(s)"),
+        "a rebuild should say what it produced: {said}"
+    );
+
+    let after = (
+        s.ok(&["timeline", "--json"]),
+        s.ok(&["tasks", "--json"]),
+        s.ok(&["list", "shop"]),
+        s.ok(&["mentions", "@sarah"]),
+        s.ok(&["show", &muted]),
+    );
+
+    assert_eq!(before.0, after.0, "the timeline changed across a rebuild");
+    assert_eq!(before.2, after.2, "the list changed across a rebuild");
+    assert_eq!(before.3, after.3, "the mentions changed across a rebuild");
+    assert_eq!(before.4, after.4, "the note changed across a rebuild");
+
+    // The tasks are the same and the *count beside them* is not, which is a
+    // property worth pinning rather than normalising away.
+    //
+    // `read_by` is local and a rebuild drops it. The queue handles that by
+    // treating a current promotion as a record that the note was read —
+    // otherwise every rebuild would sweep the whole archive and write a
+    // duplicate promote event per note. But a note with **no** promotion has
+    // nothing to stand in: ordinary prose the recognizer declined, and a
+    // promotion a person pinned, which carries no grammar.
+    //
+    // So a rebuild reports every such note outstanding. It is honest — this
+    // generation has not read them — and it is self-correcting, and for prose
+    // the sweep writes no events. It is also the one visible cost of §1.3's
+    // "no migration code, ever", and somebody who rebuilds a large archive
+    // will see a large number here.
+    assert_eq!(
+        strip_unread(&before.1),
+        strip_unread(&after.1),
+        "the tasks themselves changed across a rebuild"
+    );
+    assert!(
+        before.1.contains("\"unread\":0"),
+        "nothing should have been outstanding beforehand: {}",
+        before.1
+    );
+    assert!(
+        !after.1.contains("\"unread\":0"),
+        "a rebuild dropped `read_by` and nothing noticed: {}",
+        after.1
+    );
+
+    // And a settle puts it back, which is what makes the above a cost rather
+    // than a defect.
+    s.ok(&["settle"]);
+    assert_eq!(
+        s.ok(&["tasks", "--json"]),
+        before.1,
+        "a settle after a rebuild did not restore what the archive said"
+    );
+}
+
+/// The task listing without its outstanding count.
+fn strip_unread(json: &str) -> String {
+    match json.find(",\"unread\"") {
+        Some(at) => format!("{}}}", &json[..at]),
+        None => json.to_string(),
+    }
+}
