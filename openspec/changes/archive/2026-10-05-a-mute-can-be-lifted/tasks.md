@@ -65,9 +65,9 @@ The live defect, and first because `unmute` would otherwise inherit it.
 - [x] 5.2 Check `tools/unwired.py` and `tools/unreached.py` are quiet — the
       whole defect was a mechanism with no caller, so a new one left half-wired
       would be the same mistake.
-- [ ] 5.3 Record in `~/.local/share/capture-reviews/PROGRESS.md`: the ledger
+- [x] 5.3 Record in `~/.local/share/capture-reviews/PROGRESS.md`: the ledger
       entry that opened this says it was deferred, and should say what happened.
-- [ ] 5.4 Note the two follow-ups in the ledger rather than losing them: the ten
+- [x] 5.4 Note the two follow-ups in the ledger rather than losing them: the ten
       duplicated `muted_until` predicates, and the desktop and phone controls
       §2.6's "from any device" still wants.
 - [ ] 5.5 `openspec archive a-mute-can-be-lifted`.
