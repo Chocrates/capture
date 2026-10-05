@@ -371,9 +371,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     // only that it is stale, because "three weeks" and "eight days" call for
     // different reactions.
     for p in ops.peer_addresses()? {
-        let stale = p
-            .last_seen
-            .is_none_or(|t| now.saturating_sub(t) > PEER_STALE_MS);
+        let stale = capture_store::syncstate::peer_is_stale(p.last_seen, now);
         if stale {
             match p.last_seen {
                 Some(t) => attention.push(format!(
@@ -583,13 +581,6 @@ fn roster_now(paths: &StorePaths) -> Result<capture_core::roster::Roster> {
     let log = capture_store::log::Log::open_read(&paths.events)?;
     Ok(capture_core::roster::build(&log.all()?))
 }
-
-/// How long a peer may go unreached before it is worth saying so.
-///
-/// A week, per §4.5. Shorter would fire every time a laptop spends a weekend
-/// shut, which trains the person to ignore it — and this is a report that has
-/// to be believed the one time it means something.
-const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Every device in the roster, and when this one last reached it.
 pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {

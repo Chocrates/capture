@@ -193,6 +193,43 @@ pub fn lasting(ms: u64) -> String {
     }
 }
 
+/// How long a peer may go unreached before it wants attention.
+///
+/// A week, per §4.5. Shorter would fire every time a laptop spends a weekend
+/// shut, which trains the person to ignore it — and this is a report that has
+/// to be believed the one time it means something. Longer and what is stranded
+/// on a quiet device is a month of captures rather than a handful.
+///
+/// That argument was written twice, once in each surface, in two phrasings of
+/// the same point. It lives here now, with the rule it is about.
+///
+/// Deliberately not `notifier::STALE_MS`, which is also a week and is a
+/// different decision — how late a *moment* may be and still be worth
+/// announcing. Two spans that happen to be equal are not one span, and merging
+/// them because the numbers match is how a change to one silently moves the
+/// other.
+pub const PEER_QUIET_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Whether a peer has gone quiet.
+///
+/// One rule, because this was decided in two surfaces: the terminal's status
+/// and the window's health each held a constant and a predicate of their own,
+/// identical today. Change the week in one and the two disagree about whether
+/// your phone needs attention — and neither is obviously wrong, which is the
+/// state that makes somebody stop trusting the report rather than the surface.
+///
+/// A device gone quiet holds captures that exist on exactly one machine, and
+/// the longer that goes unnoticed the more of them there are (§4.5).
+///
+/// **Never reached counts as quiet**, and that is the half a second copy would
+/// most likely get different. The alternative — "never reached" as its own
+/// state, not quite an alarm — is defensible right up until the moment somebody
+/// has a device they paired and never synced, which is exactly when the
+/// captures on it are most stranded.
+pub fn peer_is_stale(last_seen: Option<u64>, now: u64) -> bool {
+    last_seen.is_none_or(|t| now.saturating_sub(t) > PEER_QUIET_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +302,50 @@ mod tests {
         ];
         assert_eq!(all.len(), 6, "an arm was added without a decision about it");
         let _ = NOW;
+    }
+}
+
+#[cfg(test)]
+mod peer_quiet {
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000_000;
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn a_peer_reached_this_week_is_not_quiet() {
+        assert!(!peer_is_stale(Some(NOW - 6 * DAY), NOW));
+        assert!(!peer_is_stale(Some(NOW), NOW));
+    }
+
+    #[test]
+    fn a_peer_not_reached_for_longer_is_quiet() {
+        assert!(peer_is_stale(Some(NOW - 8 * DAY), NOW));
+        assert!(peer_is_stale(Some(NOW - 30 * DAY), NOW));
+    }
+
+    #[test]
+    fn exactly_a_week_is_not_yet_quiet() {
+        // Pinned rather than left to whoever reads the `>` next. A week to the
+        // millisecond is the boundary and it falls on the quiet side of the
+        // line — one more millisecond and it wants attention.
+        assert!(!peer_is_stale(Some(NOW - PEER_QUIET_MS), NOW));
+        assert!(peer_is_stale(Some(NOW - PEER_QUIET_MS - 1), NOW));
+    }
+
+    #[test]
+    fn a_peer_never_reached_is_quiet() {
+        // The judgement a second copy would most likely get different: a device
+        // paired and never synced is exactly when its captures are most
+        // stranded, so it is not a gentler state than having gone quiet.
+        assert!(peer_is_stale(None, NOW));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_make_a_peer_quiet() {
+        // `saturating_sub`, said out loud. A peer last seen "in the future"
+        // after a clock correction is zero milliseconds ago, not an enormous
+        // number of them.
+        assert!(!peer_is_stale(Some(NOW + 5 * DAY), NOW));
     }
 }

@@ -348,12 +348,6 @@ pub struct Peer {
     pub last_seen_ms: Option<u64>,
 }
 
-/// How long a peer may go unreached before it is worth saying so.
-///
-/// A week. Shorter fires every time a laptop spends a weekend shut, and a
-/// report that cries wolf is one nobody believes the time it means something.
-const PEER_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-
 /// A duration in the roughest terms that are still true.
 fn approx(ms: u64) -> String {
     let days = ms / (24 * 60 * 60 * 1000);
@@ -1613,9 +1607,7 @@ pub fn health() -> std::result::Result<Health, String> {
             if k.key == me {
                 continue;
             }
-            let quiet = k
-                .last_seen
-                .is_none_or(|t| now.saturating_sub(t) > PEER_STALE_MS);
+            let quiet = capture_store::syncstate::peer_is_stale(k.last_seen, now);
             if quiet {
                 conditions.push(Condition {
                     tier: "attention",
