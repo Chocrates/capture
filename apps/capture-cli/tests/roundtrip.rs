@@ -168,7 +168,21 @@ fn a_credential_shaped_note_travels_without_its_text() {
     let a = Store::fresh("credential");
     a.ok(&["+", "my aws secret key is AKIAIOSFODNN7EXAMPLE"]);
     let said = a.ok(&["export"]);
-    assert!(said.contains("without their text"), "{said}");
+    // The credential reason specifically, and the remedy that goes with it.
+    //
+    // "without their text" was the whole assertion, and *both* of the export's
+    // withholding messages contain that phrase — so an export that reported the
+    // redaction reason instead would have passed, and the advice would have
+    // been wrong for the notes it was printed beside.
+    assert!(said.contains("look like they hold credentials"), "{said}");
+    assert!(
+        said.contains("capture unflag"),
+        "the remedy is missing: {said}"
+    );
+    assert!(
+        !said.contains("because a redaction names them"),
+        "a credential flag was reported as a redaction: {said}"
+    );
 
     // Not one byte of it in the file.
     let mut found = false;
@@ -208,7 +222,7 @@ fn clearing_the_flag_puts_a_note_back_in_the_export() {
     let slug = a.ok(&["+", "remind me to rotate the api key on friday"]);
     let slug = slug.trim();
     let said = a.ok(&["export"]);
-    assert!(said.contains("without their text"), "{said}");
+    assert!(said.contains("look like they hold credentials"), "{said}");
 
     a.ok(&["unflag", slug]);
     a.ok(&["+", "forcing a fresh export file"]);
@@ -384,5 +398,47 @@ fn a_cancelled_redaction_exports_whole() {
     assert!(
         export_contains(&s, "marigolds"),
         "a cancelled redaction still withheld the note"
+    );
+}
+
+#[test]
+fn an_export_reports_a_redaction_differently_from_a_credential() {
+    // Two reasons a note travels without its text, counted apart because what
+    // a person should do about each is opposite: a credential flag over-flags
+    // on purpose and may be a false positive to clear, and a redaction is a
+    // decision nothing should undo.
+    //
+    // Both messages contain "without their text", which is all either test
+    // asserted — so one could have been printed in place of the other and
+    // nothing would have noticed, and "If one of those is an ordinary note:
+    // capture unflag <name>" would have appeared beside a note somebody had
+    // asked to destroy.
+    // A name of its own: `export-redacted` is taken, and two tests sharing a
+    // scratch directory lock each other out of it.
+    let a = Store::fresh("export-reason");
+    let slug = a.ok(&[
+        "+", // Deliberately bland. The first attempt read "an ordinary note with
+        // nothing secret in it" and was flagged as a credential — the predicate
+        // over-flags on purpose, and the word "secret" is enough.
+        "lunch with sarah on tuesday",
+    ]);
+    let slug = slug.trim().to_string();
+    a.ok(&["settle"]);
+    a.ok(&["redact", "--force", &slug]);
+
+    let said = a.ok(&["export"]);
+
+    assert!(
+        said.contains("because a redaction names them"),
+        "the redaction reason was not reported: {said}"
+    );
+    // And no remedy, because there is nothing to clear.
+    assert!(
+        !said.contains("capture unflag"),
+        "an export offered to unflag a note somebody asked to destroy: {said}"
+    );
+    assert!(
+        !said.contains("look like they hold credentials"),
+        "a redaction was reported as a credential flag: {said}"
     );
 }
