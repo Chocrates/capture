@@ -156,6 +156,74 @@ fn muting_always_wins() {
     assert!(s.state.text_of(&tgt).unwrap().is_some());
 }
 
+/// A mute with an end stops being in force when the end passes.
+///
+/// §2.6: "mute removes a note from **review**, resurfacing, and all pushed
+/// surfaces, permanently **or until a stated date**." The second half had no
+/// test and no command could reach it, so every mute in a real archive was
+/// indefinite — where "has an end" and "the end has passed" agree, which is
+/// why this went unnoticed.
+///
+/// `review_eligible` asked only whether an end existed. A note muted until
+/// Monday was therefore out of review for good.
+#[test]
+fn a_mute_with_an_end_lapses_out_of_review() {
+    let sc = Scratch::new("mute-lapses");
+    let p = sc.paths();
+    let slug = capture(&p, "stop showing me this for now");
+
+    let t = now();
+    let hour = 60 * 60 * 1000;
+    assert_eq!(offered(&p, t), std::slice::from_ref(&slug));
+
+    // Resolved in its own scope first. Holding the session open across the
+    // call takes the writer lock that `mute_scope` then asks for, and the
+    // failure reads as a bug in the mute rather than in the test.
+    let tgt = {
+        let s = Session::open_for_capture(p.clone()).unwrap();
+        s.state.resolve(&slug).unwrap().unwrap()
+    };
+
+    // Written through the store, because this is the half no command can say.
+    capture_store::mutate::mute_scope(
+        &p,
+        capture_core::body::MuteScope::Note(tgt),
+        Some((t + hour) as u64),
+    )
+    .unwrap();
+
+    assert!(
+        offered(&p, t).is_empty(),
+        "a note muted until later was offered before then"
+    );
+
+    // And the whole point: afterwards, with nobody having done anything.
+    assert_eq!(
+        offered(&p, t + 2 * hour),
+        std::slice::from_ref(&slug),
+        "the mute never lapsed, so it was permanent after all"
+    );
+}
+
+/// An indefinite mute does not lapse.
+///
+/// The companion to the test above, and the reason the predicate cannot simply
+/// compare against `now`: zero is the sentinel for "no end", and a naive
+/// comparison would read it as an end in 1970 and lapse immediately.
+#[test]
+fn a_mute_with_no_end_does_not_lapse() {
+    let sc = Scratch::new("mute-forever");
+    let p = sc.paths();
+    let slug = capture(&p, "never show me this again");
+    capture_store::mutate::mute_note(&p, &slug).unwrap();
+
+    let far = now() + 1000 * 24 * 60 * 60 * 1000;
+    assert!(
+        offered(&p, far).is_empty(),
+        "an indefinite mute lapsed: zero was read as a date"
+    );
+}
+
 #[test]
 fn a_forward_marker_is_offered_before_anything_else() {
     // §2.8's first tier, and the strongest signal there is: somebody said, in

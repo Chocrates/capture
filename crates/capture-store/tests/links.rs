@@ -307,7 +307,7 @@ fn the_names_are_ordered_by_use() {
     capture(&p, "and once more with @sarah");
 
     let s = Session::open(p.clone()).unwrap();
-    let people = s.state.distinct_mentions('@').unwrap();
+    let people = s.state.distinct_mentions('@', u64::MAX).unwrap();
     assert_eq!(people, [("sarah".into(), 3), ("aaron".into(), 1)]);
 }
 
@@ -323,7 +323,7 @@ fn a_tag_is_counted_once_however_it_arrived() {
 
     let s = Session::open(p.clone()).unwrap();
     assert_eq!(
-        s.state.distinct_mentions('#').unwrap(),
+        s.state.distinct_mentions('#', u64::MAX).unwrap(),
         [("reading".into(), 1)]
     );
 }
@@ -337,8 +337,42 @@ fn a_muted_note_does_not_put_a_name_in_the_sidebar() {
     let slug = capture(&p, "the thing with @quiet");
     capture_store::mutate::mute_note(&p, &slug).unwrap();
 
+    // Asked at the end of time, so this is not passing because the mute has
+    // not been reached yet: an indefinite mute holds whenever it is asked.
     let s = Session::open(p.clone()).unwrap();
-    assert!(s.state.distinct_mentions('@').unwrap().is_empty());
+    assert!(s.state.distinct_mentions('@', u64::MAX).unwrap().is_empty());
+}
+
+/// A mute with an end stops keeping a name out of the sidebar.
+///
+/// The companion to the test above, and the same defect the review predicate
+/// had: both branches of `distinct_mentions` asked whether a mute *existed*
+/// rather than whether it was still in force, so a name mentioned only by
+/// notes muted until Monday was gone from the sidebar for good.
+#[test]
+fn a_name_comes_back_to_the_sidebar_when_the_mute_ends() {
+    let sc = Scratch::new("distinct-lapsing");
+    let p = sc.paths();
+    let slug = capture(&p, "the thing with @quiet");
+
+    let tgt = {
+        let s = Session::open(p.clone()).unwrap();
+        s.state.resolve(&slug).unwrap().unwrap()
+    };
+    let ends = 1_800_000_000_000u64;
+    capture_store::mutate::mute_scope(&p, capture_core::body::MuteScope::Note(tgt), Some(ends))
+        .unwrap();
+
+    let s = Session::open(p.clone()).unwrap();
+    assert!(
+        s.state.distinct_mentions('@', ends - 1).unwrap().is_empty(),
+        "a name appeared while the mute still held"
+    );
+    assert_eq!(
+        s.state.distinct_mentions('@', ends + 1).unwrap(),
+        [("quiet".into(), 1)],
+        "the mute never lapsed, so it was permanent after all"
+    );
 }
 
 // ---------------------------------------------------------------------------

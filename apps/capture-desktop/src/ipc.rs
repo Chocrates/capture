@@ -863,7 +863,7 @@ pub fn wiki_index() -> std::result::Result<Index, String> {
         // surface and a membership set of their own, and giving them a second
         // identity with renaming and merging is a separate argument.
         let tags = s
-            .distinct_mentions('#')?
+            .distinct_mentions('#', now_ms())?
             .into_iter()
             .map(|(name, count)| Entry {
                 name,

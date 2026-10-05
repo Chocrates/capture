@@ -2,18 +2,21 @@
 
 The live defect, and first because `unmute` would otherwise inherit it.
 
-- [ ] 1.1 Write a failing test: a note muted with an end, read after that end has
+- [x] 1.1 Write a failing test: a note muted with an end, read after that end has
       passed, is eligible for review. Through `capture_store::mutate::mute_scope`
       with `Some(until)`, since no command can set one yet.
-- [ ] 1.2 Fix `review_eligible()` (projection.rs:733) to ask
+- [x] 1.2 Fix `review_eligible()` (projection.rs:733) to ask
       `muted_until IS NULL OR (muted_until != 0 AND muted_until <= ?1)`. `?1` is
       already `now` for the backoff ladder, so no signature changes.
-- [ ] 1.3 Give `distinct_mentions` a `now: u64` parameter and the same predicate
+- [x] 1.3 Give `distinct_mentions` a `now: u64` parameter and the same predicate
       in both branches. Update its four call sites: `ipc.rs:866` and three in
       `crates/capture-store/tests/links.rs`.
-- [ ] 1.4 Test the tag index the same way, through `ipc::wiki_index`, which is
-      what `distinct_mentions('#')` feeds.
-- [ ] 1.5 Sabotage both fixes and confirm each test fails.
+- [x] 1.4 Test the tag index the same way. Done in
+      `crates/capture-store/tests/links.rs`, where `distinct_mentions` lives,
+      rather than through `ipc::wiki_index` — the desktop test covers that
+      function's pages branch and its tags branch stays uncovered, which is
+      noted as follow-up rather than quietly claimed.
+- [x] 1.5 Sabotage both fixes and confirm each test fails.
 
 ## 2. An end can be stated
 

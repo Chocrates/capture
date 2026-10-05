@@ -729,8 +729,20 @@ fn review_eligible() -> String {
     );
     let declined = capture_core::fold::DECLINED_AFTER;
     format!(
+        // A mute that has *ended* is not in force. This asked only whether an
+        // end existed, so a note muted until Monday was out of review for
+        // good — §2.6 names review first among what a mute suppresses
+        // "permanently or until a stated date", and the second half never
+        // arrived. Unnoticed because no command could set an end, so every
+        // mute in a real archive was indefinite, where the two forms agree.
+        //
+        // Zero is the sentinel for indefinite, so it is excluded before the
+        // comparison rather than being read as a date in 1970.
+        //
+        // `?1` is already the clock, for the backoff ladder below.
         "n.text IS NOT NULL
-       AND n.muted_until IS NULL
+       AND (n.muted_until IS NULL
+            OR (n.muted_until != 0 AND n.muted_until <= ?1))
        AND n.redacted_at IS NULL
        AND COALESCE(r.deferred, 0) < {declined}
        AND (r.last_shown IS NULL
@@ -2678,11 +2690,16 @@ impl Store {
 
     /// Every distinct person, project or tag the notes name.
     ///
+    /// Takes the clock because a mute can end. Both branches asked only whether
+    /// an end existed, so a tag whose notes were muted until Monday stayed out
+    /// of the count for good — the same defect as the review predicate, in the
+    /// surface that feeds the window's tag sidebar.
+    ///
     /// Ordered by how often each is mentioned, then alphabetically. Frequency
     /// first because a sidebar is read top-down and the name you want is
     /// usually one you use — and because alphabetical alone puts whoever is
     /// called Aaron permanently above everyone you actually work with.
-    pub fn distinct_mentions(&self, sigil: char) -> Result<Vec<(String, u32)>> {
+    pub fn distinct_mentions(&self, sigil: char, now: u64) -> Result<Vec<(String, u32)>> {
         // Tags come from two places, so `#` unions them. The other two sigils
         // exist only in the text and the union is a no-op for them, but writing
         // it once keeps the three consistent rather than special-casing.
@@ -2690,16 +2707,20 @@ impl Store {
             "SELECT value, COUNT(DISTINCT tgt) AS n FROM (
                SELECT m.value AS value, m.tgt AS tgt
                  FROM mentions m JOIN notes n ON n.tgt = m.tgt
-                 WHERE m.sigil = ?1 AND n.redacted_at IS NULL AND n.muted_until IS NULL
+                 WHERE m.sigil = ?1 AND n.redacted_at IS NULL
+                   AND (n.muted_until IS NULL
+                        OR (n.muted_until != 0 AND n.muted_until <= ?2))
                UNION
                SELECT t.tag AS value, t.tgt AS tgt
                  FROM tags t JOIN notes n ON n.tgt = t.tgt
-                 WHERE ?1 = '#' AND n.redacted_at IS NULL AND n.muted_until IS NULL
+                 WHERE ?1 = '#' AND n.redacted_at IS NULL
+                   AND (n.muted_until IS NULL
+                        OR (n.muted_until != 0 AND n.muted_until <= ?2))
              )
              GROUP BY value
              ORDER BY n DESC, value ASC",
         )?;
-        let rows = st.query_map(params![sigil.to_string()], |r| {
+        let rows = st.query_map(params![sigil.to_string(), now as i64], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
         })?;
         let mut out = Vec::new();
