@@ -968,3 +968,100 @@ fn an_occurrence_is_skipped_and_put_back() {
          for reported success and changed nothing: {back}"
     );
 }
+
+/// Renaming and merging an entity move nothing.
+///
+/// §4.3's first and third failures, from the command line. A rename used to
+/// fork the page and a merge has to be a *redirection*: no capture text
+/// changes, no mention row is removed, and both spellings reach the survivor
+/// afterwards. All three were covered at store level and by no command.
+#[test]
+fn an_entity_is_renamed_and_merged_without_moving_anything() {
+    let s = Store::new("entities");
+    let a = s.capture("ask @sarah about the invoice");
+    let b = s.capture("@sarah-chen sent the contract");
+    s.ok(&["settle"]);
+
+    // Two spellings start as two people. That is the premise, not the bug:
+    // nothing should guess they are one.
+    assert_eq!(s.ok(&["entity", "@sarah"]).matches(&a).count(), 1);
+    assert!(!s.ok(&["entity", "@sarah"]).contains(&b));
+
+    s.ok(&["entity-rename", "@sarah", "Sarah Chen"]);
+    let people = s.ok(&["people"]);
+    assert!(
+        people.contains("Sarah Chen"),
+        "the chosen name is not shown: {people}"
+    );
+
+    // The rename did not fork the page: the note is still hers.
+    let after_rename = s.ok(&["entity", "@sarah"]);
+    assert!(
+        after_rename.contains(&a),
+        "a rename lost the notes that named her: {after_rename}"
+    );
+
+    s.ok(&["entity-merge", "@sarah-chen", "@sarah"]);
+
+    // Both notes on one page, reachable by either spelling. This is the half a
+    // merge exists for, and the half `mentions` deliberately does not do.
+    for spelling in ["@sarah", "@sarah-chen"] {
+        let page = s.ok(&["entity", spelling]);
+        assert!(page.contains(&a) && page.contains(&b), "{spelling}: {page}");
+    }
+
+    // `mentions` stays literal, on purpose: it answers "which notes wrote this
+    // spelling", which a merge does not change because a merge rewrites no
+    // capture. Pinned here so the difference between the two commands stays a
+    // decision rather than becoming an accident.
+    let literal = s.ok(&["mentions", "@sarah"]);
+    assert!(
+        literal.contains(&a) && !literal.contains(&b),
+        "mentions followed the merge, which is the entity page's job: {literal}"
+    );
+
+    // And nothing was rewritten. A merge is a redirection — the capture still
+    // says what somebody typed, which is the half that makes it survivable.
+    assert!(
+        s.ok(&["show", &b])
+            .contains("@sarah-chen sent the contract"),
+        "a merge rewrote the capture"
+    );
+}
+
+/// Saying that missing an instance leaves something owed.
+///
+/// §3.6's foot-gun exception: "walk the dog daily" and "take the pill daily"
+/// are the same sentence to a parser and opposite answers to somebody living
+/// with the consequences. So the flag is only ever set by a person, and the
+/// command that sets it was invoked by no test.
+#[test]
+fn a_person_can_say_a_missed_instance_is_still_owed() {
+    let s = Store::new("carries-forward");
+    let series = s.capture("take the pill every day at 9");
+    s.ok(&["settle"]);
+
+    let before = s.ok(&["show", &series]);
+    assert!(
+        !before.contains("carries forward"),
+        "nothing should carry forward until somebody says so: {before}"
+    );
+
+    let said = s.ok(&["carries-forward", &series]);
+    assert!(
+        said.contains("will stay until they are dealt with"),
+        "the command did not say what it changed: {said}"
+    );
+
+    let after = s.ok(&["show", &series]);
+    assert!(
+        after.contains("carries forward"),
+        "the flag did not take: {after}"
+    );
+
+    // Not something a parser may set, and not something a plain note can have.
+    let plain = s.capture("an ordinary thought");
+    s.ok(&["settle"]);
+    let (code, said) = s.run(&["carries-forward", &plain]);
+    assert_ne!(code, 0, "a plain note was told to carry forward: {said}");
+}

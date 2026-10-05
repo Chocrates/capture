@@ -1980,13 +1980,18 @@ impl Store {
         Ok(row.and_then(id_from))
     }
 
-    /// Every note naming a person or a project.
+    /// Every note that wrote a given spelling.
     ///
-    /// The whole of an entity page (§4.3): a filtered timeline of everything
-    /// mentioning it. There is no entity record to create and nothing to
-    /// maintain — a page exists for every name the moment it is written, which
-    /// is what makes this usable on day one rather than after months of
-    /// curation.
+    /// Literal, and deliberately not the entity page: this matches
+    /// `mentions.value` as typed, so a merge does not change the answer. The
+    /// page that follows merges is [`Store::entity_notes`], which joins through
+    /// `entity_names` to reach every spelling of one entity. Both exist because
+    /// they answer different questions — "which notes say this" and "which
+    /// notes are about this person" — and §4.3 only promises the second.
+    ///
+    /// Either way there is no entity record to create and nothing to maintain:
+    /// a page exists for every name the moment it is written, which is what
+    /// makes this usable on day one rather than after months of curation.
     ///
     /// Muted notes are excluded, for the same reason they are excluded from
     /// search: §2.6 makes muting the cheap way to stop something resurfacing,

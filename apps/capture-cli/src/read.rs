@@ -1162,6 +1162,22 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     }
 
     say!();
+
+    // What it was recognised as, first, because it is the most consequential
+    // thing about a note and this command said none of it. A task never said
+    // it was due, a series never said its rule, and `carries-forward` — which
+    // only a person can set (§3.6) — had no surface at all to confirm it took.
+    //
+    // The descriptor is taken from the projection rather than re-rendered
+    // here: `promotion_of` renders it once when the fields are written, and a
+    // second rendering would be a second version of the truth. The desktop's
+    // note page reads the same column, so the two surfaces agree by
+    // construction rather than by both being kept up to date.
+    if let Some(p) = store.promotion_of(&n.tgt)? {
+        let authored = if p.pinned { "  (yours)" } else { "" };
+        say!("{:<10}{}{}", p.kind, p.descriptor, authored);
+    }
+
     say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));
     if n.updated != n.created {
         say!("updated   {}", stamp(n.updated.0, n.tz.as_deref()));
