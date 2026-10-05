@@ -104,6 +104,28 @@ impl Store {
         None
     }
 
+    /// The first occurrence of a series on a day after the one given.
+    fn first_occurrence_after(&self, series: &str, after: &str) -> Option<(String, i64)> {
+        let from: jiff::civil::Date = after.parse().ok()?;
+        for ahead in 1..8 {
+            let day = from
+                .checked_add(jiff::Span::new().days(ahead))
+                .ok()?
+                .to_string();
+            let json = self.ok(&["agenda", &day, "--json"]);
+            if !json.contains(series) {
+                continue;
+            }
+            let at = json.find("\"start_ms\":")? + "\"start_ms\":".len();
+            let n: String = json[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            return Some((day, n.parse().ok()?));
+        }
+        None
+    }
+
     /// A field from the first note in a `--json` listing.
     ///
     /// Read by hand rather than with a parser, so the test depends on the exact
@@ -825,5 +847,124 @@ fn an_occurrence_moves_and_amends_through_the_command() {
     assert!(
         said.contains("no occurrences") && said.contains("move"),
         "the refusal should name the action: {said}"
+    );
+}
+
+/// Fixing a near miss rewrites the capture, which nothing else here does.
+///
+/// §3.1.3 is that promotion never touches the captured text, and this is the
+/// one command that deliberately does — so what it changes should be exactly
+/// one character, and everything else about the note should survive.
+#[test]
+fn fixing_a_list_inserts_one_character_and_nothing_else() {
+    let s = Store::new("fix-list");
+    let before = "#groceries 7 apples, rye flour, 1kg lentils";
+    let slug = s.capture(before);
+    s.ok(&["settle"]);
+
+    let said = s.ok(&["fix-list", &slug]);
+    assert!(said.contains("#groceries: 7 apples"), "{said}");
+
+    let after = s.ok(&["show", &slug]);
+    assert!(
+        after.contains("#groceries: 7 apples, rye flour, 1kg lentils"),
+        "the colon was not inserted where the tag ends: {after}"
+    );
+
+    // One character, and the same one. Anything else here would be the system
+    // editing somebody's words beyond the thing it offered to do.
+    let got: String = after
+        .lines()
+        .find(|l| l.contains("#groceries"))
+        .expect("the text is shown")
+        .trim()
+        .into();
+    assert_eq!(
+        got.len(),
+        before.len() + 1,
+        "more than the colon changed: {got:?}"
+    );
+    assert_eq!(
+        got.replacen(':', "", 1),
+        before,
+        "the words changed: {got:?}"
+    );
+
+    // The note keeps its identity — a rewrite is an edit, not a new capture.
+    assert!(
+        after.contains(&slug),
+        "the note was renamed by being fixed: {after}"
+    );
+
+    // And it is now a list, which was the point.
+    let list = s.ok(&["list", "groceries"]);
+    for item in ["7 apples", "rye flour", "1kg lentils"] {
+        assert!(list.contains(item), "{item} is missing: {list}");
+    }
+}
+
+/// Prose is not a near miss, and fixing it is refused.
+///
+/// The guard that keeps the offer honest: §3.1.5 would rather never fire than
+/// fire inside ordinary writing, and a command that inserted a colon into a
+/// sentence would be doing exactly that on request.
+#[test]
+fn fixing_something_that_is_not_a_near_miss_is_refused() {
+    let s = Store::new("fix-prose");
+    let text = "ask sarah about the invoice, she has it";
+    let slug = s.capture(text);
+    s.ok(&["settle"]);
+
+    let (code, said) = s.run(&["fix-list", &slug]);
+    assert_ne!(code, 0, "prose was turned into a list: {said}");
+    assert!(
+        s.ok(&["show", &slug]).contains(text),
+        "a refused fix changed the text anyway"
+    );
+}
+
+/// Skipping one occurrence, and putting it back.
+///
+/// The restore path shipped broken once, and in a way reading the fold could
+/// not show: `OccState::visible()` carried the rule that a move beats a cancel
+/// and was read by nothing, so the expansion wrote `cancelled` straight through
+/// and ignored `moved_to`. `unskip` ran, reported success, and the agenda still
+/// showed nothing. It was found by *using* it.
+///
+/// So this uses it, through the commands, and checks the agenda rather than the
+/// return code — because a command that reports success and changes nothing is
+/// the exact shape of that defect.
+#[test]
+fn an_occurrence_is_skipped_and_put_back() {
+    let s = Store::new("skip-restore");
+    let series = s.capture("standup every weekday at 9");
+    s.ok(&["settle"]);
+
+    let (day, occ) = s.first_occurrence(&series).expect("a series expands");
+    let next = s
+        .first_occurrence_after(&series, &day)
+        .expect("a weekday series has a second occurrence");
+
+    s.ok(&["skip", &series, &occ.to_string()]);
+    let after = s.ok(&["agenda", &day, "--json"]);
+    assert!(
+        !after.contains(&format!("\"start_ms\":{occ}")),
+        "a skipped occurrence is still on the agenda: {after}"
+    );
+
+    // The rule is untouched: every other occurrence stands. The whole point of
+    // an exception is that it is one.
+    let sibling = s.ok(&["agenda", &next.0, "--json"]);
+    assert!(
+        sibling.contains(&format!("\"start_ms\":{}", next.1)),
+        "skipping one occurrence took another with it: {sibling}"
+    );
+
+    s.ok(&["unskip", &series, &occ.to_string()]);
+    let back = s.ok(&["agenda", &day, "--json"]);
+    assert!(
+        back.contains(&format!("\"start_ms\":{occ}")),
+        "a restored occurrence did not come back — the defect this test exists \
+         for reported success and changed nothing: {back}"
     );
 }
