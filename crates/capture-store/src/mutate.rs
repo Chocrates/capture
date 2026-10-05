@@ -114,10 +114,6 @@ pub fn untag(paths: &StorePaths, name: &str, tag: &str) -> Result<()> {
     Ok(())
 }
 
-/// Assign or clear a chosen name.
-///
-/// Refused here as well as in the fold. The fold's refusal is what makes two
-/// partitioned devices agree; this one is what lets a person be told why.
 /// Put a page under another, or back at the top.
 ///
 /// The one thing in this system that files something by hand. §3.7's argument
@@ -169,6 +165,10 @@ pub fn set_parent(paths: &StorePaths, name: &str, under: Option<&str>) -> Result
     Ok(())
 }
 
+/// Assign or clear a chosen name.
+///
+/// Refused here as well as in the fold. The fold's refusal is what makes two
+/// partitioned devices agree; this one is what lets a person be told why.
 pub fn set_alias(paths: &StorePaths, name: &str, alias: Option<&str>) -> Result<()> {
     let mut s = Session::open(paths.clone())?;
     let tgt = find(&s, name)?;

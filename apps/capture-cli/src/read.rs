@@ -921,16 +921,6 @@ fn utc() -> capture_time::Zone {
     capture_time::Zone::new("UTC").expect("UTC is always present")
 }
 
-/// The zone this machine is in, by name.
-///
-/// One definition, in `capture-store`'s notifier, because the only reason
-/// anything here reads a zone is to work out what hour it is for the rules in
-/// §2.6 — and a wrong answer moves quiet hours by the UTC offset, which is the
-/// difference between a notification at 07:00 and one at 02:00.
-///
-/// There were four copies. The one in the overlay was made by reading the one
-/// twelve lines away in this file, which is the mechanism rather than the
-/// accident.
 /// Open the store for writing, as of this command's moment.
 ///
 /// One helper rather than nineteen `Session::open` calls, because the moment
@@ -947,6 +937,16 @@ pub(crate) fn session(paths: capture_store::StorePaths) -> Result<capture_store:
     capture_store::session::Session::open_at(paths, now_ms().max(0) as u64)
 }
 
+/// The zone this machine is in, by name.
+///
+/// One definition, in `capture-store`'s notifier, because the only reason
+/// anything here reads a zone is to work out what hour it is for the rules in
+/// §2.6 — and a wrong answer moves quiet hours by the UTC offset, which is the
+/// difference between a notification at 07:00 and one at 02:00.
+///
+/// There were four copies. The one in the overlay was made by reading the one
+/// twelve lines away in this file, which is the mechanism rather than the
+/// accident.
 pub(crate) fn local_zone() -> String {
     capture_store::notifier::local_zone()
 }

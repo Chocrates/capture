@@ -3079,11 +3079,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Preferences that were actually chosen, with who chose them and when.
-    ///
-    /// A key that is absent has never been chosen. That absence is the whole
-    /// point: it is what lets status say "default" rather than reporting a
-    /// value with no indication of where it came from.
     /// One setting's value, if it has ever been chosen.
     ///
     /// `None` means nobody has decided, which is a different fact from a value
@@ -3098,6 +3093,11 @@ impl Store {
             .flatten())
     }
 
+    /// Preferences that were actually chosen, with who chose them and when.
+    ///
+    /// A key that is absent has never been chosen. That absence is the whole
+    /// point: it is what lets status say "default" rather than reporting a
+    /// value with no indication of where it came from.
     pub fn settings(&self) -> Result<Vec<(String, Option<String>, String)>> {
         let mut st = self
             .conn

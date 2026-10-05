@@ -211,12 +211,6 @@ pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result
     Ok(())
 }
 
-/// Skip one occurrence of a series, or put it back.
-///
-/// The store decides both, because §8.4 wants every mutation reachable from the
-/// window as well and a second implementation there is how two surfaces come to
-/// disagree. `occurrence` above still writes its own event and should probably
-/// move too; that is a separate tidy rather than something to do halfway here.
 /// Move one occurrence, leaving the rule and its siblings alone.
 ///
 /// Says what was *not* changed as well as what was, because that is the whole
@@ -250,6 +244,12 @@ pub fn amend_occurrence(
     Ok(())
 }
 
+/// Skip one occurrence of a series, or put it back.
+///
+/// The store decides both, because §8.4 wants every mutation reachable from the
+/// window as well and a second implementation there is how two surfaces come to
+/// disagree. `occurrence` above still writes its own event and should probably
+/// move too; that is a separate tidy rather than something to do halfway here.
 pub fn skip(paths: &StorePaths, name: &str, occ: i64, skipped: bool) -> Result<()> {
     if skipped {
         capture_store::mutate::skip_occurrence(paths, name, occ)?;
@@ -1189,7 +1189,6 @@ fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool)
     Ok(())
 }
 
-/// Coarse enough to decide with, for a retention measured in days.
 /// One line of the recoverable listing.
 ///
 /// Pure, and lifted out of the loop, because it is the only way this can be
@@ -1220,6 +1219,9 @@ fn recoverable_line(
     )
 }
 
+/// A duration, as hours or days.
+///
+/// Coarse enough to decide with, for a retention measured in days.
 fn ms(v: u64) -> String {
     let hours = v / (60 * 60 * 1000);
     match hours / 24 {

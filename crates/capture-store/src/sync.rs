@@ -81,6 +81,11 @@ impl<'a, 'g> StoreArchive<'a, 'g> {
         None
     }
 
+    /// The highest stamp anything authentic carried in, for the session to adopt.
+    pub fn highest_stamp(&self) -> Option<capture_core::Hlc> {
+        self.gate.highest_stamp()
+    }
+
     /// Fold everything this round took into the projection.
     ///
     /// Must be called after the exchange. `Gate` puts events in the log and
@@ -88,11 +93,6 @@ impl<'a, 'g> StoreArchive<'a, 'g> {
     /// data that something has to derive. Without this a sync moves every
     /// event correctly and no surface shows any of them, which is the failure
     /// the two-device test caught.
-    /// The highest stamp anything authentic carried in, for the session to adopt.
-    pub fn highest_stamp(&self) -> Option<capture_core::Hlc> {
-        self.gate.highest_stamp()
-    }
-
     pub fn settle(&mut self) -> crate::Result<usize> {
         if self.taken.is_empty() {
             return Ok(0);

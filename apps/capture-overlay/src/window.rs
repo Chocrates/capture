@@ -127,7 +127,6 @@ impl Waker {
     }
 }
 
-/// Run the overlay until the process is asked to stop.
 /// How much bigger than the drawn sizes everything is.
 ///
 /// Read once, here, and never again. The gesture's budget is spent on the
@@ -144,6 +143,7 @@ fn text_scale(paths: &StorePaths) -> f32 {
     capture_store::settings::number(store.as_ref(), "capture.text_scale")
 }
 
+/// Run the overlay until the process is asked to stop.
 pub fn run(paths: StorePaths, shows: Receiver<()>, waker: Waker) -> eframe::Result {
     let scale = text_scale(&paths);
     let options = eframe::NativeOptions {

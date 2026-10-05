@@ -279,7 +279,6 @@ fn is_meridiem_dot(bytes: &[u8], i: usize) -> bool {
         && matches!(after, b'm' | b'M' | b' ' | b'\t' | b'\n')
 }
 
-/// Whether this is a range operator rather than a hyphen inside a word.
 /// Where a full date ends, if one starts here.
 ///
 /// Exactly ten characters and a boundary after them, so `v2026-09-20` is not a
@@ -301,6 +300,7 @@ fn iso_date_end(text: &str, at: usize) -> Option<usize> {
     Some(end)
 }
 
+/// Whether this is a range operator rather than a hyphen inside a word.
 fn looks_like_range(bytes: &[u8], i: usize) -> bool {
     if bytes[i] == b'.' {
         return bytes.get(i + 1) == Some(&b'.');

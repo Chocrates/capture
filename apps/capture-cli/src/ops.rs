@@ -567,7 +567,6 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 
 // ----------------------------------------------------- quarantine, rejected ----
 
-/// Events that are authentic but this device cannot use.
 /// Membership as the log says it is.
 ///
 /// Built from the log rather than read from the projection, for the same
@@ -660,6 +659,7 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Events that are authentic but this device cannot use.
 pub fn quarantine(paths: &StorePaths, json: bool) -> Result<()> {
     let state = read::open(paths)?;
     let rows = state.quarantined()?;
@@ -817,7 +817,6 @@ pub fn rebuild(paths: StorePaths) -> Result<()> {
 
 // ------------------------------------------------------------------ set ----
 
-/// Acknowledge that stale export files have been dealt with.
 /// Accept a device this one did not admit.
 ///
 /// Matched by prefix, because the prefix is what `capture health` prints and
@@ -860,6 +859,7 @@ pub fn admission_seen(paths: StorePaths, key: &str) -> Result<()> {
     }
 }
 
+/// Acknowledge that stale export files have been dealt with.
 pub fn exports_pruned(paths: StorePaths) -> Result<()> {
     let ops = Ops::open(&paths.ops)?;
     let n = ops.stale_export_count()?;

@@ -1341,7 +1341,6 @@ fn has_json(rest: &[String]) -> bool {
     rest.iter().any(|a| a == "--json")
 }
 
-/// Commands shaped `brain <verb> <name> [--json]`.
 /// Commands shaped `capture <verb> [--json]` and nothing else.
 fn json_only(rest: &[String], verb: &str, build: impl Fn(bool) -> Command) -> Result<Command, Bad> {
     let json = has_json(rest);
@@ -1354,6 +1353,7 @@ fn json_only(rest: &[String], verb: &str, build: impl Fn(bool) -> Command) -> Re
     }
 }
 
+/// Commands shaped `capture <verb> <name> [--json]`.
 fn one_name(
     rest: &[String],
     verb: &str,

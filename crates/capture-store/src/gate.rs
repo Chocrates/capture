@@ -322,7 +322,6 @@ impl<'a> Gate<'a> {
         Ok(admitted)
     }
 
-    /// The roster as it currently stands.
     /// The highest stamp carried by anything that authenticated through this
     /// gate, or `None` if nothing did.
     ///
@@ -396,6 +395,7 @@ impl<'a> Gate<'a> {
         self.log
     }
 
+    /// The roster as it currently stands.
     pub fn roster(&self) -> &Roster {
         &self.roster
     }

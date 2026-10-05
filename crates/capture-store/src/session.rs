@@ -506,11 +506,6 @@ impl Session {
         Ok(self.identity.dev())
     }
 
-    /// Carry out whatever has become due.
-    ///
-    /// Returns what it did, so `capture status` can report when this last ran —
-    /// without that, a long-dead overlay means redactions sitting undestroyed
-    /// while every surface reports them complete.
     /// Throw the projection away and compute it again from the log.
     ///
     /// Written beside the current generation, with the pointer moved afterwards
@@ -619,6 +614,11 @@ impl Session {
         Ok(said)
     }
 
+    /// Carry out whatever has become due.
+    ///
+    /// Returns what it did, so `capture status` can report when this last ran —
+    /// without that, a long-dead overlay means redactions sitting undestroyed
+    /// while every surface reports them complete.
     pub fn drain_due(&mut self) -> Result<crate::due::Drained> {
         self.drain_due_at(self.now())
     }

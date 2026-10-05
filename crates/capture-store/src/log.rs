@@ -308,12 +308,6 @@ impl Log {
         Ok(())
     }
 
-    /// What this device holds, as one number per origin.
-    ///
-    /// This is the whole summary a device publishes about its own contents. It
-    /// can say "everything up to 41,822" and nothing else — in particular it
-    /// cannot say "everything up to 41,822 except 41,700", which is why a gap
-    /// must never be created in the first place.
     /// When this origin last wrote something.
     ///
     /// The answer to "was anybody here", derived rather than stored. Every
@@ -338,6 +332,12 @@ impl Log {
             .map(|v| v as u64))
     }
 
+    /// What this device holds, as one number per origin.
+    ///
+    /// This is the whole summary a device publishes about its own contents. It
+    /// can say "everything up to 41,822" and nothing else — in particular it
+    /// cannot say "everything up to 41,822 except 41,700", which is why a gap
+    /// must never be created in the first place.
     pub fn heads(&self) -> Result<BTreeMap<String, u64>> {
         let mut st = self.conn.prepare("SELECT dev, seq FROM heads")?;
         let rows = st.query_map([], |r| {
@@ -570,22 +570,6 @@ impl Log {
         Ok(out)
     }
 
-    /// Remove the payload of every event belonging to a note.
-    ///
-    /// The header stays, and so does the signature: an event with no body still
-    /// recomputes its own id and still verifies, because the body appears in
-    /// the header only as a hash. That is what lets a redacted archive pass
-    /// `capture verify` rather than reading as damaged.
-    ///
-    /// The connection sets `secure_delete`, so the freed pages are overwritten
-    /// as they are released rather than left holding the old bytes.
-    /// The redaction and its cancellation keep their own payloads. A redaction
-    /// has to be **retained** — it must destroy matching events that arrive
-    /// after it, or "destroyed" would mean "destroyed unless something was
-    /// slow" — and its payload is the only record of what it names. Destroying
-    /// it along with everything else leaves a note whose content is gone and
-    /// nothing anywhere saying why, or that anything further should be
-    /// destroyed when it turns up.
     /// One origin's redactions, with how many targets each names.
     ///
     /// The ceiling's history, and the log is the only place it can come from.
@@ -772,6 +756,23 @@ impl Log {
         Ok(false)
     }
 
+    /// Remove the payload of every event belonging to a note.
+    ///
+    /// The header stays, and so does the signature: an event with no body still
+    /// recomputes its own id and still verifies, because the body appears in
+    /// the header only as a hash. That is what lets a redacted archive pass
+    /// `capture verify` rather than reading as damaged.
+    ///
+    /// The connection sets `secure_delete`, so the freed pages are overwritten
+    /// as they are released rather than left holding the old bytes.
+    ///
+    /// The redaction and its cancellation keep their own payloads. A redaction
+    /// has to be **retained** — it must destroy matching events that arrive
+    /// after it, or "destroyed" would mean "destroyed unless something was
+    /// slow" — and its payload is the only record of what it names. Destroying
+    /// it along with everything else leaves a note whose content is gone and
+    /// nothing anywhere saying why, or that anything further should be
+    /// destroyed when it turns up.
     pub fn destroy_bodies(&mut self, tgt: &EventId) -> Result<usize> {
         let n = self.conn.execute(
             "UPDATE events SET body = NULL

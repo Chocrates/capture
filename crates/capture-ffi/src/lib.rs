@@ -242,12 +242,6 @@ pub enum Captured {
     Spooled,
 }
 
-/// One thing happening on a day: an occurrence of a series, or a task due.
-///
-/// A list rather than a column-packed grid. The desktop packs overlapping
-/// entries into columns because it has the width for it; a phone agenda is
-/// read top to bottom, and packing would be work done to produce a layout
-/// nothing renders.
 /// A destruction ordered and not yet carried out.
 ///
 /// Carries when the window closes rather than how long is left: a duration
@@ -406,6 +400,12 @@ pub struct Intent {
     pub observable_here: bool,
 }
 
+/// One thing happening on a day: an occurrence of a series, or a task due.
+///
+/// A list rather than a column-packed grid. The desktop packs overlapping
+/// entries into columns because it has the width for it; a phone agenda is
+/// read top to bottom, and packing would be work done to produce a layout
+/// nothing renders.
 #[derive(Debug, uniffi::Record)]
 pub struct AgendaEntry {
     pub slug: String,
@@ -702,11 +702,6 @@ impl Archive {
         }
     }
 
-    /// Record whether this device can schedule an exact alarm.
-    ///
-    /// Local state rather than a `setting` event: it is a fact about this
-    /// phone's permissions, not a decision about the archive, and syncing it
-    /// would tell the desktop something untrue about itself (§2.5.2).
     /// Record whether this device is allowed to show notifications at all.
     ///
     /// Told by the surface, because it is an Android fact. Reported on the
@@ -718,6 +713,11 @@ impl Archive {
         Ok(())
     }
 
+    /// Record whether this device can schedule an exact alarm.
+    ///
+    /// Local state rather than a `setting` event: it is a fact about this
+    /// phone's permissions, not a decision about the archive, and syncing it
+    /// would tell the desktop something untrue about itself (§2.5.2).
     pub fn set_alerts_inexact(&self, inexact: bool) -> Result<()> {
         let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
         ops.set("alerts.inexact", if inexact { "1" } else { "0" })?;
@@ -824,6 +824,17 @@ impl Archive {
         Ok(())
     }
 
+    /// Whether a moment is still recent enough to be worth announcing.
+    ///
+    /// Asked before `hold_until`, and separately from it, because "say this
+    /// now", "say this at seven" and "do not say this" are three answers and an
+    /// optional instant can only carry two.
+    ///
+    /// The surface still lists it. This is only about interrupting somebody.
+    pub fn too_late_to_say(&self, late_by_ms: i64) -> bool {
+        late_by_ms > capture_store::notifier::STALE_MS
+    }
+
     /// Whether something due now may be said now, or must wait — and until
     /// which local hour.
     ///
@@ -845,17 +856,6 @@ impl Archive {
     /// Kotlin, which `make android-decides` refuses — and rightly: it is the
     /// same calculation the core already does, differing at the edges nobody
     /// looks at until a clock goes back.
-    /// Whether a moment is still recent enough to be worth announcing.
-    ///
-    /// Asked before `hold_until`, and separately from it, because "say this
-    /// now", "say this at seven" and "do not say this" are three answers and an
-    /// optional instant can only carry two.
-    ///
-    /// The surface still lists it. This is only about interrupting somebody.
-    pub fn too_late_to_say(&self, late_by_ms: i64) -> bool {
-        late_by_ms > capture_store::notifier::STALE_MS
-    }
-
     pub fn hold_until(&self, timed: bool, armed: bool, late_by_ms: i64) -> Result<Option<i64>> {
         let zone = capture_time::Zone::new(&self.zone_name())
             .or_else(|| capture_time::Zone::new("UTC"))
@@ -935,17 +935,11 @@ impl Archive {
         Ok(out)
     }
 
-    /// Today, in this device's own zone.
-    ///
-    /// Asked for rather than computed by the caller, for the same reason the
-    /// agenda's date is parsed here: what day it is depends on a zone, and
-    /// there is one implementation of that.
-    /// The zone this device is in, by name.
+    /// The zone every time decision on this device is made in.
     ///
     /// One answer, used by everything here that has to turn a day into a
     /// window. Two callers deriving it separately is how `today()` and
     /// `agenda()` came to disagree about what day it was.
-    /// The zone every time decision on this device is made in.
     ///
     /// The platform's answer wins where a platform reported one. On Linux the
     /// zone is discoverable — `$TZ`, or what `/etc/localtime` points at — and
@@ -983,6 +977,11 @@ impl Archive {
         Ok(())
     }
 
+    /// Today, in this device's own zone.
+    ///
+    /// Asked for rather than computed by the caller, for the same reason the
+    /// agenda's date is parsed here: what day it is depends on a zone, and
+    /// there is one implementation of that.
     pub fn today(&self) -> String {
         // The same zone as everything else. Reading the library's directly is
         // how `today()` and `agenda()` came to disagree about what day it was.
@@ -2623,12 +2622,6 @@ impl Archive {
         })
     }
 
-    /// The projection, without taking the writer lock.
-    ///
-    /// Reads never block on a write and never block a write. `capture verify`
-    /// exists for the moment the archive is unhealthy, and a diagnostic that
-    /// stops working when the system is unwell is one you cannot use when you
-    /// need it.
     /// The wall clock, read at the binding's edge.
     ///
     /// This is where a clock is allowed: `capture-store` is kept pure so that
@@ -2683,6 +2676,12 @@ impl Archive {
         })
     }
 
+    /// The projection, without taking the writer lock.
+    ///
+    /// Reads never block on a write and never block a write. `capture verify`
+    /// exists for the moment the archive is unhealthy, and a diagnostic that
+    /// stops working when the system is unwell is one you cannot use when you
+    /// need it.
     fn read(&self) -> Result<capture_store::projection::Store> {
         Ok(capture_store::projection::current(&self.paths)?)
     }

@@ -602,43 +602,6 @@ pub struct List {
 /// learn to write plain text correctly, which is the DSL §3.1.1 refuses to be.
 const ITEM_SEPARATOR: char = ',';
 
-/// Read a capture as a list, or decline.
-///
-/// `#groceries: milk, eggs, bread` names the tag `groceries` and three items.
-/// Anything else returns `None`.
-///
-/// Tier 1, like [`mentions`] and for the same reason: a sigil is written by
-/// hand and never inferred, so there is nothing here to be unsure about and no
-/// clock to consult. It is not scored and it is not a suggestion.
-///
-/// # The guards, which are the whole of it
-///
-/// Recognising this is easy; recognising it *only where it was meant* is the
-/// work. §3.1.5's rule is that a match firing inside ordinary writing is worse
-/// than no match at all, so three things must hold and each kills a real
-/// sentence somebody would otherwise have written:
-///
-/// - **Anchored.** The sigil is the first thing in the capture. `ask sarah
-///   about #groceries: she has it` is prose with a tag in it, and a list form
-///   that matched mid-line would turn every such sentence into a list of
-///   fragments.
-/// - **The tag is one slug.** No whitespace between the sigil and the colon.
-///   This is what keeps `#standup at 9:30` a tagged note about a time rather
-///   than a list named "standup at 9" — the colon in a clock time is the
-///   nearest miss there is, and it is why the rule is stated over the slug
-///   rather than over "the first colon".
-/// - **Something follows.** `#groceries:` with nothing after it names no
-///   items, and a list of nothing is not a list. It stays a tagged note.
-///
-/// # Why this reads the text and not the tokens
-///
-/// [`tokenize`](token::tokenize) gives a sigil everything up to whitespace,
-/// punctuation included — deliberately, so that `>2026-12-25` survives as one
-/// date. That means `#groceries:` arrives as a single token whose value still
-/// carries the colon, and the anchoring guard is a fact about the *text*
-/// anyway: "is this the first thing written". Reading the text directly says
-/// what is meant. Reading the tokens would mean reassembling a position the
-/// tokenizer had already discarded.
 /// Why a capture nearly was a list, where it nearly was one.
 ///
 /// [`list_of`] declines and says nothing, which is right for a parser and wrong
@@ -753,6 +716,43 @@ impl NearMiss {
     }
 }
 
+/// Read a capture as a list, or decline.
+///
+/// `#groceries: milk, eggs, bread` names the tag `groceries` and three items.
+/// Anything else returns `None`.
+///
+/// Tier 1, like [`mentions`] and for the same reason: a sigil is written by
+/// hand and never inferred, so there is nothing here to be unsure about and no
+/// clock to consult. It is not scored and it is not a suggestion.
+///
+/// # The guards, which are the whole of it
+///
+/// Recognising this is easy; recognising it *only where it was meant* is the
+/// work. §3.1.5's rule is that a match firing inside ordinary writing is worse
+/// than no match at all, so three things must hold and each kills a real
+/// sentence somebody would otherwise have written:
+///
+/// - **Anchored.** The sigil is the first thing in the capture. `ask sarah
+///   about #groceries: she has it` is prose with a tag in it, and a list form
+///   that matched mid-line would turn every such sentence into a list of
+///   fragments.
+/// - **The tag is one slug.** No whitespace between the sigil and the colon.
+///   This is what keeps `#standup at 9:30` a tagged note about a time rather
+///   than a list named "standup at 9" — the colon in a clock time is the
+///   nearest miss there is, and it is why the rule is stated over the slug
+///   rather than over "the first colon".
+/// - **Something follows.** `#groceries:` with nothing after it names no
+///   items, and a list of nothing is not a list. It stays a tagged note.
+///
+/// # Why this reads the text and not the tokens
+///
+/// [`tokenize`](token::tokenize) gives a sigil everything up to whitespace,
+/// punctuation included — deliberately, so that `>2026-12-25` survives as one
+/// date. That means `#groceries:` arrives as a single token whose value still
+/// carries the colon, and the anchoring guard is a fact about the *text*
+/// anyway: "is this the first thing written". Reading the text directly says
+/// what is meant. Reading the tokens would mean reassembling a position the
+/// tokenizer had already discarded.
 pub fn list_of(text: &str) -> Option<List> {
     use alloc::string::ToString;
 

@@ -249,7 +249,6 @@ const REFUSALS_BEFORE_UNAVAILABLE: u32 = 3;
 /// usually stopped being the explanation.
 const UNAVAILABLE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Handle to this device's local state.
 /// A copy taken before a redaction, still inside its retention.
 ///
 /// Local, never exported, never replicated — the same constraints as the row
@@ -270,6 +269,7 @@ pub struct Snapshot {
     pub text: String,
 }
 
+/// Handle to this device's local state.
 pub struct Ops {
     conn: Connection,
 }
@@ -850,12 +850,6 @@ impl Ops {
         Ok(())
     }
 
-    /// Refusals worth reconsidering, with the bytes needed to do it.
-    ///
-    /// Only the ones whose reason can stop being true. A bad signature stays a
-    /// bad signature however the roster changes, and retrying those forever
-    /// would turn every membership event into a re-verification of the entire
-    /// forensic pile.
     /// Record that a round ran, and what it managed.
     ///
     /// # Why this is not the peer rows
@@ -1167,7 +1161,6 @@ impl Ops {
         Ok(by_event.into_iter().map(|(e, p)| (EventId(e), p)).collect())
     }
 
-    /// Remember how to open a session with a peer, learned at pairing.
     /// Remember what a peer said it can watch for (§7.5).
     ///
     /// Local rather than logged. A capability is a fact about an installation
@@ -1194,6 +1187,7 @@ impl Ops {
             .unwrap_or_default())
     }
 
+    /// Remember how to open a session with a peer, learned at pairing.
     pub fn learned_noise(&self, peer_key: &[u8; 32], noise: &[u8; 32]) -> Result<()> {
         self.conn.execute(
             "INSERT INTO peer_noise (peer_key, noise) VALUES (?1, ?2)
@@ -1216,10 +1210,6 @@ impl Ops {
         Ok(row.and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()))
     }
 
-    /// Every peer this device knows how to dial, whatever the log says.
-    ///
-    /// A device that has just joined has exactly one of these and no log, so
-    /// this is the only thing that lets it start.
     /// Forget everything local about how to reach a peer.
     ///
     /// Called when a device is retired. The retirement itself is a fact about
@@ -1248,6 +1238,10 @@ impl Ops {
         Ok(())
     }
 
+    /// Every peer this device knows how to dial, whatever the log says.
+    ///
+    /// A device that has just joined has exactly one of these and no log, so
+    /// this is the only thing that lets it start.
     pub fn dialable(&self) -> Result<Vec<[u8; 32]>> {
         let mut q = self
             .conn
@@ -1262,6 +1256,12 @@ impl Ops {
         Ok(out)
     }
 
+    /// Refusals worth reconsidering, with the bytes needed to do it.
+    ///
+    /// Only the ones whose reason can stop being true. A bad signature stays a
+    /// bad signature however the roster changes, and retrying those forever
+    /// would turn every membership event into a re-verification of the entire
+    /// forensic pile.
     pub fn retryable(&self, reason: &str) -> Result<Vec<([u8; 32], Vec<u8>)>> {
         let mut st = self
             .conn
