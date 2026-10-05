@@ -184,14 +184,26 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         let mut items: Vec<String> = rows
             .iter()
             .map(|(slug, o, text)| {
+                // What the occurrence says about itself, beside what the note
+                // says. The prose path above picks `title` over the note's text
+                // when there is one; this emitted only the text, so an
+                // amendment — "this occurrence only: different title, location,
+                // notes" — was visible in a terminal and invisible to anything
+                // reading the JSON.
+                let field = |v: &Option<String>| {
+                    v.as_deref().map(quote).unwrap_or_else(|| "null".into())
+                };
                 format!(
-                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"due\":false,\"text\":{}}}",
+                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"due\":false,\"text\":{},\"title\":{},\"location\":{},\"notes\":{}}}",
                     quote(slug),
                     o.start_ms,
                     o.all_day,
                     o.done,
                     o.shift.as_deref().map(quote).unwrap_or_else(|| "null".into()),
-                    text.as_deref().map(quote).unwrap_or_else(|| "null".into())
+                    text.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+                    field(&o.title),
+                    field(&o.location),
+                    field(&o.notes)
                 )
             })
             .collect();

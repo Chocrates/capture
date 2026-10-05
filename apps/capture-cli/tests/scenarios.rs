@@ -76,6 +76,34 @@ impl Store {
         self.ok(&["+", text]).trim().to_string()
     }
 
+    /// The first occurrence of a series in the week ahead, as (day, start).
+    ///
+    /// Asked for rather than computed. A test that worked out which day a
+    /// weekday rule produces would be reimplementing the recurrence in order to
+    /// check the recurrence, and would agree with its own mistakes.
+    fn first_occurrence(&self, series: &str) -> Option<(String, i64)> {
+        let today = jiff::Zoned::now().date();
+        for ahead in 0..8 {
+            let day = today
+                .tomorrow()
+                .ok()?
+                .checked_add(jiff::Span::new().days(ahead))
+                .ok()?;
+            let day = day.to_string();
+            let json = self.ok(&["agenda", &day, "--json"]);
+            if !json.contains(series) {
+                continue;
+            }
+            let at = json.find("\"start_ms\":")? + "\"start_ms\":".len();
+            let n: String = json[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            return Some((day, n.parse().ok()?));
+        }
+        None
+    }
+
     /// A field from the first note in a `--json` listing.
     ///
     /// Read by hand rather than with a parser, so the test depends on the exact
@@ -730,4 +758,72 @@ fn strip_unread(json: &str) -> String {
         Some(at) => format!("{}}}", &json[..at]),
         None => json.to_string(),
     }
+}
+
+/// Moving and amending an occurrence, through the commands rather than the
+/// store.
+///
+/// Both were added with store tests and argument tests and nothing in between:
+/// `mutate::move_occurrence` is covered, `capture move` parses, and whether the
+/// command reaches the function was checked by hand on a scratch store and by
+/// nothing afterwards. That is the gap `capture tasks` sat in for months — a
+/// correct function, a command calling something else, and no test of the
+/// wiring.
+#[test]
+fn an_occurrence_moves_and_amends_through_the_command() {
+    let s = Store::new("occurrence-commands");
+    let series = s.capture("standup every weekday at 9");
+    s.ok(&["settle"]);
+
+    // The first expansion within the week ahead. Found by asking rather than
+    // computed, so the test does not reimplement the recurrence rule to check
+    // the recurrence rule.
+    let (day, occ) = s.first_occurrence(&series).expect("a series expands");
+
+    // Move it five hours later. The occurrence keeps its name — that is what
+    // makes a completion written before a move survive it — so it is still
+    // addressed by the start the rule would have produced.
+    let moved_to = occ + 5 * 60 * 60 * 1000;
+    let said = s.ok(&["move", &series, &occ.to_string(), &moved_to.to_string()]);
+    assert!(said.contains("moved"), "{said}");
+    assert!(
+        said.contains("rule is unchanged"),
+        "a move should say what it did not touch: {said}"
+    );
+
+    let after = s.ok(&["agenda", &day, "--json"]);
+    assert!(
+        after.contains(&format!("\"start_ms\":{moved_to}")),
+        "the occurrence did not move: {after}"
+    );
+
+    // Amend it. Saying what a thing is called is not saying when it happens, so
+    // the time must be untouched.
+    s.ok(&[
+        "amend",
+        &series,
+        &occ.to_string(),
+        "--title",
+        "standup, in the annexe",
+    ]);
+    let amended = s.ok(&["agenda", &day, "--json"]);
+    assert!(
+        amended.contains("standup, in the annexe"),
+        "the amendment did not take: {amended}"
+    );
+    assert!(
+        amended.contains(&format!("\"start_ms\":{moved_to}")),
+        "amending moved the occurrence: {amended}"
+    );
+
+    // And a refusal that names what was being attempted, on a note that has no
+    // occurrences at all.
+    let plain = s.capture("an ordinary thought");
+    s.ok(&["settle"]);
+    let (code, said) = s.run(&["move", &plain, "1", "2"]);
+    assert_ne!(code, 0);
+    assert!(
+        said.contains("no occurrences") && said.contains("move"),
+        "the refusal should name the action: {said}"
+    );
 }
