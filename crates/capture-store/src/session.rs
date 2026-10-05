@@ -65,6 +65,16 @@ pub struct Session {
     pub read_at_open: usize,
     /// Held for as long as the session is. Dropping it releases the store.
     _writer: Writer,
+    /// A fixed moment to act as of, where one was given.
+    ///
+    /// `None` reads the real clock on every use, which is what every
+    /// production caller gets and is byte-for-byte the previous behaviour.
+    /// `Some` freezes it, which is the only way to test anything whose
+    /// trigger is a deadline — a redaction does not execute until its
+    /// cancellation window has passed, and the window is drained by the
+    /// *store's* clock at open (§8.7, "startup is the floor"), where the
+    /// command line's `CAPTURE_NOW_MS` cannot reach.
+    at: Option<u64>,
 }
 
 /// What a pairing learned about the device being admitted.
@@ -79,13 +89,6 @@ pub struct Admitted {
 }
 
 impl Session {
-    /// Open a store for writing.
-    ///
-    /// Fails rather than waiting when another process holds the store. In a
-    /// finished system a non-writer hands its work to the writer over a socket;
-    /// until that exists, saying plainly who has it is better than blocking on
-    /// something that may be a long-running overlay rather than a passing
-    /// command.
     /// Open a store for writing a capture, and nothing else.
     ///
     /// Identical to [`Session::open`] except that it does not read anything.
@@ -96,14 +99,48 @@ impl Session {
     /// which is the one thing the design will not spend. A capture is the one
     /// operation that gets a store to itself.
     pub fn open_for_capture(paths: StorePaths) -> Result<Session> {
-        Session::start(paths, false)
+        Session::start(paths, false, None)
     }
 
+    /// Open a store for writing.
+    ///
+    /// Fails rather than waiting when another process holds the store. In a
+    /// finished system a non-writer hands its work to the writer over a socket;
+    /// until that exists, saying plainly who has it is better than blocking on
+    /// something that may be a long-running overlay rather than a passing
+    /// command.
     pub fn open(paths: StorePaths) -> Result<Session> {
-        Session::start(paths, true)
+        Session::start(paths, true, None)
     }
 
-    fn start(paths: StorePaths, catch_up: bool) -> Result<Session> {
+    /// Open a store that acts as of a given moment.
+    ///
+    /// Everything this session then stamps, folds and drains uses `now`
+    /// instead of the clock. [`Session::open`] is unchanged and still reads
+    /// the real one each time, so nothing in production behaves differently
+    /// for this existing.
+    ///
+    /// It exists because the deadline work runs *during* open — §8.7 makes
+    /// process startup the floor, precisely so there is no timer unit that can
+    /// be silently not running — and so a caller cannot move time by any means
+    /// available after the session exists. A redaction whose window has not
+    /// passed is indistinguishable from content still on disk, which is the one
+    /// outcome §1.1 exists to prevent and therefore the one a test has to be
+    /// able to reach.
+    pub fn open_at(paths: StorePaths, now: u64) -> Result<Session> {
+        Session::start(paths, true, Some(now))
+    }
+
+    /// The moment this session acts as of.
+    ///
+    /// One reader, so a frozen session cannot be frozen for some of its work
+    /// and live for the rest — which would be worse than not freezing it, in
+    /// the way a clock that is right twice a day is worse than a stopped one.
+    fn now(&self) -> u64 {
+        self.at.unwrap_or_else(now_ms)
+    }
+
+    fn start(paths: StorePaths, catch_up: bool, at: Option<u64>) -> Result<Session> {
         let identity = store::open(&paths)?;
         let lock_path = paths.root.join("writer.lock");
         let Some(writer) = Writer::acquire(&lock_path, "cli")? else {
@@ -144,6 +181,7 @@ impl Session {
             startup: state,
             read_at_open: 0,
             _writer: writer,
+            at,
         };
 
         // A store that went backwards gets a fresh origin before anything is
@@ -165,7 +203,7 @@ impl Session {
             &mut s.state,
             &Ops::open(&s.paths.ops)?,
             &blobs_dir,
-            now_ms(),
+            at.unwrap_or_else(now_ms),
         ) {
             Ok(0) => {}
             Ok(n) => tracing::warn!(n, "finished purges interrupted by an earlier run"),
@@ -351,12 +389,15 @@ impl Session {
         let mut seq = next_seq(&self.log, &dev)?;
         let mut tip = chain_tip(&self.log, &dev)?;
 
+        // Taken before the fields are split up: `self.now()` borrows all of
+        // `self`, and the closure below holds three of its fields mutably.
+        let moment = self.now();
         let done = {
             let identity = &mut self.identity;
             let clock = &mut self.clock;
             let log = &mut self.log;
             drain::drain(&paths.spool, log, |payload| {
-                let hlc = clock.issue(now_ms(), dev);
+                let hlc = clock.issue(moment, dev);
                 let header = Header {
                     v: ENVELOPE_VERSION,
                     dev,
@@ -387,7 +428,8 @@ impl Session {
         };
 
         if !authored.is_empty() {
-            incremental::apply(&mut self.state, &self.log, &authored, now_ms() as i64)?;
+            let moment = self.now();
+            incremental::apply(&mut self.state, &self.log, &authored, moment as i64)?;
             // How far this generation has folded, so `behind` can tell a
             // projection that is current from one that merely has the right
             // shape. `rebuild` has always recorded this; the incremental path
@@ -447,11 +489,12 @@ impl Session {
         self.identity.reincarnate(&self.paths)?;
 
         let nonce = entropy::nonce()?;
+        let moment = self.now();
         let claim = crate::genesis::origin_claim(
             self.identity.signing(),
             &self.identity.incarnation(),
             &mut self.clock,
-            now_ms(),
+            moment,
             nonce,
             self.identity.noise_public(),
         )?;
@@ -487,7 +530,7 @@ impl Session {
             // none.
             &self.log.aside_rows()?,
             current,
-            now_ms() as i64,
+            self.now() as i64,
         )?;
         ops.set_generation(next)?;
 
@@ -577,17 +620,9 @@ impl Session {
     }
 
     pub fn drain_due(&mut self) -> Result<crate::due::Drained> {
-        self.drain_due_at(now_ms())
+        self.drain_due_at(self.now())
     }
 
-    /// Drain as of a given moment.
-    ///
-    /// The clock is a parameter for the same reason `store::create` takes one:
-    /// a redaction does not execute until its cancellation window has passed,
-    /// and a test that could not move time could only ever assert that the
-    /// destruction was *queued* — which is indistinguishable from the content
-    /// still being on disk, and is the one outcome the feature exists to
-    /// prevent.
     /// How much this redaction's origin named around the time it did, if that
     /// is over the ceiling.
     ///
@@ -634,6 +669,14 @@ impl Session {
         }
     }
 
+    /// Drain as of a given moment.
+    ///
+    /// The clock is a parameter for the same reason `store::create` takes one:
+    /// a redaction does not execute until its cancellation window has passed,
+    /// and a test that could not move time could only ever assert that the
+    /// destruction was *queued* — which is indistinguishable from the content
+    /// still being on disk, and is the one outcome the feature exists to
+    /// prevent.
     pub fn drain_due_at(&mut self, now: u64) -> Result<crate::due::Drained> {
         let ops = Ops::open(&self.paths.ops)?;
         let mut done = crate::due::Drained::default();
@@ -789,7 +832,7 @@ impl Session {
             .collect();
 
         if !members.is_empty() {
-            Ops::open(&self.paths.ops)?.redact_awaits(&id, &members, now_ms())?;
+            Ops::open(&self.paths.ops)?.redact_awaits(&id, &members, self.now())?;
         }
         Ok(id)
     }
@@ -1007,7 +1050,7 @@ impl Session {
     /// maximum is identical to a call per event.
     pub fn adopt(&mut self, incoming: &capture_core::Hlc) -> Result<()> {
         let before = self.clock.persist();
-        self.clock.observe(incoming, now_ms());
+        self.clock.observe(incoming, self.now());
         let (wall, counter) = self.clock.persist();
         if (wall, counter) == before {
             // Already at or ahead of it. Not writing is the point: this runs on
@@ -1029,7 +1072,7 @@ impl Session {
     ) -> Result<Envelope> {
         let dev = self.identity.dev();
         let seq = self.next_seq()?;
-        let hlc = self.clock.issue(now_ms(), dev);
+        let hlc = self.clock.issue(self.now(), dev);
 
         let header = Header {
             v: ENVELOPE_VERSION,
@@ -1072,7 +1115,8 @@ impl Session {
     /// several before appending any gives them all the same number, and the
     /// integrity check says so.
     fn settle(&mut self, events: &[Envelope]) -> Result<()> {
-        incremental::apply(&mut self.state, &self.log, events, now_ms() as i64)?;
+        let moment = self.now();
+        incremental::apply(&mut self.state, &self.log, events, moment as i64)?;
         crate::projection::note_folded(&self.state, events)?;
 
         if let Some(last) = events.last() {

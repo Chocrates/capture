@@ -661,7 +661,7 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     // A session opens the store because being offered an item is itself
     // recorded — `shown` is an outcome, and a surface that read without writing
     // would schedule the same five notes forever.
-    let mut s = capture_store::session::Session::open(paths.clone())?;
+    let mut s = crate::read::session(paths.clone())?;
     let now = now_ms();
     let items = capture_store::review::session(&s, now)?;
 
@@ -931,6 +931,22 @@ fn utc() -> capture_time::Zone {
 /// There were four copies. The one in the overlay was made by reading the one
 /// twelve lines away in this file, which is the mechanism rather than the
 /// accident.
+/// Open the store for writing, as of this command's moment.
+///
+/// One helper rather than nineteen `Session::open` calls, because the moment
+/// is a decision and it was being made nineteen times by default.
+///
+/// A command is one instant. Every read already works that way — `now_ms` is
+/// the single clock behind the agenda, the task bands and the due queue — and
+/// the writing side did not, so a command could stamp an event at one moment
+/// and decide a deadline at another. In a release build the difference is
+/// microseconds; in a debug build it is the difference between being able to
+/// test a deadline and not, because the work a deadline triggers runs during
+/// `Session::open` itself (§8.7) and nothing after it can move time.
+pub(crate) fn session(paths: capture_store::StorePaths) -> Result<capture_store::session::Session> {
+    capture_store::session::Session::open_at(paths, now_ms().max(0) as u64)
+}
+
 pub(crate) fn local_zone() -> String {
     capture_store::notifier::local_zone()
 }
@@ -1474,7 +1490,7 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     // on the far side of a session open — but a person asking "why did nothing
     // happen" is asking before any of that.
     //
-    // This used to be `let swept = Session::open(…); drop(swept)`, which threw
+    // This used to be `let swept = crate::read::session(…); drop(swept)`, which threw
     // the `Result` away. So a store somebody else was writing gave no sweep, no
     // error and an answer from stale state — the one outcome this command must
     // never produce, since "nothing is due" is exactly what the person is here

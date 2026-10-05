@@ -83,6 +83,26 @@ impl Store {
         (out.status.code().unwrap_or(-1), text)
     }
 
+    /// Run a command as of a given moment.
+    ///
+    /// The store's clock, not only the reading one. Until `Session::open_at`
+    /// existed this could not be done at all from here: the work a deadline
+    /// triggers runs *during* the open, because §8.7 makes process startup the
+    /// floor rather than trusting a timer unit to be running, and so nothing
+    /// reachable after the session exists can move time.
+    fn at(&self, when_ms: i64, args: &[&str]) -> String {
+        let out = Command::new(capture())
+            .args(args)
+            .env("CAPTURE_HOME", &self.0)
+            .env("CAPTURE_NOW_MS", when_ms.to_string())
+            .output()
+            .expect("capture runs");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "capture {args:?}: {text}");
+        text
+    }
+
     fn capture_note(&self, text: &str) -> String {
         self.ok(&["+", text]).trim().to_string()
     }
@@ -224,4 +244,103 @@ fn every_note_that_will_go_is_named() {
         s.still_readable(&linking, "ask about"),
         "declining destroyed the linking note"
     );
+}
+
+/// A redaction is carried out, and the copy taken first brings it back.
+///
+/// §1.2's pre-redact snapshot, and the only test of it through the commands.
+/// It needs three things to happen in order — the redaction confirmed, its
+/// 30-minute window elapsed, the purge run — and the third is what made this
+/// untestable: the purge is drained by the *store's* clock when a session
+/// opens, which `CAPTURE_NOW_MS` did not reach until `Session::open_at`.
+///
+/// Worth the setup because the alternative test, which is all there was,
+/// asserts that destruction was *queued*. That is indistinguishable from the
+/// content still being on disk, which is the one outcome §1.1 exists to
+/// prevent.
+#[test]
+fn a_destroyed_note_comes_back_from_the_copy_taken_first() {
+    let s = Store::new("recover");
+    let secret = "the budget is 40k and I should not have written it down";
+    let slug = s.capture_note(secret);
+    s.ok(&["settle"]);
+
+    let (code, said) = s.answering(
+        &["redact", &slug],
+        &format!(
+            "{slug}
+"
+        ),
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("will be destroyed in 30 minutes"), "{said}");
+
+    // Still withheld rather than destroyed, and still cancellable. Nothing has
+    // happened yet, which is the whole point of the window.
+    assert!(
+        s.ok(&["show", &slug]).contains("queued for destruction"),
+        "the content was destroyed before the window closed"
+    );
+    assert!(
+        s.ok(&["recover"]).contains("Nothing is being kept"),
+        "a copy was offered for a redaction that had not run"
+    );
+
+    // Past the window, and a write to make the store notice. A read cannot:
+    // reads take no writer lock (§8.8) and the drain happens on the writing
+    // path, so the thing that moves time has to be a command that writes.
+    let later = now_ms() + 40 * 60 * 1000;
+    let other = s.capture_note("an unrelated note");
+    s.at(later, &["pin", &other]);
+
+    // The slug is gone with the words, because it was made from them. The row
+    // is not: a destroyed note is still listed, as `redacted-…`, which is the
+    // difference between an archive that lost something and one that says so.
+    let timeline = s.ok(&["timeline"]);
+    assert!(
+        timeline.contains("(content destroyed)"),
+        "a destroyed note vanished instead of saying so: {timeline}"
+    );
+    assert!(
+        !timeline.contains("budget"),
+        "the destroyed words survived in the listing: {timeline}"
+    );
+
+    // And the copy is being kept, with the content, because §1.2 makes a
+    // misfire recoverable for thirty days.
+    let kept = s.at(later, &["recover"]);
+    assert!(
+        kept.contains(secret),
+        "the copy does not hold the text: {kept}"
+    );
+    assert!(kept.contains("expires in"), "{kept}");
+
+    let id = kept
+        .lines()
+        .find(|l| l.contains(secret))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("the listing names an id")
+        .to_string();
+
+    let brought = s.at(later, &["recover", &id]);
+    assert!(brought.contains("new"), "{brought}");
+
+    // A new capture, never a resurrection. The redaction still stands, so
+    // saying "restored" would claim it had been undone — and somebody would
+    // stop looking for the other copies.
+    let after = s.ok(&["search", "budget"]);
+    assert!(after.contains("40k"), "the text did not come back: {after}");
+    assert!(
+        s.ok(&["timeline"]).contains("(content destroyed)"),
+        "recovering undid the redaction"
+    );
+}
+
+/// This machine's clock, for moving past a window.
+///
+/// `jiff` rather than `std::time`, because the purity lint forbids
+/// `SystemTime::now` anywhere in the tree — one clock, so that a second one
+/// cannot be introduced accidentally and then disagree.
+fn now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
 }

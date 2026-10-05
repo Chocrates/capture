@@ -55,7 +55,6 @@ use capture_store::{
 };
 
 use crate::read;
-use capture_store::session::Session;
 
 /// Magic at the head of every export file.
 ///
@@ -324,7 +323,7 @@ pub fn restore(paths: StorePaths, from: &Path, ignore_after: Option<u64>) -> Res
         return Err(Error::StoreMissing(paths.root.clone()));
     }
 
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let ops = Ops::open(&s.paths.ops)?;
 
     let events = match ignore_after {

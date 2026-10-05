@@ -55,7 +55,7 @@ pub fn edit(paths: StorePaths, name: &str, text: &str) -> Result<()> {
                 .into(),
         ));
     }
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
 
     // The version being edited, not the note.
@@ -89,7 +89,7 @@ pub fn tag(paths: StorePaths, name: &str, tag: &str) -> Result<()> {
     if tag.is_empty() {
         return Err(Error::Usage("a tag needs a name".into()));
     }
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
     s.append(Kind::TAG, Some(tgt), None, |nonce| {
         encode(&TagBody {
@@ -109,7 +109,7 @@ pub fn tag(paths: StorePaths, name: &str, tag: &str) -> Result<()> {
 /// only expressible by naming what was actually observed.
 pub fn untag(paths: StorePaths, name: &str, tag: &str) -> Result<()> {
     let tag = tag.trim_start_matches('#');
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
 
     let kills = s.state.tag_events(&tgt, tag)?;
@@ -128,7 +128,7 @@ pub fn untag(paths: StorePaths, name: &str, tag: &str) -> Result<()> {
 
 /// Give a note a chosen name, or clear it.
 pub fn alias(paths: StorePaths, name: &str, new: Option<&str>) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
 
     if let Some(new) = new {
@@ -170,7 +170,7 @@ pub fn alias(paths: StorePaths, name: &str, new: Option<&str>) -> Result<()> {
 
 /// Pin a note, or unpin it.
 pub fn pin(paths: StorePaths, name: &str, pinned: bool) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
     s.append(Kind::PIN, Some(tgt), None, |nonce| {
         encode(&PinBody { nonce, pinned })
@@ -188,7 +188,7 @@ pub fn pin(paths: StorePaths, name: &str, pinned: bool) -> Result<()> {
 /// Un-completing is a separate kind rather than a toggle, because it has to be
 /// possible to undo a mistaken tick and a pure union could not express that.
 pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
     let kind = if done {
         Kind::OCC_DONE
@@ -509,7 +509,7 @@ fn local_zone() -> capture_time::Zone {
 pub fn mute(paths: StorePaths, what: &Muted, until: Option<u64>) -> Result<()> {
     let (scope, described) = match what {
         Muted::Note(name) => {
-            let s = Session::open(paths.clone())?;
+            let s = crate::read::session(paths.clone())?;
             let tgt = find(&s, name)?;
             (MuteScope::Note(tgt), name.clone())
         }
@@ -586,7 +586,7 @@ pub fn unmute(paths: StorePaths, what: &Muted) -> Result<()> {
             // a field, so "this was not muted" is a true thing to say rather
             // than a guess.
             let tgt = {
-                let s = Session::open(paths.clone())?;
+                let s = crate::read::session(paths.clone())?;
                 let tgt = find(&s, name)?;
                 let muted = s.state.note(&tgt)?.and_then(|n| n.muted_until);
                 match muted {
@@ -687,7 +687,7 @@ pub enum Muted {
 /// list; what stops is the note being *reported* as diverged. Nothing here can
 /// discard the version that was not picked.
 pub fn resolve(paths: StorePaths, name: &str) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
 
     let others = s.state.divergent_versions(&tgt)?;
@@ -727,7 +727,7 @@ pub fn unflag(paths: StorePaths, name: &str) -> Result<()> {
 /// list of names is not, and this is the one confirmation in the system that
 /// must not be trained away by appearing routinely.
 pub fn redact(paths: StorePaths, name: &str, force: bool, with_links: bool) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
     let tgt = find(&s, name)?;
     let note = s
         .state
@@ -887,7 +887,7 @@ pub fn redact_cancel_since(paths: StorePaths, since: u64) -> Result<()> {
 
 /// Stop a queued redaction.
 pub fn redact_cancel(paths: StorePaths, id_prefix: &str) -> Result<()> {
-    let mut s = Session::open(paths)?;
+    let mut s = crate::read::session(paths)?;
 
     let queued = s.state.redact_queue()?;
     let found = queued
@@ -1132,7 +1132,7 @@ pub fn recover(paths: StorePaths, id: Option<&str>, json: bool) -> Result<()> {
     // "restored" would claim the redaction was undone, which is the more
     // dangerous of the two available lies: somebody would stop looking for the
     // other copies.
-    let mut s = Session::open(paths.clone())?;
+    let mut s = crate::read::session(paths.clone())?;
     let body = capture_store::session::capture_body(&found.text)?;
     let written = s.capture(&body)?;
 

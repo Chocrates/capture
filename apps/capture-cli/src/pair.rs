@@ -14,7 +14,7 @@
 
 use capture_store::identity::Identity;
 use capture_store::paths::StorePaths;
-use capture_store::session::{Admitted, Session};
+use capture_store::session::Admitted;
 use capture_store::{Error, Result};
 
 /// Show a code and admit whoever answers it correctly.
@@ -190,7 +190,7 @@ pub fn retire(paths: StorePaths, key: &str, force: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut s = Session::open(paths.clone())?;
+    let mut s = crate::read::session(paths.clone())?;
     let id = s.retire(&subject, None)?;
 
     say!("Retired {}.", short(&subject));
@@ -302,7 +302,7 @@ pub fn cosign(paths: StorePaths, blob: &str) -> Result<()> {
             // record is left to stand.
             noise: [0u8; 32],
         };
-        let mut s = Session::open(paths.clone())?;
+        let mut s = crate::read::session(paths.clone())?;
         s.readmit_with(
             &subject,
             &identity.public().to_bytes(),
@@ -381,7 +381,7 @@ pub fn readmit(paths: StorePaths, cosign: Option<&str>, by: Option<&str>) -> Res
         ));
     }
 
-    let mut s = Session::open(paths.clone())?;
+    let mut s = crate::read::session(paths.clone())?;
     s.readmit_with(&subject, &signer, &sig, [0; 16])?;
 
     say!("Re-admitted {}.", short(&subject.pubkey));

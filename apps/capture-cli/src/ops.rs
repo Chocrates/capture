@@ -37,7 +37,6 @@ use capture_store::{
 };
 
 use crate::read;
-use capture_store::session::Session;
 
 // The table, its lookup and the value in force all live in `capture-store`,
 // beside the function that validates against them. Every surface writes a
@@ -793,7 +792,7 @@ pub fn rejected(paths: &StorePaths, json: bool) -> Result<()> {
 /// named from the path, so a fresh database can end up paired with the previous
 /// one's write-ahead log.
 pub fn rebuild(paths: StorePaths) -> Result<()> {
-    let s = Session::open(paths)?;
+    let s = crate::read::session(paths)?;
     let events = s.log.all()?;
     let ops = Ops::open(&s.paths.ops)?;
     let current = ops.generation()?;
