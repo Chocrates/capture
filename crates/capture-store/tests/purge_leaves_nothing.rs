@@ -153,14 +153,6 @@ const NOT_KEYED_BY_A_NOTE: &[(&str, &str)] = &[
         "sqlite_sequence",
         "SQLite's own bookkeeping for AUTOINCREMENT.",
     ),
-    (
-        "mutes",
-        "nothing reads or writes it. Declared in PROJECTION_SCHEMA and dead: a \
-         note's mute lives on `notes.muted_until`, and an entity's comes from \
-         the fold's `entity_mutes`. Listed rather than dropped because deleting \
-         a table is a schema change and this test is not the place to make one \
-         — but it is why the name is here with no rows behind it.",
-    ),
 ];
 
 /// Tables no fixture can fill *before* a destruction, and why.

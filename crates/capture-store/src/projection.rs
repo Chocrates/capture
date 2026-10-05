@@ -565,13 +565,6 @@ CREATE TABLE IF NOT EXISTS intents (
 
 CREATE INDEX IF NOT EXISTS intents_type ON intents(cue_type, retracted);
 
-CREATE TABLE IF NOT EXISTS mutes (
-  scope TEXT NOT NULL,
-  value TEXT NOT NULL,
-  until INTEGER,
-  PRIMARY KEY (scope, value)
-) STRICT;
-
 -- Authentic events this device cannot yet use: an origin with no roster entry,
 -- a second root, a position already held by a different event. They keep their
 -- positions and are re-examined whenever membership changes, because the thing
