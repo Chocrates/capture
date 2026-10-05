@@ -1133,7 +1133,23 @@ pub fn split_series(name: String, from: String, rule: String) -> std::result::Re
 pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
     wire((|| {
         let s = read_only()?;
-        let zone = capture_time::Zone::new("UTC").expect("UTC is always present");
+        // The reading zone, resolved once and used for both the day's window
+        // and the "is this today" comparison below.
+        //
+        // This was UTC, and that made a day on this surface a 24-hour span
+        // lining up with nobody's day but a reader on the meridian's. Turning a
+        // floating date into an instant is the operation §3.6 warns about —
+        // "due Friday is not 00:00 UTC on Friday" — and doing it here in UTC
+        // put every evening appointment on the following day's agenda. A 19:00
+        // dinner in Denver is 01:00 UTC the next morning, an hour past the end
+        // of the window this built, so the window showed an empty evening and
+        // the terminal showed the dinner: two surfaces, one store, different
+        // answers about what day something is on.
+        //
+        // UTC survives as the *fallback*. If the system cannot say where it is,
+        // a day still has to mean something.
+        let zone = capture_time::Zone::new(&capture_store::notifier::local_zone())
+            .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
         let date = capture_time::FloatingDate::parse(&day)
             .ok_or_else(|| Error::Usage(format!("'{day}' is not a date")))?;
         let from = capture_time::at_local(date, 0, 0, zone)
