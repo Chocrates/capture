@@ -1413,3 +1413,39 @@ fn what_can_be_done_to_a_note_can_be_undone() {
     // Nothing was ticked by either refusal.
     assert!(!s.ok(&["list", "groceries"]).contains("[x]"));
 }
+
+/// The filing verb reaches the store, and refuses what is not there.
+///
+/// Only the wiring. What the tree then looks like is checked in the desktop's
+/// ipc test, because the sidebar is the only thing that reads a parent and this
+/// command has nowhere to show one — see `write::parent`. Splitting it this way
+/// is the point: the verb was covered by neither, so a rename of the subcommand
+/// or a swapped argument would have been caught by nothing.
+#[test]
+fn a_page_is_filed_and_put_back_from_the_command_line() {
+    let s = Store::new("parent");
+    let under = s.capture("how the migration goes");
+    let page = s.capture("the rollback steps");
+    s.ok(&["settle"]);
+
+    // Order matters, so the assertion has to be order-sensitive. Checking that
+    // both slugs appear somewhere passes with the arguments swapped, which is
+    // the one mistake a wiring test exists to catch.
+    let said = s.ok(&["parent", &page, &under]);
+    assert!(
+        said.contains(&format!("{page} sits under {under}")),
+        "the filing did not say what moved where: {said}"
+    );
+
+    // No second argument means the top of the tree, rather than an error about
+    // a missing one.
+    let said = s.ok(&["parent", &page]);
+    assert!(said.contains("top"), "{said}");
+
+    // Both positions are resolved, and a name that is not there is refused
+    // rather than filed under nothing.
+    let (code, said) = s.run(&["parent", "no-such-page", &under]);
+    assert_ne!(code, 0, "filed a page that does not exist: {said}");
+    let (code, said) = s.run(&["parent", &page, "no-such-parent"]);
+    assert_ne!(code, 0, "filed under a parent that does not exist: {said}");
+}
