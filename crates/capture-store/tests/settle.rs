@@ -413,3 +413,51 @@ fn a_note_already_promoted_by_this_grammar_is_not_read_again() {
         "and the log did not grow by a promotion saying what the last one said"
     );
 }
+
+#[test]
+fn a_newer_grammar_makes_every_capture_outstanding_again() {
+    // The mechanism that corrects what a past recognizer got wrong, and the
+    // reason bumping `GRAMMAR_VERSION` is how a parser fix reaches captures
+    // that were already read. It shipped today: `>fri` used to promote the
+    // prose date beside it, and raising the version is what makes every
+    // capture already parsed under the old one get read again.
+    //
+    // Every existing test passes the *current* version, so this clause —
+    // `rb.grammar >= ?1` — was only ever asked a question it could answer
+    // "yes" to. Asked with a newer version, which is the only question it
+    // exists for, nothing checked it.
+    let s = Scratch::new("grammar-bump");
+    let p = s.paths();
+
+    let slug = capture(&p, "dentist thursday 2pm");
+    promote::settle(&p).unwrap();
+    assert_eq!(unread(&p), 0, "the capture was not read");
+
+    let newer = capture_parse::GRAMMAR_VERSION + 1;
+    let after_bump = capture_store::projection::current(&p)
+        .unwrap()
+        .unread_count(newer)
+        .unwrap();
+    assert_eq!(
+        after_bump, 1,
+        "a newer grammar left a capture read by an older one alone, so a parser \
+         fix would never reach what it was written for"
+    );
+
+    // And the count is about the grammar, not about the capture changing: the
+    // note is untouched, and asking again with the version that read it still
+    // answers zero.
+    assert_eq!(
+        unread(&p),
+        0,
+        "asking with a newer version changed the store"
+    );
+    assert!(
+        capture_store::projection::current(&p)
+            .unwrap()
+            .resolve(&slug)
+            .unwrap()
+            .is_some(),
+        "the capture went missing"
+    );
+}
