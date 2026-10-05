@@ -1449,3 +1449,56 @@ fn a_page_is_filed_and_put_back_from_the_command_line() {
     let (code, said) = s.run(&["parent", &page, "no-such-parent"]);
     assert_ne!(code, 0, "filed under a parent that does not exist: {said}");
 }
+
+/// People and projects are two axes, and neither leaks into the other.
+///
+/// `projects` was the last read command with no test. The assertion worth
+/// making is not that it prints something — it is that the two commands ask for
+/// different kinds, because they are one function apart (`entities_of_kind`
+/// with a string) and a swapped argument would leave both printing plausible
+/// lists of the wrong thing.
+#[test]
+fn people_and_projects_are_counted_separately() {
+    let s = Store::new("axes");
+    s.capture("^acme-migration kicked off today");
+    s.capture("@sarah owns ^acme-migration");
+    s.capture("^side-quest is parked");
+    s.ok(&["settle"]);
+
+    let projects = s.ok(&["projects"]);
+    assert!(projects.contains("acme-migration"), "{projects}");
+    assert!(projects.contains("side-quest"), "{projects}");
+    assert!(
+        !projects.contains("sarah"),
+        "a person is listed as a project: {projects}"
+    );
+
+    let people = s.ok(&["people"]);
+    assert!(people.contains("sarah"), "{people}");
+    assert!(
+        !people.contains("acme-migration"),
+        "a project is listed as a person: {people}"
+    );
+
+    // The count is notes naming it, so the project named twice is counted
+    // twice and the one named once is not.
+    assert!(
+        projects
+            .lines()
+            .any(|l| l.contains("acme-migration") && l.contains("2 note(s)")),
+        "the count does not follow the notes: {projects}"
+    );
+    assert!(
+        projects
+            .lines()
+            .any(|l| l.contains("side-quest") && l.contains("1 note(s)")),
+        "{projects}"
+    );
+
+    // And the machine-readable shape carries the same three things, because
+    // this is the path a script sees and it has been the poorer one before.
+    let json = s.ok(&["projects", "--json"]);
+    assert!(json.contains("\"display\":\"acme-migration\""), "{json}");
+    assert!(json.contains("\"count\":2"), "{json}");
+    assert!(json.contains("\"names\":[\"acme-migration\"]"), "{json}");
+}
