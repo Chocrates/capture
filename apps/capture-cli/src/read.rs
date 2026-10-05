@@ -900,7 +900,12 @@ pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
 
     for i in &rows {
         let when = match (i.cue_type.as_str(), &i.cue_match, i.cue_at) {
-            ("time", _, Some(at)) => format!("at {}", stamp(at as u64, None)),
+            // In this machine's zone, not UTC. A time cue stores no zone of its
+            // own — `capture intent at 2026-10-06T09:00` resolves the wall
+            // clock against the local zone and keeps the instant — so UTC here
+            // answered a question nobody asked: somebody who typed 09:00 was
+            // told their plan fires at 14:00. The same mistake the agenda made.
+            ("time", _, Some(at)) => format!("at {}", stamp(at as u64, Some(&local_zone()))),
             ("git_branch", Some(b), _) => format!("on branch {b}"),
             (t, Some(m), _) => format!("{t} {m}"),
             (t, None, _) => t.to_string(),

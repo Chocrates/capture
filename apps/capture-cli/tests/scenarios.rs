@@ -72,6 +72,25 @@ impl Store {
         text
     }
 
+    /// Run a command as a machine in a named zone.
+    ///
+    /// Set per child process, so one test can be two machines. Anything whose
+    /// rendering depends on where the reader is has to be checked from more
+    /// than one place, or a surface that hardcodes UTC passes everywhere
+    /// outside UTC and nothing notices.
+    fn in_zone(&self, tz: &str, args: &[&str]) -> String {
+        let out = Command::new(capture())
+            .args(args)
+            .env("CAPTURE_HOME", &self.0)
+            .env("TZ", tz)
+            .output()
+            .expect("capture runs");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "capture {args:?} in {tz}: {text}");
+        text
+    }
+
     fn capture(&self, text: &str) -> String {
         self.ok(&["+", text]).trim().to_string()
     }
@@ -1229,4 +1248,92 @@ fn a_finished_task_can_be_opened_again() {
     let page = s.ok(&["show", &task]);
     assert!(page.contains("task"), "{page}");
     assert!(!page.contains("done"), "the page still says done: {page}");
+}
+
+/// Planning something against a cue, listing it, and abandoning it.
+///
+/// Three verbs — `intent`, `intents`, `forget` — and no test touched any of
+/// them. Both cue kinds are here because they are stored differently: a time
+/// cue keeps an instant and no match string, a branch cue keeps a match string
+/// and no instant, and a listing that got either backwards would still print
+/// something plausible.
+#[test]
+fn a_plan_waits_for_a_cue_until_it_is_abandoned() {
+    let s = Store::new("intents");
+
+    assert!(
+        s.ok(&["intents"]).contains("No plans."),
+        "an empty list should say so rather than print nothing"
+    );
+
+    // The wall clock is resolved against the zone of the machine that typed it.
+    s.in_zone(
+        "Asia/Tokyo",
+        &["intent", "at", "2026-10-07T09:00", "ring the dentist"],
+    );
+    s.ok(&["intent", "branch", "main", "run the migration check"]);
+
+    let json = s.ok(&["intents", "--json"]);
+    assert!(
+        json.contains("\"cue\":\"time\"") && json.contains("\"cue\":\"git_branch\""),
+        "both cue kinds should be listed: {json}"
+    );
+    // A time cue has an instant and nothing to match; a branch cue is the other
+    // way round. Checked because the two share one row shape.
+    assert!(
+        json.contains("\"match\":null") && json.contains("\"match\":\"main\""),
+        "the two cue kinds were stored the same way: {json}"
+    );
+    assert!(
+        json.contains("\"at\":null"),
+        "a branch cue got a time: {json}"
+    );
+    assert!(
+        json.contains("ring the dentist") && json.contains("run the migration check"),
+        "{json}"
+    );
+
+    // Read back from the machine that wrote it, the hour is the hour that was
+    // typed. This is the assertion that was failing: the listing rendered every
+    // time cue in UTC, so 09:00 in Tokyo was reported as a plan for 00:00.
+    let tokyo = s.in_zone("Asia/Tokyo", &["intents"]);
+    assert!(
+        tokyo.contains("2026-10-07 09:00"),
+        "the hour somebody typed is not the hour they were shown: {tokyo}"
+    );
+
+    // Read from somewhere else it is the same instant, differently rendered —
+    // which is the point. A cue stores no zone of its own, so this is the only
+    // way to tell a correct instant from a lucky one.
+    let utc = s.in_zone("UTC", &["intents"]);
+    assert!(
+        utc.contains("2026-10-07 00:00"),
+        "the same instant did not follow the reader's zone: {utc}"
+    );
+
+    // A branch cue says the branch, in either zone, because it has no clock to
+    // get wrong.
+    assert!(tokyo.contains("branch main") && utc.contains("branch main"));
+
+    // Abandoning one takes it out and leaves the other.
+    let id = tokyo
+        .lines()
+        .find(|l| l.contains("ring the dentist"))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("the listing names an id to forget")
+        .to_string();
+    let said = s.ok(&["forget", &id]);
+    assert!(said.contains("ring the dentist"), "{said}");
+
+    let left = s.ok(&["intents"]);
+    assert!(!left.contains("ring the dentist"), "it came back: {left}");
+    assert!(left.contains("run the migration check"), "{left}");
+
+    // A cue this device cannot watch for is refused rather than stored and
+    // never fired.
+    let (code, said) = s.run(&["intent", "phase-of-the-moon", "waxing", "do the thing"]);
+    assert_ne!(code, 0, "an unwatchable cue was accepted: {said}");
+
+    let (code, said) = s.run(&["forget", "deadbeef"]);
+    assert_ne!(code, 0, "forgot a plan that does not exist: {said}");
 }
