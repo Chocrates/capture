@@ -865,6 +865,7 @@ name = "capture-syncd"
 version = "0.1.0"
 dependencies = [
  "capture-core",
+ "capture-parse",
  "capture-store",
  "capture-sync",
  "if-addrs",

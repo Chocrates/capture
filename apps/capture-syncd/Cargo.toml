@@ -24,6 +24,11 @@ zbus = { workspace = true }
 # it directly.
 if-addrs = { workspace = true }
 
+[dev-dependencies]
+# The test spawns the daemon and then asks the store what it read. It needs the
+# parse crate only for the grammar version the unread count is asked with.
+capture-parse = { path = "../../crates/capture-parse" }
+
 [[bin]]
 name = "capture-syncd"
 path = "src/main.rs"
