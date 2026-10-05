@@ -864,12 +864,6 @@ fn day_of(ms: i64) -> String {
         .unwrap_or_else(|_| "an unknown day".into())
 }
 
-/// Tick an item off a list, or put it back.
-///
-/// Says which of the four things happened rather than reporting success for
-/// all of them. "Already done" and "just done" are different facts, and a
-/// refusal to guess between two identical items is not a failure — it is the
-/// only honest answer when completion matches by text.
 /// Insert the character a capture was missing to be a list.
 ///
 /// Says what it did, because it changed what somebody wrote. Accepting a type
@@ -896,10 +890,17 @@ pub fn tick_at(paths: StorePaths, name: &str, ord: u32, done: bool) -> Result<()
         Ticked::Done => say!("Open again."),
         Ticked::Already if done => say!("Already done."),
         Ticked::Already => say!("Not ticked."),
+        // An error, not a message. Asking to tick item 9 of a three-item list
+        // is a request that could not be carried out, and saying so on stdout
+        // while exiting 0 tells a script the tick landed. `tick-at <note> 0`
+        // already exits non-zero, so the two bad item numbers disagreed about
+        // whether they were failures.
         Ticked::NoSuchItem => {
-            say!("{name} has no item {}.", ord + 1);
-            say!();
-            say!("They are numbered in the order they were written, from 1.");
+            return Err(Error::NotFound(format!(
+                "{name} has no item {}; they are numbered in the order they \
+                 were written, from 1",
+                ord + 1
+            )));
         }
         // Unreachable by construction: a number names exactly one item, which
         // is the whole reason this exists beside `tick`.
@@ -908,6 +909,12 @@ pub fn tick_at(paths: StorePaths, name: &str, ord: u32, done: bool) -> Result<()
     Ok(())
 }
 
+/// Tick an item off a list, or put it back.
+///
+/// Says which of the four things happened rather than reporting success for
+/// all of them. "Already done" and "just done" are different facts, and a
+/// refusal to guess between two identical items is not a failure — it is the
+/// only honest answer when completion matches by text.
 pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> {
     use capture_store::promote::Ticked;
 

@@ -1337,3 +1337,79 @@ fn a_plan_waits_for_a_cue_until_it_is_abandoned() {
     let (code, said) = s.run(&["forget", "deadbeef"]);
     assert_ne!(code, 0, "forgot a plan that does not exist: {said}");
 }
+
+/// Every reversal that exists, reversing.
+///
+/// `untag`, `unpin` and `untick-at` were each untested, which is its own shape:
+/// the doing half of a pair gets exercised and the undoing half does not, so a
+/// reversal that stopped working would go unnoticed until somebody needed it.
+///
+/// `unmute` is deliberately absent from this list, because it does not exist.
+/// A note muted by name cannot be lifted by any surface — see the note in the
+/// review ledger. Asserting the current behaviour here would cement it.
+#[test]
+fn what_can_be_done_to_a_note_can_be_undone() {
+    let s = Store::new("reversals");
+    let n = s.capture("#groceries: milk, eggs, bread");
+    s.ok(&["settle"]);
+
+    // A tag, and its retraction. Checked on the note's page rather than by the
+    // command's own say-so, which would only prove it printed something.
+    s.ok(&["tag", &n, "reading"]);
+    assert!(
+        s.ok(&["show", &n]).contains("reading"),
+        "the tag did not take"
+    );
+    s.ok(&["untag", &n, "reading"]);
+    assert!(
+        !s.ok(&["show", &n]).contains("reading"),
+        "the tag survived its retraction"
+    );
+    // And the tag it was captured with is still there. `untag` takes one tag
+    // off, not every tag.
+    assert!(s.ok(&["show", &n]).contains("groceries"), "untag took both");
+
+    s.ok(&["pin", &n]);
+    assert!(
+        s.ok(&["show", &n]).contains("pinned"),
+        "the pin did not take"
+    );
+    s.ok(&["unpin", &n]);
+    assert!(
+        !s.ok(&["show", &n]).contains("pinned"),
+        "the pin survived being removed"
+    );
+
+    // An item by number, and back. The number is what to reach for when two
+    // items read the same, so it has to be the position and not the words.
+    s.ok(&["tick-at", &n, "2"]);
+    let list = s.ok(&["list", "groceries"]);
+    assert!(
+        list.contains("[x] eggs"),
+        "the wrong item was ticked: {list}"
+    );
+    assert!(
+        list.contains("[ ] milk") && list.contains("[ ] bread"),
+        "{list}"
+    );
+    assert!(list.contains("2 of 3 left"), "the count disagrees: {list}");
+
+    s.ok(&["untick-at", &n, "2"]);
+    let back = s.ok(&["list", "groceries"]);
+    assert!(!back.contains("[x]"), "unticking left it ticked: {back}");
+    assert!(back.contains("3 of 3 left"), "{back}");
+
+    // An item that is not there is a request that could not be carried out, so
+    // it exits non-zero. Printing a refusal and exiting 0 tells a script the
+    // tick landed. Both bad numbers are checked, because they are refused in
+    // different places and used to disagree about being failures.
+    let (code, said) = s.run(&["tick-at", &n, "9"]);
+    assert_ne!(code, 0, "ticking a missing item reported success: {said}");
+    assert!(said.contains("no item 9"), "{said}");
+
+    let (code, _) = s.run(&["tick-at", &n, "0"]);
+    assert_ne!(code, 0, "item 0 was accepted; they start at 1");
+
+    // Nothing was ticked by either refusal.
+    assert!(!s.ok(&["list", "groceries"]).contains("[x]"));
+}
