@@ -70,6 +70,24 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Every phase, in the order the purge performs them.
+    ///
+    /// One list rather than one per test. There were two, hand-kept, and
+    /// `BlobsDestroyed` was missing from both — the newest phase, and therefore
+    /// the one most likely to be wrong, omitted from the check written to
+    /// notice exactly that.
+    ///
+    /// Adding a variant breaks `position` below, which is the prompt to add it
+    /// here too. That is a reminder rather than a proof: nothing can force this
+    /// array to be complete without enumerating the enum, which stable Rust
+    /// cannot do unaided. It is still better than two lists that fail silently.
+    pub const ALL: [Phase; 4] = [
+        Phase::Started,
+        Phase::ProjectionPurged,
+        Phase::BlobsDestroyed,
+        Phase::BodyDestroyed,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Phase::Started => "started",
@@ -238,16 +256,39 @@ fn pause_for_testing() {
 mod tests {
     use super::*;
 
+    /// Where a phase sits in the sequence.
+    ///
+    /// Exhaustive on purpose: adding a variant fails to compile *here*, which
+    /// is the reminder to add it to `Phase::ALL` as well.
+    fn position(p: Phase) -> usize {
+        match p {
+            Phase::Started => 0,
+            Phase::ProjectionPurged => 1,
+            Phase::BlobsDestroyed => 2,
+            Phase::BodyDestroyed => 3,
+        }
+    }
+
     #[test]
     fn every_phase_round_trips() {
         // The marker is read back after a crash. A phase that did not survive
-        // the round trip would read as "no purge in progress".
-        for p in [
-            Phase::Started,
-            Phase::ProjectionPurged,
-            Phase::BodyDestroyed,
-        ] {
+        // the round trip would read as "no purge in progress" — and
+        // `Ops::interrupted` skips a row whose phase it cannot parse, so the
+        // purge would never resume and nothing would say so.
+        for p in Phase::ALL {
             assert_eq!(Phase::parse(p.as_str()), Some(p));
+        }
+    }
+
+    #[test]
+    fn all_holds_each_phase_once_and_in_order() {
+        // The guard on the list itself, which two hand-kept copies did not have.
+        for (i, p) in Phase::ALL.iter().enumerate() {
+            assert_eq!(
+                position(*p),
+                i,
+                "ALL is not in the order the purge performs them"
+            );
         }
     }
 
@@ -265,12 +306,18 @@ mod tests {
         // Documented by the type as well as the comment: the projection is
         // purged before the body is destroyed, so a crash between them leaves
         // content readable but unfindable rather than the reverse.
-        let order = [
-            Phase::Started,
-            Phase::ProjectionPurged,
-            Phase::BodyDestroyed,
-        ];
-        let names: Vec<&str> = order.iter().map(|p| p.as_str()).collect();
-        assert_eq!(names, ["started", "projection-purged", "body-destroyed"]);
+        let names: Vec<&str> = Phase::ALL.iter().map(|p| p.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "started",
+                "projection-purged",
+                // Between the two on purpose: the hash lives in the capture
+                // body, so a crash the other way round would leave bytes on
+                // disk that nothing could ever name again.
+                "blobs-destroyed",
+                "body-destroyed"
+            ]
+        );
     }
 }
