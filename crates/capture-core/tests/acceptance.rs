@@ -872,6 +872,40 @@ fn two_signers_can_readmit_a_device_after_a_lockout() {
 }
 
 #[test]
+fn a_readmission_holds_when_both_signers_are_retired() {
+    // The clause that distinguishes the lockout remedy from an ordinary
+    // readmission, and the one nothing asserted.
+    //
+    // `two_signers_can_readmit_a_device_after_a_lockout` above retires only
+    // `desktop` and co-signs with `laptop` — which is still a current member.
+    // That is a readmission, not a lockout: somebody is left who could have
+    // used `device_add` instead.
+    //
+    // A real lockout is the state where nobody is left. Requiring the signers
+    // to be members would make the remedy unusable exactly when it is needed,
+    // which `roster.rs` says in as many words — and that is precisely the sort
+    // of claim that holds in a comment while the code drifts out from under it.
+    let (mut laptop, mut desktop, _p, mut events) = mesh();
+    events.push(laptop.retires(&desktop, &[(desktop.dev(), 40, EventId([3; 32]))]));
+    events.push(laptop.retires_self());
+
+    let locked = roster::build(&events);
+    assert!(
+        !locked.keys.contains(&laptop.pubkey()) && !locked.keys.contains(&desktop.pubkey()),
+        "this is not a lockout, so the readmission below would prove nothing"
+    );
+
+    events.push(desktop.readmits_self(Some(&laptop)));
+
+    let r = roster::build(&events);
+    assert!(
+        r.keys.contains(&desktop.pubkey()),
+        "a co-signed readmission was refused because both signers were retired, \
+         which is the one state the remedy exists for"
+    );
+}
+
+#[test]
 fn a_readmission_signed_twice_by_one_device_is_refused() {
     // Two signatures from one device are one device's say-so written twice,
     // which is exactly the bar the second signer exists to raise.
