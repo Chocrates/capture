@@ -573,3 +573,58 @@ fn a_task_is_overdue_or_not_depending_on_when_you_ask() {
         "a task due yesterday is not: {after}"
     );
 }
+
+/// Retiring refuses the two things that would leave the archive unrecoverable.
+///
+/// `capture retire` is run by no test. Both halves of what it does are
+/// dangerous — it revokes a key, and `--yes` is the only thing between a typo
+/// and doing so — and the guards in front of it were unexercised.
+///
+/// A roster of two needs two devices, which a single-process test cannot build.
+/// The refusals do not: they are reachable on a store that has just been
+/// created, and they are the ones worth having, because each prevents a state
+/// nothing can undo.
+#[test]
+fn retiring_refuses_what_cannot_be_undone() {
+    let s = Store::new("retire-guards");
+    s.capture("something to prove the archive still works afterwards");
+    s.ok(&["settle"]);
+
+    let mine = s.ok(&["peers", "--json"]);
+
+    // A key nobody has. Not an error about retirement — an error about the
+    // name, because that is what is wrong.
+    let (code, said) = s.run(&["retire", "ffffffff"]);
+    assert_ne!(code, 0, "retiring a device that does not exist succeeded");
+    assert!(
+        said.contains("no device in the roster matches"),
+        "the refusal should be about the name: {said}"
+    );
+
+    // This device, when it is the only one. The roster would be left with
+    // nobody, and `device_add` needs a current member's signature — so there
+    // would be no way back in, ever.
+    let own = own_key(&mine);
+    let (code, said) = s.run(&["retire", &own]);
+    assert_ne!(code, 0, "retiring the only device in the roster succeeded");
+    assert!(
+        said.contains("never admit anyone again"),
+        "the refusal should say why it cannot be undone: {said}"
+    );
+
+    // And nothing was written by either attempt. A refusal that still wrote an
+    // event would leave a retirement in the log that the roster then has to
+    // argue with.
+    assert_eq!(
+        s.ok(&["peers", "--json"]),
+        mine,
+        "a refused retirement changed the roster"
+    );
+}
+
+/// The first eight hex characters of this device's key, as `peers --json` gives
+/// them.
+fn own_key(json: &str) -> String {
+    let at = json.find("\"key\":\"").expect("peers names a key") + 7;
+    json[at..].chars().take(8).collect()
+}
