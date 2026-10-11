@@ -93,7 +93,7 @@ android-build:
 	@echo '--- android: building for x86_64 (emulator) and aarch64 (device)'
 	@set -e; . ./tools/android-env.sh; \
 	 $(SCOPE) cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API build -p capture-store; \
-	 $(SCOPE) cargo ndk -t x86_64 -P $$ANDROID_NDK_API test -p capture-store --no-run
+	 $(SCOPE) cargo ndk -t x86_64 -t arm64-v8a -P $$ANDROID_NDK_API test -p capture-store --no-run
 
 ## android-kotlin: generate the Kotlin the app calls
 #

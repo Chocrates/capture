@@ -21,7 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -33,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +51,82 @@ class MainActivity : ComponentActivity() {
     private lateinit var model: Model
 
     /**
+     * What the platform allows, as the settings screen shows it.
+     *
+     * Asked again on every resume and after every answer, because each of
+     * these can be changed in the system's settings while this is away.
+     */
+    private val permits = mutableStateOf<List<PermitState>>(emptyList())
+
+    private fun refreshPermits() {
+        permits.value = Permissions.states(this)
+    }
+
+    /** A single runtime prompt, from the settings screen. */
+    private val askOne = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        // Refused with "don't ask again", the platform answers no without
+        // showing anything — so a button that only prompted would do nothing
+        // at all, which is the failure this screen exists to end. Where the
+        // prompt cannot appear, the system's page for this app can.
+        //
+        // Told apart by how fast the answer came. A refusal somebody made took
+        // them at least a glance at a dialog; one the platform made took
+        // milliseconds. The first version went to Settings whenever nothing
+        // had changed — so pressing "Don't allow" also threw the person into
+        // the system's settings, overriding the answer they had just given.
+        val unseen = System.currentTimeMillis() - askedAt < UNSEEN_MS
+        refreshPermits()
+        if (!granted && unseen) openAppSettings()
+        Alarms.rearm(this)
+    }
+
+    /** When the last prompt was launched, to tell a dialog from no dialog. */
+    private var askedAt = 0L
+
+    private fun openAppSettings() {
+        runCatching {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.fromParts("package", packageName, null)),
+            )
+        }
+    }
+
+    /** Do the platform's version of asking for one permission. */
+    private fun ask(permit: Permit) {
+        when (permit) {
+            Permit.NOTIFICATIONS ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    askedAt = System.currentTimeMillis()
+                    askOne.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            // Not a prompt on any recent Android: a switch in Settings, which
+            // an application may only open.
+            Permit.EXACT_ALARMS -> runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                        .setData(Uri.fromParts("package", packageName, null)),
+                )
+            }
+            Permit.LOCATION -> askLocation.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ),
+            )
+            // Background location cannot be granted from a dialog: the
+            // platform requires a deliberate trip to Settings.
+            Permit.LOCATION_ALWAYS -> openAppSettings()
+            Permit.MICROPHONE -> {
+                askedAt = System.currentTimeMillis()
+                askOne.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+    }
+
+    /**
      * Asking to see where we are.
      *
      * Only ever in response to somebody pressing the button on the plans
@@ -63,6 +140,7 @@ class MainActivity : ComponentActivity() {
         // What was actually granted, asked of the platform rather than read
         // from the result: "while using the app" comes back as a grant.
         model.located(Places.watching(this))
+        refreshPermits()
         Places.rearm(this)
 
         // The next moment a capture named. Re-armed on every launch for the
@@ -98,7 +176,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             CaptureTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    App(model, onAskLocation = {
+                    App(model, permits.value, ::ask, onAskLocation = {
                         askLocation.launch(
                             arrayOf(
                                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -113,6 +191,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshPermits()
         // Whatever came due while the app was away. The desktop settles on
         // every command that writes; a phone is opened rather than invoked, so
         // this is where it happens.
@@ -255,13 +334,24 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        /**
+         * Faster than anybody answers a dialog, slower than the platform
+         * answers for one it will not show.
+         */
+        private const val UNSEEN_MS = 500L
+
         /** Which note a notification was about. */
         const val OPEN_NOTE = "dev.capture.open_note"
     }
 }
 
 @Composable
-private fun App(model: Model, onAskLocation: () -> Unit) {
+private fun App(
+    model: Model,
+    permits: List<PermitState>,
+    onPermit: (Permit) -> Unit,
+    onAskLocation: () -> Unit,
+) {
     val context = LocalContext.current
 
     // Back goes back, rather than out.
@@ -334,6 +424,8 @@ private fun App(model: Model, onAskLocation: () -> Unit) {
                         model.refreshSoon()
                     },
                     onPair = { model.go(Screen.Pairing) },
+                    permits = permits,
+                    onPermit = onPermit,
                 )
                 is Screen.Review -> ReviewSession(
                     model.offered,
@@ -489,9 +581,13 @@ private val TABS = listOf(
     Tab("Search", Icons.Filled.Search, { it is Screen.Search }, { Screen.Search }),
     Tab("Plans", Icons.Filled.Place, { it is Screen.Plans }, { Screen.Plans }),
     Tab("Review", Icons.Filled.Refresh, { it is Screen.Review }, { Screen.Review }),
+    // "Settings" rather than "Health" since permissions joined it: what the
+    // platform allows is the thing somebody goes looking for, and a tab named
+    // for diagnostics is not where they look. The health conditions are still
+    // here, below the permissions.
     Tab(
-        "Health",
-        Icons.Filled.Favorite,
+        "Settings",
+        Icons.Filled.Settings,
         // Pairing lives behind Health, which is where the devices are.
         { it is Screen.Health || it is Screen.Pairing },
         { Screen.Health },

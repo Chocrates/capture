@@ -1045,6 +1045,8 @@ fun Health(
     onRetire: (String) -> Unit,
     onSync: () -> Unit,
     onPair: () -> Unit,
+    permits: List<PermitState>,
+    onPermit: (Permit) -> Unit,
 ) {
     val attention = conditions.filter { it.tier == "attention" }
     val knowing = conditions.filter { it.tier != "attention" }
@@ -1084,7 +1086,16 @@ fun Health(
     }
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
-        item { Text("Needs attention", style = MaterialTheme.typography.titleSmall) }
+        // First, because a refused permission is the one thing on this screen
+        // that silently stops everything else from working.
+        item { PermissionsSection(permits, onPermit) }
+        item {
+            Text(
+                "Needs attention",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+        }
         if (attention.isEmpty()) {
             item { Text("Nothing needs your attention.", Modifier.padding(vertical = 8.dp)) }
         }

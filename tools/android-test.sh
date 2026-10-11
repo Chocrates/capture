@@ -28,7 +28,6 @@
 set -eu
 
 DEVICE_DIR=/data/local/tmp/capture
-TARGET_DIR=target/x86_64-linux-android/debug/deps
 
 # Suites that cannot run on a device, and why.
 #
@@ -50,7 +49,21 @@ adb wait-for-device
     echo "the device is connected but has not finished booting"
     exit 1
 }
-echo "device: $(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
+echo "device: $abi"
+
+# The binaries for the device actually attached. This was x86_64 only, so on a
+# phone — arm64, like nearly every phone — it pushed emulator binaries that
+# could not execute, and the "suite on a device" this target exists for had
+# only ever run on an emulator.
+case "$abi" in
+    x86_64) TARGET_DIR=target/x86_64-linux-android/debug/deps ;;
+    arm64-v8a) TARGET_DIR=target/aarch64-linux-android/debug/deps ;;
+    *)
+        echo "no build for $abi; make android-build builds x86_64 and arm64-v8a"
+        exit 1
+        ;;
+esac
 
 adb shell mkdir -p "$DEVICE_DIR" >/dev/null 2>&1 || true
 
