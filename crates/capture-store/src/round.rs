@@ -68,7 +68,7 @@ pub fn tick(
     port: u16,
     now: &dyn Fn() -> u64,
     spent: &dyn Fn() -> bool,
-) -> Result<()> {
+) -> Result<Reach> {
     let result = tick_once(paths, identity, beacon, round, port, now, spent);
     let trouble = result.as_ref().err().map(|e| e.to_string());
     Ops::open(&paths.ops)?.round_ran(now(), beacon.is_some(), trouble.as_deref())?;
@@ -84,14 +84,14 @@ fn tick_once(
     port: u16,
     now: &dyn Fn() -> u64,
     spent: &dyn Fn() -> bool,
-) -> Result<()> {
+) -> Result<Reach> {
     let (roster, heads) = look(paths)?;
     let Some(secret) = roster.secret else {
         // An archive written before sync existed. It has never advertised and
         // has nothing to advertise under; minting a key is an event some
         // device has to author, not something to invent on read.
         tracing::debug!("no roster secret yet; not advertising");
-        return Ok(());
+        return Ok(Reach::default());
     };
 
     let net = Network::of(&network_evidence());
@@ -125,8 +125,12 @@ fn tick_once(
             members.push(k);
         }
     }
+    let mut reach = Reach {
+        members: members.len() as u32,
+        reached: 0,
+    };
     if members.is_empty() {
-        return Ok(());
+        return Ok(reach);
     }
     let mut reachable = Vec::new();
 
@@ -185,14 +189,19 @@ fn tick_once(
         // Nothing to fetch and nothing to offer: the advertisement already
         // said so, and opening the connection to confirm it is the work
         // sealing and the digest exist to avoid.
+        //
+        // Reached all the same: it is advertising, on this network, under this
+        // archive's secret, and already agrees.
         if let Some(d) = digest
             && !ops.peer_has_news(&peer, &d)?
         {
+            reach.reached += 1;
             continue;
         }
 
         match dial(paths, identity, &peer, &addr, now(), spent) {
             Ok(done) => {
+                reach.reached += 1;
                 ops.peer_reached(&peer, &addr, now())?;
                 if let Some(d) = digest {
                     ops.peer_agreed(&peer, &d)?;
@@ -213,7 +222,23 @@ fn tick_once(
         }
     }
 
-    Ok(())
+    Ok(reach)
+}
+
+/// Whom one round was looking for, and how many of them it found.
+///
+/// A round that ran and a round that reached somebody used to be the same
+/// result. On a phone whose VPN kept it off the local network, "Sync now" ran,
+/// succeeded, and changed nothing — and there was nothing to tell the screen
+/// that this round, unlike an ordinary one, had found nobody at all.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reach {
+    /// Other devices this one would sync with.
+    pub members: u32,
+    /// Of those, how many this round dialled successfully or saw advertising
+    /// and already in agreement. A member backed off, or not chosen this
+    /// round, is in neither count's favour: it was not reached.
+    pub reached: u32,
 }
 
 /// Open a session with a peer and run one round of anti-entropy.
@@ -610,8 +635,12 @@ pub fn bounded(
     let spent = || now() >= blob_budget;
 
     let round = now() / 1000;
-    if let Err(e) = tick(paths, identity, &mut beacon, round, port, now, &spent) {
-        report.trouble = Some(e.to_string());
+    match tick(paths, identity, &mut beacon, round, port, now, &spent) {
+        Ok(reach) => {
+            report.members = reach.members;
+            report.reached = reach.reached;
+        }
+        Err(e) => report.trouble = Some(e.to_string()),
     }
 
     // Then answer, for whatever is left of the window. Sleeping between polls
@@ -702,6 +731,13 @@ pub struct Report {
     pub multicast: bool,
     /// Peers that dialled this device during the window.
     pub answered: u32,
+    /// Other devices this one would sync with. See [`Reach`].
+    pub members: u32,
+    /// How many of them this device reached by dialling or by seeing them
+    /// advertise. Zero with members to reach, and nobody `answered`, is a
+    /// round that found nobody — which a phone off its local network looks
+    /// like, and which is worth saying rather than reporting as success.
+    pub reached: u32,
     /// The last thing that went wrong, if anything did. Not a failure of the
     /// round: a peer that refused is one peer.
     pub trouble: Option<String>,

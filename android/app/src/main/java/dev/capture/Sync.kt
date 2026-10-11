@@ -1,6 +1,8 @@
 package dev.capture
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -10,9 +12,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import uniffi.capture_ffi.syncSaid
 
 /**
  * Sync, on a phone that is not allowed to keep a daemon.
@@ -53,7 +58,11 @@ class SyncWorker(context: Context, params: WorkerParameters) :
                 // and only one of them is worth doing something about.
                 Toast.note(applicationContext, "sync ran without discovery")
             }
-            Result.success()
+            // What it found, for whoever is waiting on this particular run.
+            // Only "Sync now" is: a periodic round that reached nobody is the
+            // ordinary case of a desktop that is asleep, and the peer rows
+            // already say when each device was last reached.
+            Result.success(workDataOf(SAID to syncSaid(report, vpnOn(applicationContext))))
         } catch (e: Exception) {
             // Retried with the platform's backoff rather than this one's. A
             // peer that was asleep is the ordinary case and not worth a
@@ -73,6 +82,24 @@ class SyncWorker(context: Context, params: WorkerParameters) :
          * allows before it kills the job outright.
          */
         const val WINDOW_SECONDS = 20u
+
+        /** The output key for what a round found, in a sentence. */
+        const val SAID = "said"
+
+        /**
+         * Whether this application's traffic is going through a VPN.
+         *
+         * The default network as this app sees it, which is the VPN's when one
+         * covers this app. Found on a Pixel 8 Pro: a VPN carrying every app
+         * kept the phone from reaching the desktop or even the router, while
+         * the desktop could still reach the phone — so pairing, adb and
+         * everything checked from the desktop looked fine.
+         */
+        fun vpnOn(context: Context): Boolean {
+            val net = context.getSystemService(ConnectivityManager::class.java) ?: return false
+            return net.getNetworkCapabilities(net.activeNetwork)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
 
         private const val PERIODIC = "capture-sync"
 
@@ -134,10 +161,11 @@ class SyncWorker(context: Context, params: WorkerParameters) :
             )
         }
 
-        /** Sync now, because somebody asked. */
-        fun now(context: Context) {
-            WorkManager.getInstance(context)
-                .enqueue(OneTimeWorkRequestBuilder<SyncWorker>().build())
+        /** Sync now, because somebody asked. Returns the run, to watch. */
+        fun now(context: Context): UUID {
+            val work = OneTimeWorkRequestBuilder<SyncWorker>().build()
+            WorkManager.getInstance(context).enqueue(work)
+            return work.id
         }
     }
 }

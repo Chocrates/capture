@@ -1342,3 +1342,66 @@ fn answering_a_peer_is_a_round_that_ran() {
         "answering a peer did not count as sync running"
     );
 }
+
+/// A round says whether it reached anyone, not only whether it ran.
+///
+/// Found on a Pixel 8 Pro with a VPN that kept it off the local network. "Sync
+/// now" ran, reported success, and the screen went on reading "last reached
+/// 04:55" — a round that ran and a round that reached the other device were
+/// the same result, so there was nothing to say *why* the phone was stale.
+#[cfg(feature = "mdns")]
+#[test]
+fn a_round_that_reached_nobody_says_so() {
+    let a = Device::new("unreached-a");
+    let b = Device::new("unreached-b");
+    pair(&a, &b);
+
+    // Somewhere b used to be and is not: a port bound and released, so the
+    // dial is refused rather than left to time out.
+    let gone = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let b_key = b.identity().public().to_bytes();
+    a.ops().peer_reached(&b_key, &gone.to_string(), AT).unwrap();
+
+    let reach = round_from(&a);
+    assert_eq!(reach.members, 1, "b is a member a should be looking for");
+    assert_eq!(reach.reached, 0, "a dial that was refused reached nobody");
+}
+
+/// And says so when it did.
+#[cfg(feature = "mdns")]
+#[test]
+fn a_round_that_reached_a_peer_says_so() {
+    let a = Device::new("reached-a");
+    let b = Device::new("reached-b");
+    pair(&a, &b);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let b_key = b.identity().public().to_bytes();
+    a.ops().peer_reached(&b_key, &addr.to_string(), AT).unwrap();
+
+    let b_paths = b.paths.clone();
+    let b_id = b.identity();
+    let answering = std::thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        capture_store::round::answer(&b_paths, &b_id, stream, AT, &|| false).expect("b answered");
+    });
+
+    let reach = round_from(&a);
+    answering.join().unwrap();
+    assert_eq!(reach.members, 1);
+    assert_eq!(reach.reached, 1, "b answered, so the round reached it");
+}
+
+/// One round from `d`, by remembered address alone — no beacon, so nothing on
+/// the machine running the tests is discovered by accident.
+#[cfg(feature = "mdns")]
+fn round_from(d: &Device) -> capture_store::round::Reach {
+    let mut beacon = None;
+    let now = || AT + 1_000;
+    capture_store::round::tick(&d.paths, &d.identity(), &mut beacon, 1, 0, &now, &|| false)
+        .expect("the round ran")
+}

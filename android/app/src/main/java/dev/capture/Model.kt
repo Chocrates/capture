@@ -6,7 +6,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.capture_ffi.AgendaEntry
@@ -669,17 +672,27 @@ class Model(private val archive: Archive) : ViewModel() {
     fun refresh() = go(screen)
 
     /**
-     * Re-read once the round has had time to finish.
+     * Sync now, then show what it did.
      *
-     * Not a poll and not a progress bar: `WorkManager` owns the job and this
-     * process cannot be told when it ends. One re-read after the window a
-     * round is given is enough to turn "nothing happened" into what actually
-     * happened, and the screen is re-read on navigation anyway.
+     * Watches the run it started rather than re-reading after a fixed wait.
+     * The wait was the window a round is given plus two seconds — twenty-two
+     * seconds of a screen still saying "last reached 04:55" after a round that
+     * took one — and it said nothing either way, so a round that reached
+     * nobody looked exactly like one that had not finished.
+     *
+     * Bounded, because a run that failed is retried with the platform's
+     * backoff and is not finished; the screen is re-read regardless.
      */
-    fun refreshSoon() {
+    fun syncNow(context: android.content.Context) {
+        val app = context.applicationContext
+        val run = SyncWorker.now(app)
         viewModelScope.launch {
-            kotlinx.coroutines.delay((SyncWorker.WINDOW_SECONDS.toLong() + 2) * 1000)
+            val done = withTimeoutOrNull((SyncWorker.WINDOW_SECONDS.toLong() + 10) * 1000) {
+                WorkManager.getInstance(app).getWorkInfoByIdFlow(run)
+                    .first { it?.state?.isFinished == true }
+            }
             refresh()
+            done?.outputData?.getString(SyncWorker.SAID)?.let { Toast.note(app, it) }
         }
     }
 

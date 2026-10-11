@@ -421,14 +421,7 @@ private fun App(
                     model.me,
                     onNotifier = model::chooseNotifier,
                     onRetire = model::retire,
-                    onSync = {
-                        SyncWorker.now(context)
-                        // The worker is out of reach once started, so the
-                        // screen is refreshed when it can next be observed to
-                        // have finished: on return to this screen, and here
-                        // after a moment for the ordinary quick case.
-                        model.refreshSoon()
-                    },
+                    onSync = { model.syncNow(context) },
                     onPair = { model.go(Screen.Pairing) },
                     permits = permits,
                     onPermit = onPermit,

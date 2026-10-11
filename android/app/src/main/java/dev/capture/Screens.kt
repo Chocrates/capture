@@ -1095,6 +1095,13 @@ fun Health(
     val speaks = if (notifier != null) "Says things when a cue fires" else "Says things when a cue fires, by default"
     val knowing = listed.filter { it.tier != "attention" }
 
+    // Said while it is true, not only after a "Sync now": a periodic round
+    // finding nobody shows here as attempts piling up, and that is the moment
+    // the likely reason is worth having. Read again whenever the peer list is,
+    // which is every refresh.
+    val context = LocalContext.current
+    val vpn = remember(peers) { SyncWorker.vpnOn(context) }
+
     // Which device a retirement has been begun for, and not yet confirmed.
     // Held here rather than per row so the dialog is drawn once, outside the
     // list that is about to be re-read underneath it.
@@ -1224,6 +1231,16 @@ fun Health(
                 if (peer.key != me) {
                     TextButton({ closing = peer.key }) { Text("Retire this device") }
                 }
+            }
+        }
+        if (vpn && peers.any { it.missed > 0u }) {
+            item {
+                Text(
+                    "A VPN is on. Unless it allows local network traffic, it keeps this " +
+                        "phone from reaching your other devices.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
             }
         }
         item {

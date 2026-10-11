@@ -307,8 +307,51 @@ pub struct SyncReport {
     pub multicast: bool,
     /// Peers that dialled this device during the window.
     pub answered: u32,
+    /// Other devices this one would sync with.
+    pub members: u32,
+    /// How many of them this round dialled, or saw advertising and already
+    /// in agreement.
+    pub reached: u32,
     /// The last thing that went wrong, if anything did.
     pub trouble: Option<String>,
+}
+
+/// What a round someone asked for found, in a sentence.
+///
+/// `vpn` is whether the platform reports a VPN carrying this device's traffic.
+/// It is the one cause of finding nobody that the device can see from where it
+/// stands, and the one found in the field: a Pixel 8 Pro with a VPN that kept it
+/// off the local network ran "Sync now", was told nothing, and went on reading
+/// "last reached 04:55" with no hint why. A VPN is not *certainly* the cause —
+/// many let local traffic through — so it is offered as a likely one.
+#[uniffi::export]
+pub fn sync_said(report: &SyncReport, vpn: bool) -> String {
+    if report.members == 0 {
+        return "There is no other device to sync with yet.".into();
+    }
+    // Answering is reaching too, from the other side. Capped, because the same
+    // device can dial in and be dialled in one window.
+    let got = (report.reached + report.answered).min(report.members);
+    if got > 0 {
+        return if report.members == 1 {
+            "Synced with your other device.".into()
+        } else {
+            format!("Synced with {got} of {} devices.", report.members)
+        };
+    }
+    let nobody = if report.members == 1 {
+        "Could not reach your other device."
+    } else {
+        "Could not reach any of your other devices."
+    };
+    if vpn {
+        format!(
+            "{nobody} A VPN is on, and unless it allows local network traffic it keeps this \
+             phone from the devices beside it."
+        )
+    } else {
+        format!("{nobody} It may be off, asleep, or on a different network.")
+    }
 }
 
 /// A review session: what is offered, and what keeps slipping.
@@ -2122,6 +2165,8 @@ impl Archive {
         Ok(SyncReport {
             multicast: r.multicast,
             answered: r.answered,
+            members: r.members,
+            reached: r.reached,
             trouble: r.trouble,
         })
     }
@@ -3154,5 +3199,69 @@ mod wake {
         ];
         let w = wake_for(&alerts, now, chicago(), 1_000).unwrap().unwrap();
         assert_eq!(w.at_ms, now + 2 * HOUR);
+    }
+}
+
+#[cfg(test)]
+mod sync_said {
+    use super::*;
+
+    fn report(members: u32, reached: u32, answered: u32) -> SyncReport {
+        SyncReport {
+            multicast: true,
+            answered,
+            members,
+            reached,
+            trouble: None,
+        }
+    }
+
+    #[test]
+    fn nobody_reached_behind_a_vpn_names_the_vpn() {
+        let said = sync_said(&report(1, 0, 0), true);
+        assert!(
+            said.starts_with("Could not reach your other device."),
+            "{said}"
+        );
+        assert!(said.contains("VPN"), "{said}");
+    }
+
+    #[test]
+    fn nobody_reached_without_a_vpn_does_not_blame_one() {
+        let said = sync_said(&report(1, 0, 0), false);
+        assert!(said.starts_with("Could not reach"), "{said}");
+        assert!(!said.contains("VPN"), "{said}");
+    }
+
+    #[test]
+    fn a_round_that_reached_someone_says_so_whatever_the_vpn() {
+        assert_eq!(
+            sync_said(&report(1, 1, 0), true),
+            "Synced with your other device."
+        );
+        assert_eq!(
+            sync_said(&report(3, 1, 0), false),
+            "Synced with 1 of 3 devices."
+        );
+    }
+
+    #[test]
+    fn being_dialled_counts_and_is_not_counted_twice() {
+        assert_eq!(
+            sync_said(&report(1, 0, 1), true),
+            "Synced with your other device."
+        );
+        assert_eq!(
+            sync_said(&report(2, 2, 2), false),
+            "Synced with 2 of 2 devices."
+        );
+    }
+
+    #[test]
+    fn alone_is_not_a_failure() {
+        assert_eq!(
+            sync_said(&report(0, 0, 0), true),
+            "There is no other device to sync with yet."
+        );
     }
 }
