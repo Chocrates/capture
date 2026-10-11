@@ -82,6 +82,16 @@ pub struct Roster {
     /// and why. Kept because "this device is silently not a member" is the
     /// failure that is impossible to diagnose without it.
     pub refused: BTreeMap<EventId, Refusal>,
+    /// When each key first became a member: the clock of the root, the
+    /// `device_add` or the re-admission that first put it here.
+    ///
+    /// *First*, not latest. Pairing writes two admissions — each side admits
+    /// the other — and the second would otherwise make the device that was
+    /// already here look like the newer one. It is what §2.4.1's default
+    /// notifier, "the most recently paired device", is ordered by, and every
+    /// replica folds the same membership events, so every replica agrees on it
+    /// without anything being written.
+    pub admitted: BTreeMap<[u8; 32], crate::hlc::Hlc>,
 }
 
 /// Why an authentic membership event conferred nothing.
@@ -317,6 +327,7 @@ pub fn build(events: &[Envelope]) -> Roster {
             r.retired.remove(&body.pubkey);
             r.retired_by.remove(&body.pubkey);
             r.keys.insert(body.pubkey);
+            r.admitted.entry(body.pubkey).or_insert(e.header.hlc);
             r.origins.insert(
                 Dev::derive(&body.pubkey, &Incarnation(body.incarnation)),
                 body.pubkey,
@@ -372,6 +383,7 @@ pub fn build(events: &[Envelope]) -> Roster {
                 }
                 root_seen = true;
                 r.keys.insert(claim.pubkey);
+                r.admitted.entry(claim.pubkey).or_insert(e.header.hlc);
                 r.origins.insert(e.header.dev, claim.pubkey);
             }
             Kind::DEVICE_ADD => {
@@ -394,6 +406,7 @@ pub fn build(events: &[Envelope]) -> Roster {
                     continue;
                 }
                 r.keys.insert(claim.pubkey);
+                r.admitted.entry(claim.pubkey).or_insert(e.header.hlc);
                 r.origins.insert(subject, claim.pubkey);
             }
             Kind::ORIGIN_CLAIM => {
@@ -432,6 +445,35 @@ mod tests {
         let r = build(&[root]);
         assert!(r.is_bootstrapped());
         assert_eq!(r.key_for(&d.dev()), Some(&d.pubkey()));
+    }
+
+    #[test]
+    fn a_pairing_admits_twice_and_the_older_device_stays_older() {
+        // Pairing writes two admissions: the offerer admits the newcomer, then
+        // the newcomer admits the offerer back. Recording the latest would
+        // make the desktop that has been here all along look like the device
+        // paired most recently, and §2.4.1's default notifier would pick it.
+        let mut desk = testing::Origin::new(0);
+        let mut phone = testing::Origin::new(1);
+        let root = desk.roster_root();
+        let admit_phone = desk.admits(&phone);
+        phone.observe(&admit_phone, 2_000_000_000_000);
+        let admit_desk = phone.admits(&desk);
+        assert!(
+            admit_desk.header.hlc > admit_phone.header.hlc,
+            "a precondition"
+        );
+
+        let r = build(&[root.clone(), admit_phone.clone(), admit_desk.clone()]);
+        assert_eq!(r.admitted.get(&desk.pubkey()), Some(&root.header.hlc));
+        assert_eq!(
+            r.admitted.get(&phone.pubkey()),
+            Some(&admit_phone.header.hlc)
+        );
+        assert!(r.admitted[&phone.pubkey()] > r.admitted[&desk.pubkey()]);
+
+        // And the same whatever order they arrive in.
+        assert_eq!(build(&[admit_desk, admit_phone, root]).admitted, r.admitted);
     }
 
     #[test]

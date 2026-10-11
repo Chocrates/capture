@@ -96,7 +96,12 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
     // before, so a paired phone and desktop each announced every moment and
     // the setting offered to stop that was inert.
     let me = capture_store::identity::Identity::load(paths)?;
-    if !capture_store::notifier::speaks_here(&state, me.public().as_bytes())? {
+    if !capture_store::notifier::speaks_here(
+        paths,
+        &state,
+        me.public().as_bytes(),
+        now.max(0) as u64,
+    )? {
         return Ok(());
     }
 

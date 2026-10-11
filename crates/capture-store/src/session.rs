@@ -563,7 +563,12 @@ impl Session {
         // Before the work rather than after: asking what is due has no effect,
         // but it is the whole cost of this path, and a device that is not going
         // to say anything has no reason to pay it.
-        if !crate::notifier::speaks_here(&self.state, self.identity.public().as_bytes())? {
+        if !crate::notifier::speaks_here(
+            &self.paths,
+            &self.state,
+            self.identity.public().as_bytes(),
+            now.max(0) as u64,
+        )? {
             return Ok(0);
         }
 

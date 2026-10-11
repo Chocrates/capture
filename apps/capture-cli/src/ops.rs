@@ -241,10 +241,21 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     // never be centrally improved.
     match capture_store::notifier::chosen(&state)? {
         Some(who) => say!("notifier    {who} — your choice"),
-        None => say!(
-            "notifier    {} — a default, not a setting",
-            capture_store::notifier::default_rule()
-        ),
+        // Which device, and by what rule. "The only one paired" was printed
+        // here with three devices in the roster.
+        None => {
+            let me = capture_store::identity::Identity::load(paths)?
+                .public()
+                .to_bytes();
+            let who =
+                capture_store::notifier::default_here(paths, &me, crate::read::now_ms() as u64)?;
+            say!(
+                "notifier    {}{} — {}, a default, not a setting",
+                short_key(&who),
+                if who == me { " (this device)" } else { "" },
+                capture_store::notifier::default_rule()
+            );
+        }
     }
 
     // ---- tier one: things that want a decision -----------------------------

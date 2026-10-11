@@ -151,6 +151,9 @@ class Model(private val archive: Archive) : ViewModel() {
      * behalf can never be told apart afterwards from a choice they made.
      */
     var notifier by mutableStateOf<String?>(null)
+
+    /** Who the default rule picks, for when nobody has chosen (§2.4.1). */
+    var defaultNotifier by mutableStateOf<String?>(null)
         private set
 
     /** What each capture surface has cost, measured rather than claimed. */
@@ -324,6 +327,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 conditions = archive.health()
                 peers = archive.peers()
                 notifier = archive.notifier()
+                defaultNotifier = archive.defaultNotifier()
                 costs = archive.costs()
             }
             is Screen.Note -> load {
@@ -534,6 +538,7 @@ class Model(private val archive: Archive) : ViewModel() {
     fun chooseNotifier(device: String?) = load {
         archive.setNotifier(device)
         notifier = archive.notifier()
+        defaultNotifier = archive.defaultNotifier()
     }
 
     /**
@@ -555,6 +560,7 @@ class Model(private val archive: Archive) : ViewModel() {
         peers = archive.peers()
         conditions = archive.health()
         notifier = archive.notifier()
+        defaultNotifier = archive.defaultNotifier()
     }
 
     /** Say whether the platform is currently letting this device see where it is. */

@@ -1074,6 +1074,7 @@ fun Health(
     peers: List<Peer>,
     costs: List<String>,
     notifier: String?,
+    defaultNotifier: String?,
     me: String,
     onNotifier: (String?) -> Unit,
     onRetire: (String) -> Unit,
@@ -1086,6 +1087,12 @@ fun Health(
     // again here as a sentence telling somebody where to find that button.
     val listed = conditions.filter { it.permission == null }
     val attention = listed.filter { it.tier == "attention" }
+    // Who actually speaks: the choice where there is one, the rule's pick
+    // otherwise. The rows said nothing at all for the default, so with nobody
+    // having chosen no device on this screen claimed to speak — while, before
+    // the rule existed, every one of them did.
+    val speaker = notifier ?: defaultNotifier
+    val speaks = if (notifier != null) "Says things when a cue fires" else "Says things when a cue fires, by default"
     val knowing = listed.filter { it.tier != "attention" }
 
     // Which device a retirement has been begun for, and not yet confirmed.
@@ -1167,7 +1174,7 @@ fun Health(
             Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                 Text("$me (this phone)", style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    if (notifier == me) "Says things when a cue fires" else "",
+                    if (speaker == me) speaks else "",
                     style = MaterialTheme.typography.labelSmall,
                 )
                 if (notifier != me) {
@@ -1191,12 +1198,10 @@ fun Health(
                     },
                     style = MaterialTheme.typography.labelSmall,
                 )
-                if (notifier == peer.key) {
-                    Text(
-                        "Says things when a cue fires",
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                } else {
+                if (speaker == peer.key) {
+                    Text(speaks, style = MaterialTheme.typography.labelSmall)
+                }
+                if (notifier != peer.key) {
                     TextButton({ onNotifier(peer.key) }) { Text("Notify me there") }
                 }
                 // When, never "fresh" or "stale" (§6.6). The device that
@@ -1228,7 +1233,8 @@ fun Health(
             // second destroys the distinction permanently.
             Text(
                 notifier?.let { "Chosen by you." }
-                    ?: "Nobody has chosen. Whichever device sees a cue says so.",
+                    ?: "Nobody has chosen, so the most recently paired device that can notify " +
+                    "says things — one that has gone quiet or cannot show notifications is skipped.",
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(top = 8.dp),
             )

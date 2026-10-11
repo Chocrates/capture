@@ -2557,14 +2557,30 @@ impl Archive {
     /// getter and a setter and no reader on any delivery path, so choosing a
     /// notifier changed nothing and both paired devices announced everything.
     ///
-    /// `true` when nobody has chosen, which is the rule rather than a stored
-    /// preference: one device, so it is this one.
+    /// When nobody has chosen, §2.4.1's default rule decides — the most
+    /// recently paired device that can notify — rather than every device
+    /// answering yes, which is what this did and why a paired phone and
+    /// desktop both announced everything.
     pub fn says_things_here(&self) -> Result<bool> {
         let me = capture_store::Identity::load(&self.paths)?;
         Ok(capture_store::notifier::speaks_here(
+            &self.paths,
             &self.read()?,
             &me.public().to_bytes(),
+            self.now_ms(),
         )?)
+    }
+
+    /// The device the default rule picks, by its short key, so a screen can
+    /// say who speaks when nobody has chosen rather than leave it implied.
+    pub fn default_notifier(&self) -> Result<String> {
+        let me = capture_store::Identity::load(&self.paths)?;
+        let key = capture_store::notifier::default_here(
+            &self.paths,
+            &me.public().to_bytes(),
+            self.now_ms(),
+        )?;
+        Ok(capture_core::id::short_key(&key))
     }
 
     /// Choose which device says things.

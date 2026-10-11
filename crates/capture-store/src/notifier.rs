@@ -45,6 +45,95 @@ pub fn chosen(state: &Store) -> Result<Option<String>> {
     state.setting(KEY)
 }
 
+/// What a device adds to the capabilities it reports when its notifications
+/// are blocked.
+///
+/// Negative on purpose. A positive `notify` would be absent from every older
+/// build's report, and the default rule would read each of those peers as
+/// unable to speak — the safe-looking choice that produces silence.
+pub const SILENT: &str = "silent";
+
+/// How long a peer may go unreached before the default rule stops counting on
+/// it (§2.4.1's grace window).
+///
+/// A day rather than minutes: a phone in a drawer for an afternoon should not
+/// hand alerts to the desktop and take them back again, and one unseen for a
+/// day is probably not where somebody will see them.
+pub const GRACE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// One device, as the default rule weighs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub key: [u8; 32],
+    /// When it first joined the roster. `None` sorts as the oldest, so a key
+    /// with no admission on record never outranks one that has one.
+    pub admitted: Option<capture_core::Hlc>,
+    /// Whether it last said it cannot show notifications.
+    pub silent: bool,
+    /// When this device last completed a round with it. Ignored for this
+    /// device itself.
+    pub reached: Option<u64>,
+}
+
+/// §2.4.1's default: the most recently paired device that can notify, with
+/// the next one standing in for any that has gone quiet.
+///
+/// Every device evaluates this the same way over the same roster, so they
+/// agree without anything being written — §8.9 forbids writing a default down
+/// as though somebody chose it. Where their views of who is reachable differ,
+/// two may both speak for a while; that duplicate is accepted, because the
+/// alternative failure is nobody speaking. And if nobody qualifies at all, this
+/// device speaks.
+pub fn default_notifier(candidates: &[Candidate], me: &[u8; 32], now: u64) -> [u8; 32] {
+    let mut order: Vec<&Candidate> = candidates.iter().collect();
+    // Most recent first; the key breaks a tie so every replica breaks it alike.
+    order.sort_by(|a, b| b.admitted.cmp(&a.admitted).then(a.key.cmp(&b.key)));
+    order
+        .into_iter()
+        .find(|c| {
+            !c.silent
+                && (c.key == *me || c.reached.is_some_and(|t| now.saturating_sub(t) <= GRACE_MS))
+        })
+        .map(|c| c.key)
+        .unwrap_or(*me)
+}
+
+/// The default rule's inputs for this device, gathered: the roster from the
+/// log, what each peer last reported and when it was last reached from ops,
+/// and this device's own silence.
+pub fn candidates(paths: &StorePaths, me: &[u8; 32]) -> Result<Vec<Candidate>> {
+    let log = crate::log::Log::open_read(&paths.events)?;
+    let mut roster = capture_core::roster::build(&log.all()?);
+    // A device does not apply a retirement of itself it did not issue (§5.3),
+    // so it does not drop itself from the order either.
+    roster.honour_self(me);
+    let ops = crate::ops::Ops::open_read(&paths.ops)?;
+    let reached = ops.peer_addresses()?;
+    let mut out = Vec::new();
+    for key in &roster.keys {
+        let silent = if key == me {
+            ops.get("alerts.silenced")?.as_deref() == Some("1")
+        } else {
+            ops.peer_observes(key)?.iter().any(|c| c == SILENT)
+        };
+        out.push(Candidate {
+            key: *key,
+            admitted: roster.admitted.get(key).copied(),
+            silent,
+            reached: reached
+                .iter()
+                .find(|p| &p.key == key)
+                .and_then(|p| p.last_seen),
+        });
+    }
+    Ok(out)
+}
+
+/// The device that speaks by default, as this device sees it now.
+pub fn default_here(paths: &StorePaths, me: &[u8; 32], now: u64) -> Result<[u8; 32]> {
+    Ok(default_notifier(&candidates(paths, me)?, me, now))
+}
+
 /// Whether this device is the one that says things.
 ///
 /// # Why this had to exist
@@ -53,15 +142,13 @@ pub fn chosen(state: &Store) -> Result<Option<String>> {
 /// delivery path consulted either. So the setting offered for choosing a
 /// notifier was inert: with a phone and a desktop paired, every moment was
 /// announced on both, and the control that exists to stop that did nothing
-/// when it was used. §2.4.1 routes time cues to the designated notifier, and
-/// only geofences and `git_branch` were actually honouring device routing —
-/// those by asking `observable`, which answers a different question.
+/// when it was used.
 ///
 /// # The default is a rule, not a choice
 ///
-/// `None` means nobody has chosen, and the answer is yes: one device, so it is
-/// this one. §8.9 turns on keeping that distinct from a stored preference, so
-/// this evaluates the rule rather than writing it down.
+/// When nobody has chosen, [`default_notifier`] decides. This answered "yes"
+/// on every device instead — the M1 rule, one device so it is this one — and
+/// with a phone and a desktop paired both announced every moment.
 ///
 /// # Matched on a prefix
 ///
@@ -69,24 +156,19 @@ pub fn chosen(state: &Store) -> Result<Option<String>> {
 /// shortened. Comparing a shortened key against a full one by equality would
 /// silently never match and silence the device that should speak — the failure
 /// this is meant to prevent, arriving by the other door.
-pub fn speaks_here(state: &Store, me: &[u8; 32]) -> Result<bool> {
-    let Some(who) = chosen(state)? else {
-        return Ok(true);
-    };
-    let who = who.trim().to_ascii_lowercase();
+pub fn speaks_here(paths: &StorePaths, state: &Store, me: &[u8; 32], now: u64) -> Result<bool> {
+    let who = chosen(state)?
+        .map(|w| w.trim().to_ascii_lowercase())
+        .unwrap_or_default();
     if who.is_empty() {
-        return Ok(true);
+        return Ok(default_here(paths, me, now)? == *me);
     }
     Ok(capture_core::id::hexed(me).starts_with(&who))
 }
 
-/// What to do when nobody has chosen.
-///
-/// One device, so it is this one. The rule is stated as a rule rather than
-/// written as a setting, and it stays that way until there is a second device
-/// to choose between — which is M3.
+/// The default rule, said in words.
 pub fn default_rule() -> &'static str {
-    "this device — the only one paired"
+    "the most recently paired device that can notify"
 }
 
 /// Whether a cue type can be observed here.
@@ -890,5 +972,88 @@ mod tests {
     #[test]
     fn an_unknown_cue_is_not_quietly_accepted() {
         assert!(!observable("telepathy"));
+    }
+}
+
+#[cfg(test)]
+mod default_rule {
+    use super::*;
+
+    const HOUR: u64 = 60 * 60 * 1000;
+    const NOW: u64 = 1_800_000_000_000;
+
+    fn at(wall: u64) -> Option<capture_core::Hlc> {
+        Some(capture_core::Hlc {
+            wall,
+            counter: 0,
+            origin: capture_core::Dev([0; 32]),
+        })
+    }
+
+    fn device(n: u8, admitted: u64, reached: Option<u64>) -> Candidate {
+        Candidate {
+            key: [n; 32],
+            admitted: at(admitted),
+            silent: false,
+            reached,
+        }
+    }
+
+    #[test]
+    fn of_two_paired_devices_only_the_newer_speaks() {
+        let desk = device(1, 100, Some(NOW - HOUR));
+        let phone = device(2, 200, Some(NOW - HOUR));
+        let both = [desk.clone(), phone.clone()];
+        // Both devices, each asking from its own seat, name the same one.
+        assert_eq!(default_notifier(&both, &desk.key, NOW), phone.key);
+        assert_eq!(default_notifier(&both, &phone.key, NOW), phone.key);
+    }
+
+    #[test]
+    fn a_silent_device_hands_over_to_the_next() {
+        let desk = device(1, 100, None);
+        let mut phone = device(2, 200, Some(NOW - HOUR));
+        phone.silent = true;
+        assert_eq!(
+            default_notifier(&[desk.clone(), phone], &desk.key, NOW),
+            desk.key
+        );
+    }
+
+    #[test]
+    fn a_device_gone_quiet_hands_over_and_one_never_reached_is_not_counted_on() {
+        let desk = device(1, 100, None);
+        let stale = device(2, 200, Some(NOW - 25 * HOUR));
+        assert_eq!(
+            default_notifier(&[desk.clone(), stale], &desk.key, NOW),
+            desk.key
+        );
+        // Paired a minute ago and never synced: the device that can see the
+        // moment keeps saying it until a round has actually happened.
+        let fresh = device(3, 300, None);
+        assert_eq!(
+            default_notifier(&[desk.clone(), fresh], &desk.key, NOW),
+            desk.key
+        );
+    }
+
+    #[test]
+    fn with_nobody_qualifying_this_device_speaks() {
+        let mut me = device(1, 100, None);
+        me.silent = true;
+        let gone = device(2, 200, None);
+        assert_eq!(default_notifier(&[me.clone(), gone], &me.key, NOW), me.key);
+    }
+
+    #[test]
+    fn an_older_build_that_reports_nothing_is_not_read_as_silent() {
+        // `silent` is the token, and its absence means able. A positive
+        // `notify` would have skipped every peer that had not upgraded.
+        let desk = device(1, 100, None);
+        let phone = device(2, 200, Some(NOW));
+        assert_eq!(
+            default_notifier(&[desk.clone(), phone.clone()], &desk.key, NOW),
+            phone.key
+        );
     }
 }

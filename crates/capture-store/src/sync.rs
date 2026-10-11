@@ -131,6 +131,12 @@ impl Archive for StoreArchive<'_, '_> {
         .into_iter()
         .filter(|c| crate::notifier::observable(c))
         .map(String::from)
+        // And whether it can speak at all, so the default notifier skips a
+        // device that would say nothing (§2.4.1).
+        .chain(
+            (self.ops.get("alerts.silenced").ok().flatten().as_deref() == Some("1"))
+                .then(|| crate::notifier::SILENT.to_string()),
+        )
         .collect()
     }
 

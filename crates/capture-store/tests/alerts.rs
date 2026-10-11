@@ -617,7 +617,8 @@ fn only_the_chosen_device_speaks() {
     // Nobody has chosen. The rule applies — one device, so it is this one —
     // and §8.9 means that is evaluated rather than written down.
     assert!(
-        capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        capture_store::notifier::speaks_here(&paths, &reading(&paths), &key, 1_800_000_000_000)
+            .unwrap(),
         "an unconfigured device must still speak"
     );
 
@@ -627,7 +628,8 @@ fn only_the_chosen_device_speaks() {
     capture_store::mutate::set_setting(&paths, capture_store::notifier::KEY, Some(&mine)).unwrap();
     settle(&paths);
     assert!(
-        capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        capture_store::notifier::speaks_here(&paths, &reading(&paths), &key, 1_800_000_000_000)
+            .unwrap(),
         "the device that was chosen is the device that speaks"
     );
 
@@ -640,7 +642,8 @@ fn only_the_chosen_device_speaks() {
     .unwrap();
     settle(&paths);
     assert!(
-        !capture_store::notifier::speaks_here(&reading(&paths), &key).unwrap(),
+        !capture_store::notifier::speaks_here(&paths, &reading(&paths), &key, 1_800_000_000_000)
+            .unwrap(),
         "a device that was not chosen stays quiet — otherwise choosing one \
          changes nothing and both announce everything"
     );

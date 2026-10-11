@@ -417,6 +417,7 @@ private fun App(
                     model.peers,
                     model.costs,
                     model.notifier,
+                    model.defaultNotifier,
                     model.me,
                     onNotifier = model::chooseNotifier,
                     onRetire = model::retire,

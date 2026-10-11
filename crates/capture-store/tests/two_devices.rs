@@ -1227,3 +1227,75 @@ fn a_merge_crosses_and_either_spelling_arrives_at_the_survivor() {
         );
     }
 }
+
+/// What a round leaves behind about the peer, as the daemon and the phone
+/// record it after one. `reconcile` itself does not; `dial` and `answer` do.
+fn reached_each_other(a: &Device, b: &Device, at: u64) {
+    let (ak, bk) = (
+        a.identity().public().to_bytes(),
+        b.identity().public().to_bytes(),
+    );
+    a.ops().peer_answered(&bk, at).unwrap();
+    b.ops().peer_answered(&ak, at).unwrap();
+}
+
+/// Whether a device would say something now, as every delivery path asks.
+fn speaks(d: &Device, at: u64) -> bool {
+    capture_store::notifier::speaks_here(&d.paths, &d.read(), &d.identity().public().to_bytes(), at)
+        .unwrap()
+}
+
+/// §2.4.1's default notifier, across two archives that have really paired.
+///
+/// Before this, `speaks_here` answered yes whenever nobody had chosen — the
+/// M1 rule — so a paired phone and desktop each announced every moment.
+#[test]
+fn with_nobody_chosen_exactly_one_paired_device_speaks() {
+    let a = Device::new("a-speaks");
+    let b = Device::new("b-speaks");
+    pair(&a, &b);
+    sync(&a, &b);
+    reached_each_other(&a, &b, AT);
+
+    let (sa, sb) = (speaks(&a, AT), speaks(&b, AT));
+    assert!(sa != sb, "both or neither spoke: a={sa} b={sb}");
+
+    // The one that speaks is the one that joined the roster last, and both
+    // devices, asking from their own seats, name the same one.
+    let me_a = a.identity().public().to_bytes();
+    let order = capture_core::roster::build(
+        &capture_store::log::Log::open_read(&a.paths.events)
+            .unwrap()
+            .all()
+            .unwrap(),
+    )
+    .admitted;
+    let newest = *order.iter().max_by_key(|(_, h)| **h).unwrap().0;
+    assert_eq!(sa, newest == me_a);
+
+    // The speaker's notifications are switched off. It says so in the next
+    // round, and the other device takes over.
+    let (speaker, other) = if sa { (&a, &b) } else { (&b, &a) };
+    speaker.ops().set("alerts.silenced", "1").unwrap();
+    sync(other, speaker);
+    reached_each_other(&a, &b, AT);
+    assert!(
+        !speaks(speaker, AT),
+        "a silent device still claims to speak"
+    );
+    assert!(speaks(other, AT), "nobody took over from a silent device");
+
+    // Back on, and back again.
+    speaker.ops().set("alerts.silenced", "0").unwrap();
+    sync(other, speaker);
+    assert!(speaks(speaker, AT));
+    assert!(!speaks(other, AT));
+
+    // A speaker unreached for more than a day is not counted on: the other
+    // speaks for itself rather than trusting a device it cannot see.
+    let later = AT + 25 * 60 * 60 * 1000;
+    assert!(
+        speaks(other, later),
+        "a device gone quiet left nobody speaking"
+    );
+}
