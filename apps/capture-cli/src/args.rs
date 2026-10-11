@@ -459,6 +459,21 @@ where
         return Err(Bad::Empty);
     };
 
+    // Asking for help is never asking to do the thing. `capture pair --help`
+    // opened a pairing window on a real archive, because `pair` treated every
+    // word that was not its code as nothing. Checked here, ahead of every
+    // command, so a command that forgets to look cannot be the one that acts.
+    //
+    // Not after `--`, and never for `+`: there the words are the note's.
+    if first != "+"
+        && args[1..]
+            .iter()
+            .take_while(|a| *a != "--")
+            .any(|a| a == "--help" || a == "-h")
+    {
+        return Ok(Command::Help);
+    }
+
     match first.as_str() {
         "+" => Ok(Command::Capture(source(&args[1..]))),
         "init" => flagless("init", &args[1..], Command::Init),
@@ -1170,10 +1185,21 @@ where
         }
         "pair" => {
             let rest = &args[1..];
-            let at = rest
+            let at_index = rest.iter().position(|a| a == "--at");
+            // Opening a window another device can join is not something to do
+            // on a mistyped flag.
+            let is_at_value = |i: usize| at_index.is_some_and(|at| i == at + 1);
+            if let Some((_, flag)) = rest
                 .iter()
-                .position(|a| a == "--at")
-                .and_then(|i| rest.get(i + 1).cloned());
+                .enumerate()
+                .find(|(i, a)| a.starts_with('-') && *a != "--at" && !is_at_value(*i))
+            {
+                return Err(Bad::UnknownFlag {
+                    command: "pair".into(),
+                    flag: flag.clone(),
+                });
+            }
+            let at = at_index.and_then(|i| rest.get(i + 1).cloned());
             let code = rest.iter().find(|a| !a.starts_with('-')).cloned();
             let code = match (&code, &at) {
                 // `--at`'s value is not the code.
@@ -2107,6 +2133,47 @@ mod tests {
         for f in ["version", "--version", "-V"] {
             assert_eq!(p(&[f]), Ok(Command::Version));
         }
+    }
+
+    /// `capture pair --help` opened a real pairing window on a real archive,
+    /// because `pair` read anything that was not its code as nothing at all.
+    /// A request for help must never be a request to do the thing.
+    #[test]
+    fn help_after_a_command_is_help_not_the_command() {
+        for cmd in ["pair", "retire", "export", "restore", "split", "status"] {
+            for f in ["--help", "-h"] {
+                assert_eq!(p(&[cmd, f]), Ok(Command::Help), "{cmd} {f}");
+            }
+        }
+        assert_eq!(p(&["pair", "123456", "--help"]), Ok(Command::Help));
+    }
+
+    /// Except where the words are the note's.
+    #[test]
+    fn help_inside_a_capture_is_text() {
+        assert_eq!(
+            p(&["+", "--", "-h"]),
+            Ok(Command::Capture(source(&["-h".to_string()])))
+        );
+    }
+
+    #[test]
+    fn pair_refuses_a_flag_it_does_not_know() {
+        assert!(p(&["pair", "--hepl"]).is_err());
+        assert_eq!(
+            p(&["pair", "123456", "--at", "10.0.0.2:41823"]),
+            Ok(Command::Pair {
+                code: Some("123456".into()),
+                at: Some("10.0.0.2:41823".into())
+            })
+        );
+        assert_eq!(
+            p(&["pair"]),
+            Ok(Command::Pair {
+                code: None,
+                at: None
+            })
+        );
     }
 
     #[test]
