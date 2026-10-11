@@ -97,7 +97,13 @@ fun Actions(note: NoteSummary, pending: Pending?, model: Model) {
         if (note.kind != "note") {
             TextButton({ model.setKind(note.slug, NoteKind.NOTE) }) { Text("Just a note") }
         }
-        if (note.mutedUntilMs == null) {
+        // In force, not merely recorded: a mute whose end has passed is still
+        // a field on the note, and this hid "Mute" behind it for good — while
+        // nothing anywhere offered "Unmute", so a phone could suppress a note
+        // and never bring it back.
+        if (note.muted) {
+            TextButton({ model.unmute(note.slug) }) { Text("Unmute") }
+        } else {
             TextButton({ model.mute(note.slug) }) { Text("Mute") }
         }
         if (note.redactionQueued) {

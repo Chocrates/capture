@@ -201,6 +201,10 @@ pub struct NoteSummary {
     pub pinned: bool,
     /// Muted until this moment, where it is muted at all.
     pub muted_until_ms: Option<i64>,
+    /// Whether a mute is in force now. Separate from `muted_until_ms` because
+    /// an end that has passed is still recorded, and deciding which is which
+    /// is a comparison of times the surface must not make for itself.
+    pub muted: bool,
     /// Destroyed. The content is gone and is not recoverable.
     pub redacted: bool,
     /// A destruction has been ordered and not yet carried out.
@@ -933,7 +937,7 @@ impl Archive {
         store
             .timeline(limit as usize)?
             .into_iter()
-            .map(|n| read_as(&store, n))
+            .map(|n| read_as(&store, n, self.now_ms()))
             .collect()
     }
 
@@ -944,7 +948,7 @@ impl Archive {
             .resolve(&name)?
             .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
         let row = store.note(&tgt)?.ok_or(CaptureError::NotFound { name })?;
-        read_as(&store, row)
+        read_as(&store, row, self.now_ms())
     }
 
     /// Full-text search.
@@ -962,7 +966,7 @@ impl Archive {
                 break;
             }
             if let Some(n) = store.note(&tgt)? {
-                out.push(summarise(n));
+                out.push(summarise(n, self.now_ms()));
             }
         }
         Ok(out)
@@ -1509,6 +1513,17 @@ impl Archive {
     pub fn mute(&self, name: String) -> Result<()> {
         let _w = self.write_lock()?;
         Ok(capture_store::mutate::mute_note(&self.paths, &name)?)
+    }
+
+    /// Lift a note's mute. §2.6: "reversible from any device" — the phone
+    /// could mute and only a terminal could take it back.
+    pub fn unmute(&self, name: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::unmute_note(
+            &self.paths,
+            &name,
+            self.now_ms(),
+        )?)
     }
 
     /// Put a page under another, or back at the top with `None`.
@@ -2724,13 +2739,13 @@ impl Archive {
     ) -> Result<Entity> {
         let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
         let backing = match row.backing {
-            Some(tgt) => store.note(&tgt)?.map(summarise),
+            Some(tgt) => store.note(&tgt)?.map(|n| summarise(n, now)),
             None => None,
         };
         let notes = store
             .entity_notes(&row.ent, now)?
             .into_iter()
-            .map(summarise)
+            .map(|n| summarise(n, now))
             .collect();
         Ok(Entity {
             display: row.display,
@@ -2860,10 +2875,11 @@ fn when(ms: u64) -> String {
 fn read_as(
     store: &capture_store::projection::Store,
     n: capture_store::projection::NoteRow,
+    now: u64,
 ) -> Result<NoteSummary> {
     let tgt = n.tgt;
     let tag = store.list_tag_of(&tgt)?;
-    let mut s = summarise(n);
+    let mut s = summarise(n, now);
 
     if let Some(p) = store.promotion_of(&tgt)? {
         s.kind = p.kind;
@@ -2940,7 +2956,8 @@ fn split_mention_or(mention: &str, default_kind: &'static str) -> Result<(&'stat
     Ok((kind, value))
 }
 
-fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
+fn summarise(n: capture_store::projection::NoteRow, now: u64) -> NoteSummary {
+    let muted = n.is_muted(now);
     let (day, at) = rendered(n.created.0 as i64, n.tz.as_deref());
     NoteSummary {
         slug: n.slug,
@@ -2951,6 +2968,7 @@ fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
         at,
         pinned: n.pinned,
         muted_until_ms: n.muted_until.map(|t| t as i64),
+        muted,
         redacted: n.redacted_at.is_some(),
         redaction_queued: n.redaction_queued,
         // Filled by the caller, which has the store open. Left absent here

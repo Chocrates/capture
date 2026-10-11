@@ -1243,6 +1243,13 @@ function actions(n, into = view, promotion = null) {
       toast("Muted. It stays in the timeline and leaves search.");
       showNote(n.slug);
     });
+  } else {
+    // The way back, from the same place. §2.6: reversible from any device.
+    add("Unmute", async () => {
+      await call("unmute", { name: n.slug });
+      toast("No longer muted. It appears in search again.");
+      showNote(n.slug);
+    });
   }
 
   if (!n.redacted) add("Destroy", () => confirmRedaction(n), "danger");

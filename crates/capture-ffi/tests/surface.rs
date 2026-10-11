@@ -214,6 +214,19 @@ fn every_mutation_is_reachable_from_the_phone() {
         a.note(slug.clone()).unwrap().muted_until_ms.is_some(),
         "muting is available without reaching for a laptop"
     );
+    assert!(a.note(slug.clone()).unwrap().muted);
+
+    // And back, from the same place. §2.6: reversible from any device — the
+    // phone could mute and only a terminal could undo it.
+    a.unmute(slug.clone()).unwrap();
+    assert!(
+        !a.note(slug.clone()).unwrap().muted,
+        "unmuting from the phone did not lift the mute"
+    );
+    assert!(
+        a.unmute(slug.clone()).is_err(),
+        "unmuting a note that is not muted wrote something anyway"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

@@ -582,24 +582,12 @@ pub fn unmute(paths: StorePaths, what: &Muted) -> Result<()> {
     let now = now_ms().max(0) as u64;
 
     let (scope, described) = match what {
+        // Refused where nothing is muted — the store's rule, shared with the
+        // phone and the desktop app.
         Muted::Note(name) => {
-            // Refused where the answer is knowable. A note carries its mute as
-            // a field, so "this was not muted" is a true thing to say rather
-            // than a guess.
-            let tgt = {
-                let s = crate::read::session(paths.clone())?;
-                let tgt = find(&s, name)?;
-                let muted = s.state.note(&tgt)?.and_then(|n| n.muted_until);
-                match muted {
-                    Some(0) => {}
-                    Some(ends) if ends > now => {}
-                    _ => {
-                        return Err(Error::NotFound(format!("{name} is not muted")));
-                    }
-                }
-                tgt
-            };
-            (MuteScope::Note(tgt), name.clone())
+            capture_store::mutate::unmute_note(&paths, name, now)?;
+            lifted(name);
+            return Ok(());
         }
 
         // The three coarser scopes are accepted without checking, because the

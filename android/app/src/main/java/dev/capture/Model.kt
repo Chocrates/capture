@@ -396,6 +396,9 @@ class Model(private val archive: Archive) : ViewModel() {
 
     fun mute(name: String) = after(name) { archive.mute(name) }
 
+    /** Lift it again — from the phone, not only from a terminal (§2.6). */
+    fun unmute(name: String) = after(name) { archive.unmute(name) }
+
     fun setDone(name: String, done: Boolean) = after(name) { archive.setDone(name, done) }
 
     /**

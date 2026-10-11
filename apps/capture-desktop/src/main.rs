@@ -58,6 +58,7 @@ fn main() {
             ipc::set_alias,
             ipc::pin,
             ipc::mute,
+            ipc::unmute,
             ipc::resolve,
             ipc::redact,
             ipc::cancel_redaction,

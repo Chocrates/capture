@@ -226,6 +226,36 @@ pub fn mute_note(paths: &StorePaths, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Lift one note's mute.
+///
+/// A `MUTE` whose end is `now`, because the fold already applies mutes newest
+/// first and reads an elapsed end as not muted — so lifting is an ordinary
+/// event, nothing is removed, and no new kind is needed.
+///
+/// Here rather than in each surface. The command line held the only copy,
+/// so a note muted from the phone or the desktop app could be muted there and
+/// lifted nowhere but a terminal — §2.6 says "reversible from any device".
+///
+/// Refused where nothing is muted: a note carries its mute as a field, so
+/// "this was not muted" is a true thing to say rather than a guess, and an
+/// event that changes nothing is noise in a log kept for ever.
+pub fn unmute_note(paths: &StorePaths, name: &str, now: u64) -> Result<()> {
+    let mut s = Session::open_at(paths.clone(), now)?;
+    let tgt = find(&s, name)?;
+    let in_force = s.state.note(&tgt)?.is_some_and(|n| n.is_muted(now));
+    if !in_force {
+        return Err(Error::NotFound(format!("{name} is not muted")));
+    }
+    s.append(Kind::MUTE, Some(tgt), None, |nonce| {
+        encode(&MuteBody {
+            nonce,
+            scope: MuteScope::Note(tgt),
+            until: Some(now),
+        })
+    })?;
+    Ok(())
+}
+
 /// Suppress everything matching a rule.
 pub fn mute_scope(paths: &StorePaths, scope: MuteScope, until: Option<u64>) -> Result<()> {
     let mut s = Session::open(paths.clone())?;

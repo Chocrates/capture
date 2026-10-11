@@ -1716,6 +1716,14 @@ pub fn mute(name: String) -> std::result::Result<(), String> {
     wire((|| capture_store::mutate::mute_note(&paths()?, &name))())
 }
 
+/// Lift a note's mute, which this window could set and not undo.
+#[tauri::command]
+pub fn unmute(name: String) -> std::result::Result<(), String> {
+    wire((|| {
+        capture_store::mutate::unmute_note(&paths()?, &name, now_ms())
+    })())
+}
+
 #[tauri::command]
 pub fn resolve(name: String) -> std::result::Result<usize, String> {
     // How many competing versions were dismissed, so the interface can say so

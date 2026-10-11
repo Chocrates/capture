@@ -189,6 +189,23 @@ fn the_window_answers_what_the_store_holds() {
         "a page could not be put back at the top"
     );
 
+    // ------------------------------------------------------------------ mute
+    //
+    // §2.6: reversible from any device. This window could mute a note and had
+    // no way to bring it back — `unmute` existed only in the terminal.
+    let quiet = capture(&paths, "something to stop resurfacing");
+    ipc::mute(quiet.clone()).expect("muting answers");
+    assert!(ipc::note(quiet.clone()).unwrap().note.muted);
+    ipc::unmute(quiet.clone()).expect("unmuting answers");
+    assert!(
+        !ipc::note(quiet.clone()).unwrap().note.muted,
+        "unmuting from the window did not lift the mute"
+    );
+    assert!(
+        ipc::unmute(quiet).is_err(),
+        "unmuting a note that is not muted was accepted"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
