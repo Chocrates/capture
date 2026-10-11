@@ -109,3 +109,50 @@ fn unread(paths: &capture_store::StorePaths) -> usize {
         Err(_) => usize::MAX,
     }
 }
+
+/// The daemon's own rounds are written down, including the ones that find
+/// nobody to dial.
+///
+/// Only the phone's round recorded that it ran. A desktop daemon ticking every
+/// thirty seconds — and answering the phone in between — left `capture status`
+/// saying sync had never run on the device, which is the one message that
+/// sends somebody to start a daemon that is already running.
+#[test]
+fn a_round_that_found_nobody_is_still_a_round_that_ran() {
+    let dir = std::env::temp_dir().join(format!("capture-syncd-ran-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = Store(dir.clone());
+    let paths = capture_store::StorePaths::under(dir.clone());
+    capture_store::store::create(&paths, 1_700_000_000_000).unwrap();
+    // Opened once, as `capture init` leaves an archive: `create` alone writes
+    // the parts and not the log they start from.
+    drop(capture_store::session::Session::open_for_capture(paths.clone()).unwrap());
+    let ran = || {
+        capture_store::ops::Ops::open_read(&paths.ops)
+            .ok()
+            .and_then(|o| o.last_round().ok().flatten())
+    };
+    assert_eq!(ran(), None, "a precondition");
+
+    let port = 40_000 + ((std::process::id() + 7) % 20_000) as u16;
+    let _daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_capture-syncd"))
+            .env("CAPTURE_HOME", &dir)
+            .env("CAPTURE_SYNC_PORT", port.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the daemon starts"),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if ran().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(store);
+    panic!("the daemon ticked and never recorded that a round ran");
+}

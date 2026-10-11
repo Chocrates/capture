@@ -50,8 +50,33 @@ use capture_sync::mdns::Beacon;
 /// reconciling with a peer whose address is already known is the fallback for
 /// every network that blocks multicast, and it is also how the two-device
 /// tests drive a sync without a network to discover anything on.
+///
+/// # Recorded, however it ends
+///
+/// That a round ran is the only evidence the daemon is running at all, and
+/// `bounded` — the phone's round — was the only thing that wrote it down. So a
+/// desktop whose daemon answered the phone every twenty minutes went on saying
+/// "sync has never run on this device, so nothing here exists anywhere else",
+/// beside a peer row reading "last reached 54s ago". Every exit records it now,
+/// the early ones included: finding nobody to dial is a round that ran.
 #[cfg(feature = "mdns")]
 pub fn tick(
+    paths: &StorePaths,
+    identity: &Identity,
+    beacon: &mut Option<Beacon>,
+    round: u64,
+    port: u16,
+    now: &dyn Fn() -> u64,
+    spent: &dyn Fn() -> bool,
+) -> Result<()> {
+    let result = tick_once(paths, identity, beacon, round, port, now, spent);
+    let trouble = result.as_ref().err().map(|e| e.to_string());
+    Ops::open(&paths.ops)?.round_ran(now(), beacon.is_some(), trouble.as_deref())?;
+    result
+}
+
+#[cfg(feature = "mdns")]
+fn tick_once(
     paths: &StorePaths,
     identity: &Identity,
     beacon: &mut Option<Beacon>,
@@ -252,7 +277,12 @@ pub fn answer(
     // Alive, but not necessarily reachable at the address it dialled from —
     // that is an ephemeral source port. Where to call it back comes from the
     // advertisement, or from a remembered address, not from this.
-    Ops::open(&paths.ops)?.peer_answered(&member, now)?;
+    let ops = Ops::open(&paths.ops)?;
+    ops.peer_answered(&member, now)?;
+    // A round, from this side too. Only *when*: whether discovery was up is a
+    // fact about this device's own rounds, and an inbound call says nothing
+    // about it.
+    ops.round_answered(now)?;
     tracing::info!(peer = %short(&member), received = done.received, "answered a peer");
     Ok(())
 }

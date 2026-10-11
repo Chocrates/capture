@@ -1299,3 +1299,46 @@ fn with_nobody_chosen_exactly_one_paired_device_speaks() {
         "a device gone quiet left nobody speaking"
     );
 }
+
+/// A device that is only ever dialled still knows sync is running.
+///
+/// The desktop answers the phone — the phone dials, and has no address to be
+/// dialled at — and `answer` recorded nothing about it. So the desktop said
+/// "sync has never run on this device, so nothing here exists anywhere else"
+/// with the phone's notes already on it.
+#[test]
+fn answering_a_peer_is_a_round_that_ran() {
+    let a = Device::new("a-answers");
+    let b = Device::new("b-answers");
+    pair(&a, &b);
+    assert_eq!(
+        capture_store::syncstate::sync_state(&b.ops(), 1, AT).unwrap(),
+        capture_store::syncstate::SyncState::NeverRan,
+        "a precondition"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let b_paths = b.paths.clone();
+    let b_id = b.identity();
+    let answering = std::thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        capture_store::round::answer(&b_paths, &b_id, stream, AT, &|| false).expect("b answered");
+    });
+    let tcp = Tcp::new(TcpStream::connect(addr).unwrap()).unwrap();
+    let mut secure = Secure::initiate(
+        tcp,
+        &a.identity().noise_secret(),
+        &b.identity().noise_public(),
+    )
+    .expect("handshook");
+    capture_store::round::reconcile(&a.paths, &mut secure, AT, true, &|| false).unwrap();
+    answering.join().unwrap();
+
+    assert_eq!(b.ops().last_round().unwrap(), Some(AT));
+    assert_ne!(
+        capture_store::syncstate::sync_state(&b.ops(), 1, AT).unwrap(),
+        capture_store::syncstate::SyncState::NeverRan,
+        "answering a peer did not count as sync running"
+    );
+}

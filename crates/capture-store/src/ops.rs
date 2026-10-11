@@ -882,6 +882,15 @@ impl Ops {
         Ok(())
     }
 
+    /// Record that a peer completed a round with this device by dialling in.
+    ///
+    /// Moves only the time. Whether multicast was available and what went
+    /// wrong are facts about a round this device ran, and an inbound one
+    /// overwriting them would erase the trouble report of the last real one.
+    pub fn round_answered(&self, at: u64) -> Result<()> {
+        self.set(ROUND_AT, &at.to_string())
+    }
+
     /// When a round last ran, whatever it achieved.
     pub fn last_round(&self) -> Result<Option<u64>> {
         Ok(self.get(ROUND_AT)?.and_then(|v| v.parse().ok()))
