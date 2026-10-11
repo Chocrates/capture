@@ -21,15 +21,21 @@
 # for the same reason — but argued for harder than the others, because §1.2 is
 # explicit that replication is not backup and the failure it covers is the one
 # nothing else does.
+#
+# `--with-sync` installs a systemd user service that runs the sync daemon from
+# login. Opt-in because it opens a listening socket, and on one device it has
+# nothing to do.
 
 set -eu
 
 WITH_CHORD=0
 WITH_EXPORT=0
+WITH_SYNC=0
 for arg in "$@"; do
     case "$arg" in
         --with-chord) WITH_CHORD=1 ;;
         --with-export) WITH_EXPORT=1 ;;
+        --with-sync) WITH_SYNC=1 ;;
         *) printf 'unknown option: %s\n' "$arg" >&2; exit 1 ;;
     esac
 done
@@ -148,17 +154,54 @@ if [ "$WANT_DESKTOP" = 1 ]; then
 fi
 
 step "Syncing"
-say "  Installed but not started. Sync is opt-in and does nothing on one device."
-say ""
-say "  To add a second device, on this one:"
-say "      capture pair                   shows a code; type it on the other device"
-say ""
-say "  Then run the daemon on each:"
-say "      capture-syncd                  finds paired devices and reconciles"
-say ""
-say "  Not started from login by default. It opens a listening socket, and that"
-say "  is a thing to switch on deliberately rather than to inherit from having"
-say "  run an installer."
+if [ "$WITH_SYNC" = 1 ]; then
+    UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$UNITS"
+
+    # A service rather than an autostart entry: the daemon has no window, and
+    # systemd restarts it if it dies, which an autostart entry never does. A
+    # daemon that quietly stopped is the one the desktop's "sync has not run"
+    # condition exists to catch, and better caught by not stopping.
+    cat > "$UNITS/capture-syncd.service" <<UNIT
+[Unit]
+Description=Reconcile the capture archive with paired devices
+
+[Service]
+Environment=CAPTURE_HOME=$CAPTURE_HOME
+ExecStart=$BIN/capture-syncd
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+UNIT
+
+    systemctl --user daemon-reload 2>/dev/null || true
+    # Restarted rather than started, so a re-run picks up new binaries.
+    systemctl --user enable capture-syncd.service 2>/dev/null || true
+    systemctl --user restart capture-syncd.service 2>/dev/null || true
+
+    say "  Running from login:"
+    say "      systemctl --user status capture-syncd"
+    say "      systemctl --user disable --now capture-syncd   to stop"
+    say ""
+    say "  To add a second device, on this one:"
+    say "      capture pair                   shows a code; type it on the other device"
+else
+    say "  Installed but not started. Sync is opt-in and does nothing on one device."
+    say ""
+    say "  To add a second device, on this one:"
+    say "      capture pair                   shows a code; type it on the other device"
+    say ""
+    say "  Then run the daemon on each:"
+    say "      capture-syncd                  finds paired devices and reconciles"
+    say ""
+    say "  Not started from login by default. It opens a listening socket, and that"
+    say "  is a thing to switch on deliberately rather than to inherit from having"
+    say "  run an installer. To have it run from login:"
+    say ""
+    say "      ./install.sh --with-sync"
+fi
 
 step "Keeping a copy"
 say "  Pairing a second device is not a backup. §1.2 is explicit about it:"
