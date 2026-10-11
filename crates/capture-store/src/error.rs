@@ -63,6 +63,16 @@ pub enum Error {
     /// lost by the round ending where it did.
     #[error("{0}")]
     Unreachable(String),
+
+    /// The projection was built by an older build and is the wrong shape to
+    /// read. Not damage: it is derived, and anything that opens the archive
+    /// for writing rebuilds it.
+    #[error(
+        "this archive's index was built by an older version of capture (shape {found}, \
+         and this one reads {want}).\nAnything that writes rebuilds it:  capture settle",
+        want = crate::projection::PROJECTION_SCHEMA
+    )]
+    Stale { found: u32 },
 }
 
 impl Error {
@@ -79,6 +89,8 @@ impl Error {
             // network. `capture sync` exits non-zero so a script can retry,
             // which is the same code an unreachable peer already produced.
             Error::Unreachable(_) => ExitCode::Usage,
+            // The environment again, and fixed by running something.
+            Error::Stale { .. } => ExitCode::Usage,
         }
     }
 }

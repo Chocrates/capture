@@ -198,3 +198,53 @@ fn verifying_does_not_need_the_writer() {
         "verify must run while another process writes: {said}"
     );
 }
+
+/// A projection an older build wrote is refused by name, and a write fixes it.
+///
+/// Found on the real archive after an install: `capture status` answered
+/// "storage: no such table: late_cancels", because the projection on disk was
+/// built by a build that predated the table. Not damage — it is derived — but
+/// a read cannot rebuild it, so the message has to say what will.
+#[test]
+#[ignore = "needs the sqlite3 shell; run with --ignored"]
+fn a_projection_from_an_older_build_says_how_to_fix_it() {
+    let s = Store::new("stale");
+    // The newest generation, as an older build would have left it.
+    let state = std::fs::read_dir(s.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("state.") && n.ends_with(".db"))
+        })
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .expect("a projection exists");
+    let ok = Command::new("sqlite3")
+        .arg(&state)
+        .arg("UPDATE meta SET v = '1' WHERE k = 'schema';")
+        .status()
+        .expect("sqlite3 is available");
+    assert!(ok.success());
+
+    let out = Command::new(capture())
+        .args(["timeline"])
+        .env("CAPTURE_HOME", s.path())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a stale projection was read as current"
+    );
+    assert!(said.contains("older version"), "{said}");
+    assert!(
+        said.contains("capture settle"),
+        "it should name the fix: {said}"
+    );
+    assert!(!said.contains("no such table"), "{said}");
+
+    // And the fix it names works.
+    s.run(&["settle"]);
+    assert!(s.run(&["timeline"]).contains("revised numbers"));
+}

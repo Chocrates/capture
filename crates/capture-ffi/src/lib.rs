@@ -648,7 +648,7 @@ impl Archive {
             //
             // Here rather than in `read`, which runs per query: this costs a
             // full fold and fires once per upgrade.
-            let stale = capture_store::projection::current(&paths)
+            let stale = capture_store::projection::open_current(&paths)
                 .and_then(|store| store.is_stale())
                 .unwrap_or(false);
 

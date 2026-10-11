@@ -4211,6 +4211,25 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
 /// one and the crash tests read the one from before a failure, and neither
 /// should go through here.
 pub fn current(paths: &crate::StorePaths) -> Result<Store> {
+    let store = open_current(paths)?;
+    // Refused by name rather than read. A projection built by an older build
+    // lacks whatever tables were added since, and the first query against one
+    // failed as "storage: no such table: late_cancels" — on the real archive,
+    // the first time it was read after an install. A read cannot rebuild it
+    // (§8.8 keeps reads off the writer), so the most it can do is say what
+    // will.
+    let found = store.schema_version()?;
+    if found != PROJECTION_SCHEMA {
+        return Err(crate::Error::Stale { found });
+    }
+    Ok(store)
+}
+
+/// The current generation, whatever shape it is.
+///
+/// For the caller that is about to ask whether it is stale and rebuild it if
+/// so. Everything else wants [`current`], which refuses a stale one.
+pub fn open_current(paths: &crate::StorePaths) -> Result<Store> {
     let generation = crate::ops::Ops::open_read(&paths.ops)?.generation()?;
     Store::open_read(&generation_path(&paths.state, generation))
 }
