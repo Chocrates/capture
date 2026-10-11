@@ -539,6 +539,16 @@ pub struct Projection {
     /// able to beat an earlier bind, and the `Hlc` is what decides between them.
     #[n(7)]
     pub entity_backing: BTreeMap<EntId, (Option<EventId>, Hlc)>,
+    /// Tag mutes, carried whole for the notes that tagged themselves inline.
+    ///
+    /// The fold applies a tag mute to notes in the tag OR-Set, which only
+    /// `capture tag` writes. A `#noise` typed into a capture is a mention in
+    /// the text, and finding it needs `capture_parse` — which depends on this
+    /// crate. So the rule travels on, as entity mutes do, and the store applies
+    /// it where the mentions are known. Without this the ordinary way to tag
+    /// something was the one way muting the tag did not reach.
+    #[n(8)]
+    pub tag_mutes: Vec<(String, Option<u64>, Hlc)>,
 }
 
 impl Projection {
@@ -1740,6 +1750,9 @@ fn apply_mutes(proj: &mut Projection, mutes: &[(MuteScope, Option<u64>, Hlc)]) {
                         n.muted_at = Some(*at);
                     }
                 }
+                // And on, for whichever notes wrote `#tag` in their text. See
+                // `Projection::tag_mutes`.
+                proj.tag_mutes.push((tag.clone(), value, *at));
             }
             MuteScope::DateRange(from, to) => {
                 // Floating dates, compared against the day the note was

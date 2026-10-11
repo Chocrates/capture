@@ -1813,3 +1813,44 @@ fn help_and_version_answer_however_they_are_asked() {
         format!("capture {}", env!("CARGO_PKG_VERSION"))
     );
 }
+
+/// Muting a tag reaches the notes that wrote it, not only those given it.
+///
+/// `#noise` typed into a capture is a mention in the text; `capture tag` puts
+/// a note in the tag's set. The fold applied a tag mute to the second only, so
+/// the ordinary way to tag something was the one way muting the tag missed —
+/// while the tag's own page counted both as carrying it.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn muting_a_tag_reaches_notes_that_wrote_it_inline() {
+    let s = Store::new("mute-inline-tag");
+    let written = s.capture("a loud thing #noise");
+    let given = s.capture("another loud thing");
+    s.ok(&["settle"]);
+    s.ok(&["tag", &given, "noise"]);
+    let other = s.capture("a loud thing about something else");
+    s.ok(&["settle"]);
+
+    s.ok(&["mute", "#noise"]);
+    let found = s.ok(&["search", "loud"]);
+    assert!(
+        !found.contains(&given),
+        "the tag set was not muted: {found}"
+    );
+    assert!(
+        !found.contains(&written),
+        "a note that wrote #noise in its text escaped the mute: {found}"
+    );
+    assert!(
+        found.contains(&other),
+        "a note without the tag was muted: {found}"
+    );
+
+    // And lifted the same way.
+    s.ok(&["unmute", "#noise"]);
+    let found = s.ok(&["search", "loud"]);
+    assert!(
+        found.contains(&written) && found.contains(&given),
+        "{found}"
+    );
+}

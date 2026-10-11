@@ -94,11 +94,17 @@ use crate::{Result, db};
 /// derived from the log, so the rebuild finds every past instance rather than
 /// only new ones.
 ///
+/// Version 13 applies a tag mute to notes that wrote the tag inline. The fold
+/// muted only notes in the tag's set, which only `capture tag` writes, so a
+/// note that said `#noise` in its text escaped `capture mute #noise`. Which
+/// notes are suppressed is stored per note, so the rebuild is what reaches the
+/// ones already written.
+///
 /// A rebuild rather than a migration: the projection is derived data, and
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 12;
+pub const PROJECTION_SCHEMA: u32 = 13;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -3704,7 +3710,8 @@ fn write_intent(
     Ok(())
 }
 
-/// How long this note is suppressed for, entity-scoped mutes included.
+/// How long this note is suppressed for, entity-scoped and inline-tag mutes
+/// included.
 ///
 /// The fold settles the other three scopes and hands entity ones over whole,
 /// because deciding which notes name an entity needs the text and
@@ -3722,7 +3729,12 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
         return n.muted_until;
     };
     let named = entities_named(p, text);
-    if named.is_empty() {
+    let inline_tags: Vec<String> = capture_parse::mentions(text)
+        .into_iter()
+        .filter(|(sigil, _)| *sigil == '#')
+        .map(|(_, value)| value)
+        .collect();
+    if named.is_empty() && inline_tags.is_empty() {
         return n.muted_until;
     }
 
@@ -3730,6 +3742,18 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
     let mut at = n.muted_at;
     for (ent, value, when) in &p.entity_mutes {
         if !named.contains(&p.entity_of(*ent)) {
+            continue;
+        }
+        if at.is_none_or(|had| *when > had) {
+            until = *value;
+            at = Some(*when);
+        }
+    }
+    // A tag written in the text, which the fold could not see. The same
+    // newest-wins as everything else: a note muted by itself after the tag
+    // was muted keeps its own mute, and the reverse.
+    for (tag, value, when) in &p.tag_mutes {
+        if !inline_tags.contains(tag) {
             continue;
         }
         if at.is_none_or(|had| *when > had) {
