@@ -54,6 +54,7 @@ use capture_store::{
     store,
 };
 
+use crate::json::{Json, View, answer, arr, obj};
 use crate::read;
 
 /// Magic at the head of every export file.
@@ -140,12 +141,18 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
         fresh.push(e);
     }
 
+    let flagged: Vec<String> = flagged.into_iter().map(|(_, slug)| slug).collect();
     if fresh.is_empty() {
-        if json {
-            say!("{{\"events\":0,\"file\":null,\"stripped\":0}}");
-        } else {
-            say!("Nothing new to export.");
-        }
+        answer(
+            &Exported {
+                events: 0,
+                file: None,
+                stripped: 0,
+                withheld: 0,
+                flagged,
+            },
+            json,
+        );
         return Ok(());
     }
 
@@ -195,46 +202,104 @@ pub fn export(paths: StorePaths, json: bool) -> Result<()> {
     }
     ops.set_export_heads(&moved)?;
 
-    if json {
-        say!(
-            "{{\"events\":{},\"file\":\"{}\",\"stripped\":{}}}",
-            fresh.len(),
-            name,
-            stripped
-        );
-        return Ok(());
-    }
-
-    say!("exported {} event(s) to {}", fresh.len(), file.display());
-    if stripped > 0 {
-        // Never silent. The predicate over-flags on purpose, so a note quietly
-        // absent from every backup is the failure this reporting exists to
-        // prevent.
-        say!();
-        say!(
-            "{} event(s) were written without their text, from {} note(s) that look \
-             like they hold credentials:",
+    answer(
+        &Exported {
+            events: fresh.len(),
+            file: Some(file),
             stripped,
-            flagged.len()
-        );
-        for (_, slug) in &flagged {
-            say!("  {slug}");
-        }
-        say!();
-        say!("If one of those is an ordinary note:  capture unflag <name>");
+            withheld: withheld_by_redaction,
+            flagged,
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// What one export wrote, and what it left out.
+struct Exported {
+    events: usize,
+    /// Where, when anything was written.
+    file: Option<PathBuf>,
+    /// Events written without their text because their note looks like it
+    /// holds a credential.
+    stripped: usize,
+    /// Events written without their text because a redaction names them.
+    withheld: usize,
+    /// Every note currently flagged as holding a credential, by name.
+    flagged: Vec<String>,
+}
+
+impl View for Exported {
+    fn json(&self) -> Json {
+        let Exported {
+            events,
+            file,
+            stripped,
+            withheld,
+            flagged,
+        } = self;
+        obj([
+            ("events", events.into()),
+            // The name, as before, and not the path: the directory is the
+            // store's, and a script that wants it already knows where that is.
+            (
+                "file",
+                file.as_ref()
+                    .and_then(|f| f.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .into(),
+            ),
+            ("stripped", stripped.into()),
+            // Both were said in prose and absent here, so a script running a
+            // nightly export could not tell a complete backup from one with
+            // holes in it — which is the thing the prose is there to say.
+            ("withheld", withheld.into()),
+            ("flagged", arr(flagged)),
+        ])
     }
 
-    if withheld_by_redaction > 0 {
-        // Said separately and with no remedy offered. There is nothing to
-        // clear: somebody ordered this destroyed, and the export is doing what
-        // §1.1 says it does.
-        say!();
-        say!(
-            "{withheld_by_redaction} event(s) were written without their text \
-             because a redaction names them."
-        );
+    fn prose(&self) {
+        let Exported {
+            events,
+            file,
+            stripped,
+            withheld,
+            flagged,
+        } = self;
+        let Some(file) = file else {
+            say!("Nothing new to export.");
+            return;
+        };
+        say!("exported {} event(s) to {}", events, file.display());
+        if *stripped > 0 {
+            // Never silent. The predicate over-flags on purpose, so a note quietly
+            // absent from every backup is the failure this reporting exists to
+            // prevent.
+            say!();
+            say!(
+                "{} event(s) were written without their text, from {} note(s) that look \
+                 like they hold credentials:",
+                stripped,
+                flagged.len()
+            );
+            for slug in flagged {
+                say!("  {slug}");
+            }
+            say!();
+            say!("If one of those is an ordinary note:  capture unflag <name>");
+        }
+
+        if *withheld > 0 {
+            // Said separately and with no remedy offered. There is nothing to
+            // clear: somebody ordered this destroyed, and the export is doing what
+            // §1.1 says it does.
+            say!();
+            say!(
+                "{withheld} event(s) were written without their text \
+                 because a redaction names them."
+            );
+        }
     }
-    Ok(())
 }
 
 fn write_file(path: &Path, events: &[Envelope]) -> Result<()> {

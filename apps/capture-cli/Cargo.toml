@@ -27,3 +27,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["pty", "termios"] }
+# Parses `--json` output in tests, and only in tests. The renderers stay hand
+# written (see `src/json.rs`); this is the check that what they write parses.
+serde_json = "1"

@@ -42,6 +42,8 @@ use capture_core::{
 };
 use capture_store::{Error, Result, StorePaths, log::Log, ops::Ops, store};
 
+use crate::json::{Json, View, answer, arr, obj};
+
 /// Something wrong with a stored event.
 struct Fault {
     origin: String,
@@ -156,39 +158,74 @@ pub fn run(paths: &StorePaths, json: bool) -> Result<()> {
 
     let refused = Ops::open_read(&paths.ops)?.rejected_total()?;
 
-    if json {
-        let items: Vec<String> = faults
-            .iter()
-            .map(|f| {
-                format!(
-                    "{{\"origin\":\"{}\",\"seq\":{},\"problem\":{}}}",
-                    f.origin,
-                    f.seq,
-                    quote(&f.what)
-                )
-            })
-            .collect();
-        say!(
-            "{{\"checked\":{},\"faults\":[{}],\"redacted\":{},\"unverifiable\":{},\"refused\":{}}}",
-            rows.len(),
-            items.join(","),
+    let failed = faults.len();
+    answer(
+        &Verified {
+            checked: rows.len(),
+            faults,
             redacted,
             unverifiable,
-            refused
-        );
-    } else {
-        report(rows.len(), &faults, redacted, unverifiable, refused);
-    }
+            refused,
+        },
+        json,
+    );
 
-    if faults.is_empty() {
+    if failed == 0 {
         Ok(())
     } else {
         // Its own exit code. A damaged archive is not a mistyped command, and a
         // script that cannot tell them apart will treat both as retryable.
         Err(Error::Integrity(format!(
-            "{} event(s) failed verification",
-            faults.len()
+            "{failed} event(s) failed verification"
         )))
+    }
+}
+
+/// What a pass over the log found.
+struct Verified {
+    checked: usize,
+    faults: Vec<Fault>,
+    redacted: usize,
+    unverifiable: usize,
+    refused: u64,
+}
+
+impl View for Verified {
+    fn json(&self) -> Json {
+        let Verified {
+            checked,
+            faults,
+            redacted,
+            unverifiable,
+            refused,
+        } = self;
+        obj([
+            ("checked", checked.into()),
+            (
+                "faults",
+                arr(faults.iter().map(|Fault { origin, seq, what }| {
+                    obj([
+                        ("origin", origin.into()),
+                        ("seq", seq.into()),
+                        ("problem", what.into()),
+                    ])
+                })),
+            ),
+            ("redacted", redacted.into()),
+            ("unverifiable", unverifiable.into()),
+            ("refused", refused.into()),
+        ])
+    }
+
+    fn prose(&self) {
+        let Verified {
+            checked,
+            faults,
+            redacted,
+            unverifiable,
+            refused,
+        } = self;
+        report(*checked, faults, *redacted, *unverifiable, *refused);
     }
 }
 
@@ -245,21 +282,6 @@ fn short(d: &Dev) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]

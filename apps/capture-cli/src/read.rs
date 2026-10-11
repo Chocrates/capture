@@ -37,6 +37,8 @@ use capture_store::{
     store,
 };
 
+use crate::json::{Json, View, answer, arr, obj};
+
 /// Open the current projection without needing the writer.
 pub fn open(paths: &StorePaths) -> Result<Store> {
     if !store::exists(paths) {
@@ -60,21 +62,34 @@ pub fn open(paths: &StorePaths) -> Result<Store> {
 /// Printed after the answer, never instead of it. Suppressing the output would
 /// make a read fail when the sweep is behind, which is §8.8's failure with the
 /// sign flipped.
-fn say_if_behind(store: &Store) {
-    let n = match store.unread_count(capture_parse::GRAMMAR_VERSION) {
-        Ok(0) => return,
-        Ok(n) => n,
-        // A count that cannot be taken is not worth a warning of its own. The
-        // answer above it still stands, and a store too broken to count is
-        // `capture verify`'s business, not this line's.
-        Err(_) => return,
-    };
-    say!();
-    match n {
-        1 => say!("1 capture has not been read yet, so this may be incomplete."),
-        n => say!("{n} captures have not been read yet, so this may be incomplete."),
+fn say_if_behind(unread: usize) {
+    match unread {
+        0 => {}
+        1 => {
+            say!();
+            say!("1 capture has not been read yet, so this may be incomplete.");
+            say!("Read them with:  capture settle");
+        }
+        n => {
+            say!();
+            say!("{n} captures have not been read yet, so this may be incomplete.");
+            say!("Read them with:  capture settle");
+        }
     }
-    say!("Read them with:  capture settle");
+}
+
+/// How many captures nothing has read yet, for a view to carry.
+///
+/// Counted when the view is built, so the prose and the JSON report the same
+/// number — the JSON used to ask separately, which is how `agenda --json` came
+/// to answer without it.
+fn unread(store: &Store) -> usize {
+    // A count that cannot be taken is not worth a warning of its own. The
+    // answer beside it still stands, and a store too broken to count is
+    // `capture verify`'s business, not this line's.
+    store
+        .unread_count(capture_parse::GRAMMAR_VERSION)
+        .unwrap_or(0)
 }
 
 // ----------------------------------------------------------------- agenda ---
@@ -99,16 +114,14 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         .ok_or_else(|| Error::Usage("that day does not exist in this zone".into()))?;
     let to = from + 24 * 60 * 60 * 1000;
 
-    let mut rows = Vec::new();
+    let mut occurrences = Vec::new();
 
     // All-day entries first. They are floating dates with no instant to
     // compare, so they are found by date rather than by window (§3.2).
     for tgt in store.all_day_on(&format!("{date}"))? {
-        let slug = store.slug_of(&tgt)?.unwrap_or_default();
-        let text = store.text_of(&tgt)?;
-        rows.push((
-            slug,
-            projection::OccurrenceRow {
+        occurrences.push(Occurrence {
+            slug: store.slug_of(&tgt)?.unwrap_or_default(),
+            o: projection::OccurrenceRow {
                 occ: from,
                 start_ms: from,
                 end_ms: None,
@@ -120,8 +133,8 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
                 location: None,
                 notes: None,
             },
-            text,
-        ));
+            text: store.text_of(&tgt)?,
+        });
     }
 
     for (tgt, o) in store.happening_between(from, to)? {
@@ -131,9 +144,11 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         if o.cancelled && o.end_ms.is_none() && o.start_ms == o.occ {
             continue;
         }
-        let slug = store.slug_of(&tgt)?.unwrap_or_default();
-        let text = store.text_of(&tgt)?;
-        rows.push((slug, o, text));
+        occurrences.push(Occurrence {
+            slug: store.slug_of(&tgt)?.unwrap_or_default(),
+            o,
+            text: store.text_of(&tgt)?,
+        });
     }
 
     // Tasks due on this day. §4.4's agenda is "what is due and what occurs",
@@ -144,27 +159,32 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     // would invent a deadline nobody wrote.
     let mut due = Vec::new();
     for (tgt, done) in store.tasks_due_on(&format!("{date}"))? {
-        let slug = store.slug_of(&tgt)?.unwrap_or_default();
-        let text = store.text_of(&tgt)?;
-        due.push((slug, text, done));
+        due.push(DueTask {
+            slug: store.slug_of(&tgt)?.unwrap_or_default(),
+            text: store.text_of(&tgt)?,
+            done,
+        });
     }
 
     // Overdue tasks, on today only. Still open rather than lapsed: §3.6 draws
     // that line, and a task is the one thing here that genuinely carries
     // forward — it is not finished, and saying so once is not a backlog.
+    let today = date == capture_time::civil_date(now_ms(), zone);
     let mut overdue = Vec::new();
-    if date == capture_time::civil_date(now_ms(), zone) {
+    if today {
         for tgt in store.tasks_overdue(&format!("{date}"))? {
-            let slug = store.slug_of(&tgt)?.unwrap_or_default();
-            let text = store.text_of(&tgt)?;
-            let d = store
+            let was_due = store
                 .promotion_of(&tgt)?
                 .and_then(|p| match p.as_ {
                     capture_core::body::Promoted::Task(t) => t.due,
                     _ => None,
                 })
                 .unwrap_or_default();
-            overdue.push((slug, text, d));
+            overdue.push(Overdue {
+                slug: store.slug_of(&tgt)?.unwrap_or_default(),
+                text: store.text_of(&tgt)?,
+                due: was_due,
+            });
         }
     }
 
@@ -172,131 +192,237 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     // a debt is a thing about now, not something to redraw on every past day
     // somebody scrolls back through.
     let mut owed = Vec::new();
-    if date == capture_time::civil_date(now_ms(), zone) {
+    if today {
         for (tgt, o) in store.outstanding(from)? {
-            let slug = store.slug_of(&tgt)?.unwrap_or_default();
-            let text = store.text_of(&tgt)?;
-            owed.push((slug, o, text));
+            owed.push(Occurrence {
+                slug: store.slug_of(&tgt)?.unwrap_or_default(),
+                o,
+                text: store.text_of(&tgt)?,
+            });
         }
     }
 
-    if json {
-        let mut items: Vec<String> = rows
-            .iter()
-            .map(|(slug, o, text)| {
-                // What the occurrence says about itself, beside what the note
-                // says. The prose path above picks `title` over the note's text
-                // when there is one; this emitted only the text, so an
-                // amendment — "this occurrence only: different title, location,
-                // notes" — was visible in a terminal and invisible to anything
-                // reading the JSON.
-                let field = |v: &Option<String>| {
-                    v.as_deref().map(quote).unwrap_or_else(|| "null".into())
-                };
-                format!(
-                    "{{\"slug\":{},\"start_ms\":{},\"all_day\":{},\"done\":{},\"shift\":{},\"due\":false,\"text\":{},\"title\":{},\"location\":{},\"notes\":{}}}",
-                    quote(slug),
-                    o.start_ms,
-                    o.all_day,
-                    o.done,
-                    o.shift.as_deref().map(quote).unwrap_or_else(|| "null".into()),
-                    text.as_deref().map(quote).unwrap_or_else(|| "null".into()),
-                    field(&o.title),
-                    field(&o.location),
-                    field(&o.notes)
-                )
-            })
-            .collect();
+    answer(
+        &Agenda {
+            date: format!("{date}"),
+            from,
+            zone,
+            occurrences,
+            due,
+            overdue,
+            owed,
+            unread: unread(&store),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// One day: what occurs on it, what is due, and — today only — what carries in.
+struct Agenda {
+    date: String,
+    /// The day's first instant, which is where an all-day row sits.
+    from: i64,
+    zone: capture_time::Zone,
+    occurrences: Vec<Occurrence>,
+    due: Vec<DueTask>,
+    overdue: Vec<Overdue>,
+    owed: Vec<Occurrence>,
+    unread: usize,
+}
+
+/// An occurrence, with the note it belongs to.
+struct Occurrence {
+    slug: String,
+    o: projection::OccurrenceRow,
+    text: Option<String>,
+}
+
+/// A task due on the day.
+struct DueTask {
+    slug: String,
+    text: Option<String>,
+    done: bool,
+}
+
+/// A task due on an earlier day and still open.
+struct Overdue {
+    slug: String,
+    text: Option<String>,
+    due: String,
+}
+
+impl Occurrence {
+    /// What the occurrence says about itself, beside what the note says.
+    ///
+    /// The prose picks `title` over the note's text when there is one; the JSON
+    /// once emitted only the text, so an amendment — "this occurrence only:
+    /// different title, location, notes" — was visible in a terminal and
+    /// invisible to anything reading the JSON.
+    fn json(&self) -> Json {
+        let Occurrence { slug, o, text } = self;
+        let projection::OccurrenceRow {
+            occ: _, // the rule's instant; `start_ms` is where it is shown
+            start_ms,
+            end_ms,
+            all_day,
+            shift,
+            cancelled,
+            done,
+            title,
+            location,
+            notes,
+        } = o;
+        obj([
+            ("slug", slug.into()),
+            ("start_ms", start_ms.into()),
+            ("end_ms", (*end_ms).into()),
+            ("all_day", (*all_day).into()),
+            ("done", (*done).into()),
+            ("cancelled", (*cancelled).into()),
+            ("shift", shift.into()),
+            ("due", false.into()),
+            ("text", text.into()),
+            ("title", title.into()),
+            ("location", location.into()),
+            ("notes", notes.into()),
+        ])
+    }
+}
+
+impl View for Agenda {
+    fn json(&self) -> Json {
+        let Agenda {
+            date,
+            from,
+            zone: _, // the instants are absolute; the zone only draws them
+            occurrences,
+            due,
+            overdue,
+            owed,
+            unread,
+        } = self;
+        let mut entries: Vec<Json> = occurrences.iter().map(Occurrence::json).collect();
         // Tasks carry `due: true` rather than being a separate array, because a
         // caller asking "what is this day" wants one list — and one that
         // silently omitted what is due would be answering a narrower question
-        // than it was asked.
-        for (slug, text, done) in &due {
-            items.push(format!(
-                "{{\"slug\":{},\"start_ms\":{},\"all_day\":true,\"done\":{},\"shift\":null,\"due\":true,\"text\":{}}}",
-                quote(slug),
-                from,
-                done,
-                text.as_deref().map(quote).unwrap_or_else(|| "null".into())
-            ));
-        }
-        // An object rather than the bare array it used to be, so the count can
-        // ride along — the same change `tasks --json` made, for the same
-        // reason: a consumer reading an empty list as "nothing that day" was
-        // being told something that might not be true.
-        //
-        // The agenda has the stronger case of the two. A day with nothing on it
-        // is a far commoner answer than an empty task list, so the ambiguity is
-        // met more often, and a script is the consumer least able to notice it:
-        // a person reading "nothing" in a terminal sees the line underneath it,
-        // and a program receiving `[]` sees an empty day.
+        // than it was asked. The same fields as an occurrence, so a consumer
+        // reads every entry one way.
+        entries.extend(due.iter().map(|DueTask { slug, text, done }| {
+            obj([
+                ("slug", slug.into()),
+                ("start_ms", from.into()),
+                ("end_ms", Json::Null),
+                ("all_day", true.into()),
+                ("done", (*done).into()),
+                ("cancelled", false.into()),
+                ("shift", Json::Null),
+                ("due", true.into()),
+                ("text", text.into()),
+                ("title", Json::Null),
+                ("location", Json::Null),
+                ("notes", Json::Null),
+            ])
+        }));
+        // An object rather than a bare array, so the count can ride along — a
+        // consumer reading an empty list as "nothing that day" was being told
+        // something that might not be true. The agenda has the stronger case:
+        // a day with nothing on it is a far commoner answer than an empty task
+        // list, and a script is the consumer least able to notice.
         //
         // Present at zero deliberately. A field that appeared only when
         // something was unread would make the shape depend on the state, so a
         // consumer that worked all week would break the first morning the sweep
-        // fell behind.
-        say!(
-            "{{\"entries\":[{}],\"unread\":{}}}",
-            items.join(","),
-            store
-                .unread_count(capture_parse::GRAMMAR_VERSION)
-                .unwrap_or(0)
-        );
-        return Ok(());
+        // fell behind. `overdue` and `owed` are present and empty on any day
+        // but today for the same reason.
+        obj([
+            ("date", date.into()),
+            ("entries", Json::Arr(entries)),
+            (
+                "overdue",
+                arr(overdue.iter().map(|Overdue { slug, text, due }| {
+                    obj([
+                        ("slug", slug.into()),
+                        ("text", text.into()),
+                        ("due", due.into()),
+                    ])
+                })),
+            ),
+            ("owed", arr(owed.iter().map(Occurrence::json))),
+            ("unread", unread.into()),
+        ])
     }
 
-    say!("{date}");
-    if rows.is_empty() && due.is_empty() && overdue.is_empty() && owed.is_empty() {
-        say!("  nothing");
-        say_if_behind(&store);
-        return Ok(());
-    }
+    fn prose(&self) {
+        let Agenda {
+            date,
+            zone,
+            occurrences,
+            due,
+            overdue,
+            owed,
+            unread,
+            ..
+        } = self;
+        let zone = *zone;
 
-    for (slug, text, done) in &due {
-        say!(
-            "  {}  {}  {}",
-            if *done { "done    " } else { "due     " },
-            slug,
-            text.as_deref().map(first_line).unwrap_or_default()
-        );
-    }
+        say!("{date}");
+        if occurrences.is_empty() && due.is_empty() && overdue.is_empty() && owed.is_empty() {
+            say!("  nothing");
+            say_if_behind(*unread);
+            return;
+        }
 
-    // All-day first, in their own band. They have no hour to sort by, and
-    // mixing them into the timed list would imply one.
-    for (slug, o, text) in rows.iter().filter(|(_, o, _)| o.all_day) {
-        say!("  all day   {}  {}", slug, line(text.as_deref(), o));
-    }
-    for (slug, o, text) in rows.iter().filter(|(_, o, _)| !o.all_day) {
-        let (h, m) = capture_time::civil_clock(o.start_ms, zone);
-        say!("  {h:02}:{m:02}     {}  {}", slug, line(text.as_deref(), o));
-    }
-
-    if !overdue.is_empty() {
-        say!();
-        say!("Still open");
-        for (slug, text, d) in &overdue {
+        for d in due {
             say!(
-                "  was due {d}  {}  {}",
-                slug,
-                text.as_deref().map(first_line).unwrap_or_default()
+                "  {}  {}  {}",
+                if d.done { "done    " } else { "due     " },
+                d.slug,
+                d.text.as_deref().map(first_line).unwrap_or_default()
             );
         }
-    }
 
-    if !owed.is_empty() {
-        say!();
-        say!("Still owed");
-        for (slug, o, text) in &owed {
-            let d = capture_time::civil_date(o.start_ms, zone);
+        // All-day first, in their own band. They have no hour to sort by, and
+        // mixing them into the timed list would imply one.
+        for r in occurrences.iter().filter(|r| r.o.all_day) {
+            say!("  all day   {}  {}", r.slug, line(r.text.as_deref(), &r.o));
+        }
+        for r in occurrences.iter().filter(|r| !r.o.all_day) {
+            let (h, m) = capture_time::civil_clock(r.o.start_ms, zone);
             say!(
-                "  from {d}  {}  {}",
-                slug,
-                text.as_deref().map(first_line).unwrap_or_default()
+                "  {h:02}:{m:02}     {}  {}",
+                r.slug,
+                line(r.text.as_deref(), &r.o)
             );
         }
+
+        if !overdue.is_empty() {
+            say!();
+            say!("Still open");
+            for t in overdue {
+                say!(
+                    "  was due {}  {}  {}",
+                    t.due,
+                    t.slug,
+                    t.text.as_deref().map(first_line).unwrap_or_default()
+                );
+            }
+        }
+
+        if !owed.is_empty() {
+            say!();
+            say!("Still owed");
+            for r in owed {
+                let d = capture_time::civil_date(r.o.start_ms, zone);
+                say!(
+                    "  from {d}  {}  {}",
+                    r.slug,
+                    r.text.as_deref().map(first_line).unwrap_or_default()
+                );
+            }
+        }
+        say_if_behind(*unread);
     }
-    say_if_behind(&store);
-    Ok(())
 }
 
 /// One agenda line's text, with whatever the occurrence says about itself.
@@ -340,78 +466,103 @@ pub fn tasks(paths: &StorePaths, json: bool) -> Result<()> {
     // against: a task due today is not overdue.
     let zone = capture_time::Zone::new(&local_zone()).unwrap_or_else(utc);
     let today = format!("{}", capture_time::civil_date(now_ms(), zone));
-    let rows = store.tasks_outstanding(&today)?;
 
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .filter_map(|row| {
-                let slug = store.slug_of(&row.tgt).ok().flatten()?;
-                // `band` and `due` ride along: a consumer handed only a
-                // descriptor has to parse prose to learn when something is due,
-                // and cannot tell overdue from merely open at all.
-                Some(format!(
-                    "{{\"slug\":{},\"descriptor\":{},\"band\":{},\"due\":{}}}",
-                    quote(&slug),
-                    quote(&row.descriptor),
-                    quote(band_name(row.band)),
-                    row.due
-                        .as_deref()
-                        .map(quote)
-                        .unwrap_or_else(|| "null".into())
-                ))
-            })
-            .collect();
+    let mut rows = Vec::new();
+    for row in store.tasks_outstanding(&today)? {
+        rows.push(Task {
+            slug: store.slug_of(&row.tgt)?.unwrap_or_default(),
+            text: store.text_of(&row.tgt)?,
+            row,
+        });
+    }
+
+    answer(
+        &Tasks {
+            rows,
+            unread: unread(&store),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// Every outstanding task, banded.
+struct Tasks {
+    rows: Vec<Task>,
+    unread: usize,
+}
+
+/// One task, with the note it is.
+struct Task {
+    slug: String,
+    text: Option<String>,
+    row: capture_store::projection::TaskRow,
+}
+
+impl View for Tasks {
+    fn json(&self) -> Json {
+        let Tasks { rows, unread } = self;
+        let items = rows.iter().map(|Task { slug, text, row }| {
+            let capture_store::projection::TaskRow {
+                tgt: _, // named by `slug`
+                descriptor,
+                due,
+                band,
+            } = row;
+            // `band` and `due` ride along: a consumer handed only a descriptor
+            // has to parse prose to learn when something is due, and cannot
+            // tell overdue from merely open at all.
+            obj([
+                ("slug", slug.into()),
+                ("descriptor", descriptor.into()),
+                ("band", band_name(*band).into()),
+                ("due", due.into()),
+                ("text", text.into()),
+            ])
+        });
         // An object rather than the bare array it used to be, so the count can
         // ride along. A consumer reading an empty list as "no tasks" was being
         // told something that might not be true.
-        say!(
-            "{{\"tasks\":[{}],\"unread\":{}}}",
-            items.join(","),
-            store
-                .unread_count(capture_parse::GRAMMAR_VERSION)
-                .unwrap_or(0)
-        );
-        return Ok(());
+        obj([("tasks", arr(items)), ("unread", unread.into())])
     }
 
-    if rows.is_empty() {
-        say!("Nothing outstanding.");
-        say!();
-        say!("A capture becomes one on its own where a verb and a day agree —");
-        say!("\"call the dentist tomorrow\". A verb with no day is a suggestion");
-        say!("and nothing more, so say it yourself with: capture task <name> [due]");
-        say_if_behind(&store);
-        return Ok(());
-    }
-    // Banded, in the order the requirement states, and the undated band drawn
-    // rather than folded into the others: a task with no due date is the
-    // ordinary case, because a bare task verb is below the confidence floor and
-    // somebody saying "send sarah the migration doc" is not saying when.
-    for (band, label) in [
-        (capture_store::projection::Band::Overdue, "overdue"),
-        (capture_store::projection::Band::Due, "due"),
-        (capture_store::projection::Band::Undated, "no date"),
-    ] {
-        let mine: Vec<&capture_store::projection::TaskRow> =
-            rows.iter().filter(|r| r.band == band).collect();
-        if mine.is_empty() {
-            continue;
+    fn prose(&self) {
+        let Tasks { rows, unread } = self;
+        if rows.is_empty() {
+            say!("Nothing outstanding.");
+            say!();
+            say!("A capture becomes one on its own where a verb and a day agree —");
+            say!("\"call the dentist tomorrow\". A verb with no day is a suggestion");
+            say!("and nothing more, so say it yourself with: capture task <name> [due]");
+            say_if_behind(*unread);
+            return;
         }
-        say!("{label}");
-        for row in mine {
-            let slug = store.slug_of(&row.tgt)?.unwrap_or_default();
-            let text = store.text_of(&row.tgt)?;
-            say!(
-                "  {:<28}  {:<22}  {}",
-                slug,
-                row.descriptor,
-                text.as_deref().map(first_line).unwrap_or_default()
-            );
+        // Banded, in the order the requirement states, and the undated band
+        // drawn rather than folded into the others: a task with no due date is
+        // the ordinary case, because a bare task verb is below the confidence
+        // floor and somebody saying "send sarah the migration doc" is not
+        // saying when.
+        for (band, label) in [
+            (capture_store::projection::Band::Overdue, "overdue"),
+            (capture_store::projection::Band::Due, "due"),
+            (capture_store::projection::Band::Undated, "no date"),
+        ] {
+            let mine: Vec<&Task> = rows.iter().filter(|t| t.row.band == band).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            say!("{label}");
+            for t in mine {
+                say!(
+                    "  {:<28}  {:<22}  {}",
+                    t.slug,
+                    t.row.descriptor,
+                    t.text.as_deref().map(first_line).unwrap_or_default()
+                );
+            }
         }
+        say_if_behind(*unread);
     }
-    say_if_behind(&store);
-    Ok(())
 }
 
 /// The band, as the one word every surface uses for it.
@@ -455,42 +606,75 @@ pub fn mentions(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
         _ => store.mentioning(sigil, &value, now_ms() as u64)?,
     };
 
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .map(|n| {
-                format!(
-                    "{{\"slug\":{},\"text\":{}}}",
-                    quote(&n.slug),
-                    n.text
-                        .as_deref()
-                        .map(quote)
-                        .unwrap_or_else(|| "null".into())
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
+    answer(
+        &Mentions {
+            name: name.to_string(),
+            notes: rows.iter().map(Named::of).collect(),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// A note as a listing names it: what it is called and what it says.
+struct Named {
+    slug: String,
+    text: Option<String>,
+}
+
+impl Named {
+    fn of(n: &NoteRow) -> Named {
+        Named {
+            slug: n.slug.clone(),
+            text: n.text.clone(),
+        }
     }
 
-    if rows.is_empty() {
-        say!("Nothing names {name}.");
-        say!();
-        say!("Pages are not created — they exist for whatever your notes say.");
-        say!("Write {name} in a capture and this one fills itself in.");
-        return Ok(());
+    fn json(&self) -> Json {
+        let Named { slug, text } = self;
+        obj([("slug", slug.into()), ("text", text.into())])
     }
 
-    say!("{name}");
-    say!();
-    for n in &rows {
+    /// One indented line, the name padded to `width`.
+    fn say(&self, width: usize) {
         say!(
-            "  {:<40}  {}",
-            n.slug,
-            n.text.as_deref().map(first_line).unwrap_or_default()
+            "  {:<width$}  {}",
+            self.slug,
+            self.text.as_deref().map(first_line).unwrap_or_default()
         );
     }
-    Ok(())
+}
+
+/// Every note naming one thing.
+struct Mentions {
+    /// What was asked for, as it was written.
+    name: String,
+    notes: Vec<Named>,
+}
+
+impl View for Mentions {
+    fn json(&self) -> Json {
+        // `name` is the question, not part of the answer.
+        let Mentions { name: _, notes } = self;
+        arr(notes.iter().map(Named::json))
+    }
+
+    fn prose(&self) {
+        let Mentions { name, notes } = self;
+        if notes.is_empty() {
+            say!("Nothing names {name}.");
+            say!();
+            say!("Pages are not created — they exist for whatever your notes say.");
+            say!("Write {name} in a capture and this one fills itself in.");
+            return;
+        }
+
+        say!("{name}");
+        say!();
+        for n in notes {
+            n.say(40);
+        }
+    }
 }
 
 /// A written mention split into the kind it names and the name itself.
@@ -525,49 +709,67 @@ pub fn entities(paths: &StorePaths, kind: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     let mut rows = store.entities_of_kind(kind, now_ms() as u64)?;
     rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.display.cmp(&b.display)));
-
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .map(|e| {
-                format!(
-                    "{{\"display\":{},\"count\":{},\"names\":[{}]}}",
-                    quote(&e.display),
-                    e.count,
-                    e.names
-                        .iter()
-                        .map(|n| quote(n))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        let (what, sigil) = if kind == "person" {
-            ("people", "@")
-        } else {
-            ("projects", "^")
-        };
-        say!("No {what} yet.");
-        say!();
-        say!("They are not created — one exists as soon as a note names it.");
-        say!("Write {sigil}somebody in a capture and it appears here.");
-        return Ok(());
-    }
-
-    for e in &rows {
-        let also = if e.names.len() > 1 {
-            format!("   (also {})", e.names.join(", "))
-        } else {
-            String::new()
-        };
-        say!("  {:<30}  {:>4} note(s){}", e.display, e.count, also);
-    }
+    answer(
+        &Entities {
+            kind: kind.to_string(),
+            rows,
+        },
+        json,
+    );
     Ok(())
+}
+
+/// Every entity of one kind.
+struct Entities {
+    kind: String,
+    rows: Vec<projection::EntityRow>,
+}
+
+impl View for Entities {
+    fn json(&self) -> Json {
+        // `kind` is the question; every row is of it.
+        let Entities { kind: _, rows } = self;
+        arr(rows.iter().map(|e| {
+            let projection::EntityRow {
+                ent: _,  // an internal id; `display` and `names` reach it
+                kind: _, // the same for every row
+                display,
+                backing: _, // a page's business, not an index's
+                names,
+                count,
+            } = e;
+            obj([
+                ("display", display.into()),
+                ("count", count.into()),
+                ("names", arr(names)),
+            ])
+        }))
+    }
+
+    fn prose(&self) {
+        let Entities { kind, rows } = self;
+        if rows.is_empty() {
+            let (what, sigil) = if kind == "person" {
+                ("people", "@")
+            } else {
+                ("projects", "^")
+            };
+            say!("No {what} yet.");
+            say!();
+            say!("They are not created — one exists as soon as a note names it.");
+            say!("Write {sigil}somebody in a capture and it appears here.");
+            return;
+        }
+
+        for e in rows {
+            let also = if e.names.len() > 1 {
+                format!("   (also {})", e.names.join(", "))
+            } else {
+                String::new()
+            };
+            say!("  {:<30}  {:>4} note(s){}", e.display, e.count, also);
+        }
+    }
 }
 
 /// One entity's page.
@@ -579,73 +781,106 @@ pub fn entities(paths: &StorePaths, kind: &str, json: bool) -> Result<()> {
 pub fn entity(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     let (kind, value) = split_mention(name)?;
-    let Some(ent) = store.entity(kind, &value)? else {
-        if json {
-            say!("null");
-            return Ok(());
-        }
-        say!("Nothing names {name}.");
-        say!();
-        say!("Pages are not created — they exist for whatever your notes say.");
-        say!("Write {name} in a capture and this one fills itself in.");
-        return Ok(());
-    };
-    let rows = store.entity_notes(&ent.ent, now_ms() as u64)?;
-    let backing = match ent.backing {
-        Some(tgt) => store.slug_of(&tgt)?,
+    let page = match store.entity(kind, &value)? {
         None => None,
+        Some(ent) => {
+            let notes = store.entity_notes(&ent.ent, now_ms() as u64)?;
+            let backing = match ent.backing {
+                Some(tgt) => store.slug_of(&tgt)?,
+                None => None,
+            };
+            Some(EntityPage {
+                display: ent.display,
+                kind: ent.kind,
+                backing,
+                names: ent.names,
+                notes: notes.iter().map(Named::of).collect(),
+            })
+        }
     };
-
-    if json {
-        say!(
-            "{{\"display\":{},\"kind\":{},\"backing\":{},\"names\":[{}],\"notes\":[{}]}}",
-            quote(&ent.display),
-            quote(&ent.kind),
-            backing
-                .as_deref()
-                .map(quote)
-                .unwrap_or_else(|| "null".into()),
-            ent.names
-                .iter()
-                .map(|n| quote(n))
-                .collect::<Vec<_>>()
-                .join(","),
-            rows.iter()
-                .map(|n| format!(
-                    "{{\"slug\":{},\"text\":{}}}",
-                    quote(&n.slug),
-                    n.text
-                        .as_deref()
-                        .map(quote)
-                        .unwrap_or_else(|| "null".into())
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        return Ok(());
-    }
-
-    say!("{}", ent.display);
-    if ent.names.len() > 1 || ent.names.first().map(|n| n.as_str()) != Some(value.as_str()) {
-        say!("  also: {}", ent.names.join(", "));
-    }
-    if let Some(slug) = &backing {
-        say!();
-        say!("  the note that is this {}: {slug}", ent.kind);
-    }
-    say!();
-    if rows.is_empty() {
-        say!("  Nothing else names it now.");
-        return Ok(());
-    }
-    for n in &rows {
-        say!(
-            "  {:<40}  {}",
-            n.slug,
-            n.text.as_deref().map(first_line).unwrap_or_default()
-        );
-    }
+    answer(
+        &Entity {
+            name: name.to_string(),
+            value,
+            page,
+        },
+        json,
+    );
     Ok(())
+}
+
+/// An entity's page, or the absence of one.
+struct Entity {
+    /// What was asked for, sigil and all.
+    name: String,
+    /// The same without its sigil, to tell whether it is the only spelling.
+    value: String,
+    page: Option<EntityPage>,
+}
+
+struct EntityPage {
+    display: String,
+    kind: String,
+    /// The note that is this entity, by name.
+    backing: Option<String>,
+    names: Vec<String>,
+    notes: Vec<Named>,
+}
+
+impl View for Entity {
+    fn json(&self) -> Json {
+        // The question, twice over; the page is the answer.
+        let Entity {
+            name: _,
+            value: _,
+            page,
+        } = self;
+        let Some(EntityPage {
+            display,
+            kind,
+            backing,
+            names,
+            notes,
+        }) = page
+        else {
+            return Json::Null;
+        };
+        obj([
+            ("display", display.into()),
+            ("kind", kind.into()),
+            ("backing", backing.into()),
+            ("names", arr(names)),
+            ("notes", arr(notes.iter().map(Named::json))),
+        ])
+    }
+
+    fn prose(&self) {
+        let Entity { name, value, page } = self;
+        let Some(p) = page else {
+            say!("Nothing names {name}.");
+            say!();
+            say!("Pages are not created — they exist for whatever your notes say.");
+            say!("Write {name} in a capture and this one fills itself in.");
+            return;
+        };
+
+        say!("{}", p.display);
+        if p.names.len() > 1 || p.names.first() != Some(value) {
+            say!("  also: {}", p.names.join(", "));
+        }
+        if let Some(slug) = &p.backing {
+            say!();
+            say!("  the note that is this {}: {slug}", p.kind);
+        }
+        say!();
+        if p.notes.is_empty() {
+            say!("  Nothing else names it now.");
+            return;
+        }
+        for n in &p.notes {
+            n.say(40);
+        }
+    }
 }
 
 /// A bounded review session.
@@ -669,76 +904,32 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     // might be one that genuinely accumulates — a dose rather than a walk — and
     // the recognizer must never decide that from phrasing. Asking once is the
     // difference between noticing and guessing.
-    let nagging = if json {
-        Vec::new()
-    } else {
-        s.state.repeatedly_lapsed(now, 3)?
-    };
+    //
+    // Asked for the JSON too. It was skipped there, so a script driving review
+    // never learned the question existed.
+    let mut lapsed = Vec::new();
+    for tgt in s.state.repeatedly_lapsed(now, 3)? {
+        lapsed.push(s.state.slug_of(&tgt)?.unwrap_or_default());
+    }
 
-    if json {
-        let out: Vec<String> = items
+    let view = Review {
+        items: items
             .iter()
-            .map(|i| {
-                format!(
-                    "{{\"slug\":{},\"because\":{},\"text\":{}}}",
-                    quote(&i.note.slug),
-                    quote(match i.because {
-                        capture_store::review::Because::Forward => "forward",
-                        capture_store::review::Because::Never => "never-engaged",
-                        capture_store::review::Because::Context => "context",
-                    }),
-                    i.note
-                        .text
-                        .as_deref()
-                        .map(quote)
-                        .unwrap_or_else(|| "null".into())
-                )
-            })
-            .collect();
-        say!("[{}]", out.join(","));
-    } else if items.is_empty() {
-        say!("Nothing to review.");
-        say!();
-        say!("That is the ordinary state. Review offers what is due, and when");
-        say!("nothing is, the session is over before it started.");
-    } else {
-        say!("{} note(s), and then this is over.", items.len());
-        say!();
-        for i in &items {
-            let why = match i.because {
-                capture_store::review::Because::Forward => "you said to come back to this",
-                capture_store::review::Because::Never => "never looked at since capture",
-                capture_store::review::Because::Context => "captured somewhere like here",
-            };
-            say!("  {}", i.note.slug);
-            say!(
-                "    {}",
-                i.note.text.as_deref().map(first_line).unwrap_or_default()
-            );
-            say!("    — {why}");
-            // What the archive suspects but would not act on. Computed in
-            // `review()` and, until now, printed nowhere: a suggestion nobody
-            // is shown is a suggestion that does not exist.
-            if let Some(text) = i.note.text.as_deref()
-                && let Some(said) =
+            .map(|i| Offered {
+                slug: i.note.slug.clone(),
+                because: i.because,
+                text: i.note.text.clone(),
+                // What the archive suspects but would not act on. Computed in
+                // `review()` and, for a while, printed nowhere: a suggestion
+                // nobody is shown is a suggestion that does not exist.
+                suggestion: i.note.text.as_deref().and_then(|text| {
                     capture_store::review::suggestion_for(text, i.note.tz.as_deref(), now)
-            {
-                say!("    {said}");
-            }
-            say!();
-        }
-        say!("capture engaged <name>   did something with it");
-        say!("capture deferred <name>  push it away (twice and it stops being offered)");
-    }
-
-    for tgt in &nagging {
-        let slug = s.state.slug_of(tgt)?.unwrap_or_default();
-        say!();
-        say!("  {slug} has lapsed several times.");
-        say!("  If missing it leaves something owed — a dose, an invoice — say so:");
-        say!("    capture carries-forward {slug}");
-        say!("  Otherwise there is nothing to do. A missed day costs almost nothing.");
-    }
+                }),
+            })
+            .collect(),
+        lapsed,
+    };
+    answer(&view, json);
 
     // Being offered is itself the outcome `shown`. Recorded after the items are
     // printed, so a failure to write cannot lose the session somebody is
@@ -746,6 +937,97 @@ pub fn review(paths: &StorePaths, json: bool) -> Result<()> {
     let tgts: Vec<_> = items.iter().map(|i| i.note.tgt).collect();
     capture_store::review::shown(&mut s, &tgts)?;
     Ok(())
+}
+
+/// One session: what is offered, and which series keep lapsing.
+struct Review {
+    items: Vec<Offered>,
+    /// Series that have lapsed often enough to ask whether they accumulate.
+    lapsed: Vec<String>,
+}
+
+struct Offered {
+    slug: String,
+    because: capture_store::review::Because,
+    text: Option<String>,
+    suggestion: Option<String>,
+}
+
+impl View for Review {
+    fn json(&self) -> Json {
+        let Review { items, lapsed } = self;
+        // An object rather than the bare array it was, because `lapsed` is
+        // about the session and not about any one item in it.
+        obj([
+            (
+                "items",
+                arr(items.iter().map(
+                    |Offered {
+                         slug,
+                         because,
+                         text,
+                         suggestion,
+                     }| {
+                        obj([
+                            ("slug", slug.into()),
+                            (
+                                "because",
+                                match because {
+                                    capture_store::review::Because::Forward => "forward",
+                                    capture_store::review::Because::Never => "never-engaged",
+                                    capture_store::review::Because::Context => "context",
+                                }
+                                .into(),
+                            ),
+                            ("text", text.into()),
+                            ("suggestion", suggestion.into()),
+                        ])
+                    },
+                )),
+            ),
+            ("lapsed", arr(lapsed)),
+        ])
+    }
+
+    fn prose(&self) {
+        let Review { items, lapsed } = self;
+        if items.is_empty() {
+            say!("Nothing to review.");
+            say!();
+            say!("That is the ordinary state. Review offers what is due, and when");
+            say!("nothing is, the session is over before it started.");
+        } else {
+            say!("{} note(s), and then this is over.", items.len());
+            say!();
+            for i in items {
+                let why = match i.because {
+                    capture_store::review::Because::Forward => "you said to come back to this",
+                    capture_store::review::Because::Never => "never looked at since capture",
+                    capture_store::review::Because::Context => "captured somewhere like here",
+                };
+                say!("  {}", i.slug);
+                say!(
+                    "    {}",
+                    i.text.as_deref().map(first_line).unwrap_or_default()
+                );
+                say!("    — {why}");
+                if let Some(said) = &i.suggestion {
+                    say!("    {said}");
+                }
+                say!();
+            }
+            say!("capture engaged <name>   did something with it");
+            say!("capture deferred <name>  push it away (twice and it stops being offered)");
+        }
+
+        for slug in lapsed {
+            say!();
+            say!("  {slug} has lapsed several times.");
+            say!("  If missing it leaves something owed — a dose, an invoice — say so:");
+            say!("    capture carries-forward {slug}");
+            say!("  Otherwise there is nothing to do. A missed day costs almost nothing.");
+        }
+    }
 }
 
 /// Show what the recognizer makes of some text.
@@ -834,87 +1116,114 @@ pub fn during(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     let row = find(&store, name)?;
     let notes = store.captured_during(&row.tgt, now_ms(), 200)?;
-
-    if json {
-        say!(
-            "[{}]",
-            notes.iter().map(note_json).collect::<Vec<_>>().join(",")
-        );
-        return Ok(());
-    }
-
-    if notes.is_empty() {
-        say!("Nothing was captured while that was on.");
-        say!();
-        say!("Either it has not happened yet, or nothing was written down during it.");
-        return Ok(());
-    }
-
-    say!("Captured while this was happening:");
-    say!();
-    for n in &notes {
-        say!(
-            "  {:<30}  {}",
-            n.slug,
-            n.text.as_deref().map(first_line).unwrap_or_default()
-        );
-    }
+    answer(
+        &During {
+            notes,
+            now: now_ms() as u64,
+        },
+        json,
+    );
     Ok(())
+}
+
+/// Notes captured while something was on.
+struct During {
+    notes: Vec<NoteRow>,
+    now: u64,
+}
+
+impl View for During {
+    fn json(&self) -> Json {
+        let During { notes, now } = self;
+        arr(notes.iter().map(|n| note(n, *now)))
+    }
+
+    fn prose(&self) {
+        let During { notes, .. } = self;
+        if notes.is_empty() {
+            say!("Nothing was captured while that was on.");
+            say!();
+            say!("Either it has not happened yet, or nothing was written down during it.");
+            return;
+        }
+
+        say!("Captured while this was happening:");
+        say!();
+        for n in notes {
+            Named::of(n).say(30);
+        }
+    }
 }
 
 /// Every if-then plan still standing.
 pub fn intents(paths: &StorePaths, json: bool) -> Result<()> {
     let store = open(paths)?;
-    let rows = store.intents()?;
-
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .map(|i| {
-                format!(
-                    "{{\"id\":{},\"cue\":{},\"match\":{},\"at\":{},\"then\":{}}}",
-                    quote(&short(&i.id)),
-                    quote(&i.cue_type),
-                    i.cue_match
-                        .as_deref()
-                        .map(quote)
-                        .unwrap_or_else(|| "null".into()),
-                    i.cue_at
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| "null".into()),
-                    quote(&i.then_do)
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        say!("No plans.");
-        say!();
-        say!("  capture intent at 2026-09-01T09:00  ring the dentist");
-        say!("  capture intent branch main          run the migration check");
-        return Ok(());
-    }
-
-    for i in &rows {
-        let when = match (i.cue_type.as_str(), &i.cue_match, i.cue_at) {
-            // In this machine's zone, not UTC. A time cue stores no zone of its
-            // own — `capture intent at 2026-10-06T09:00` resolves the wall
-            // clock against the local zone and keeps the instant — so UTC here
-            // answered a question nobody asked: somebody who typed 09:00 was
-            // told their plan fires at 14:00. The same mistake the agenda made.
-            ("time", _, Some(at)) => format!("at {}", stamp(at as u64, Some(&local_zone()))),
-            ("git_branch", Some(b), _) => format!("on branch {b}"),
-            (t, Some(m), _) => format!("{t} {m}"),
-            (t, None, _) => t.to_string(),
-        };
-        // The id, because `capture forget` needs something to name and the whole
-        // one is thirty-two bytes.
-        say!("  {}  {:<30}  {}", short(&i.id), when, i.then_do);
-    }
+    answer(
+        &Intents {
+            rows: store.intents()?,
+            zone: local_zone(),
+        },
+        json,
+    );
     Ok(())
+}
+
+struct Intents {
+    rows: Vec<projection::IntentRow>,
+    /// The zone a time cue is drawn in.
+    zone: String,
+}
+
+impl View for Intents {
+    fn json(&self) -> Json {
+        // The zone only draws `at`, which is an instant.
+        let Intents { rows, zone: _ } = self;
+        arr(rows.iter().map(|i| {
+            let projection::IntentRow {
+                id,
+                cue_type,
+                cue_match,
+                cue_at,
+                then_do,
+            } = i;
+            obj([
+                ("id", short(id).into()),
+                ("cue", cue_type.into()),
+                ("match", cue_match.into()),
+                ("at", (*cue_at).into()),
+                ("then", then_do.into()),
+            ])
+        }))
+    }
+
+    fn prose(&self) {
+        let Intents { rows, zone } = self;
+        if rows.is_empty() {
+            say!("No plans.");
+            say!();
+            say!("  capture intent at 2026-09-01T09:00  ring the dentist");
+            say!("  capture intent branch main          run the migration check");
+            return;
+        }
+
+        for i in rows {
+            let when = match (i.cue_type.as_str(), &i.cue_match, i.cue_at) {
+                // In this machine's zone, not UTC. A time cue stores no zone of
+                // its own — `capture intent at 2026-10-06T09:00` resolves the
+                // wall clock against the local zone and keeps the instant — so
+                // UTC here answered a question nobody asked: somebody who typed
+                // 09:00 was told their plan fires at 14:00. The same mistake
+                // the agenda made.
+                ("time", _, Some(at)) => format!("at {}", stamp(at as u64, Some(zone))),
+                ("git_branch", Some(b), _) => format!("on branch {b}"),
+                (t, Some(m), _) => format!("{t} {m}"),
+                (t, None, _) => t.to_string(),
+            };
+            // The id, because `capture forget` needs something to name and the
+            // whole one is thirty-two bytes.
+            say!("  {}  {:<30}  {}", short(&i.id), when, i.then_do);
+        }
+    }
 }
 
 fn utc() -> capture_time::Zone {
@@ -1024,39 +1333,54 @@ pub fn timeline(paths: &StorePaths, limit: Option<usize>, json: bool) -> Result<
             .and_then(|v| v.parse().ok())
             .unwrap_or(50),
     };
-    let notes = store.timeline(limit)?;
-
-    if json {
-        say!(
-            "[{}]",
-            notes.iter().map(note_json).collect::<Vec<_>>().join(",")
-        );
-        return Ok(());
-    }
-
-    if notes.is_empty() {
-        empty_state();
-        return Ok(());
-    }
-
-    // One column width for the whole listing, from the longest name actually
-    // present. A fixed width either wraps on long names or wastes half the
-    // terminal on short ones, and slugs vary by more than either allows for.
-    let width = name_width(&notes);
-
-    let mut current_day = String::new();
-    for n in &notes {
-        let day = day_of(n);
-        if day != current_day {
-            if !current_day.is_empty() {
-                say!();
-            }
-            say!("{day}");
-            current_day = day;
-        }
-        say!("  {}", row(n, width, now_ms() as u64));
-    }
+    answer(
+        &Timeline {
+            notes: store.timeline(limit)?,
+            now: now_ms() as u64,
+        },
+        json,
+    );
     Ok(())
+}
+
+struct Timeline {
+    notes: Vec<NoteRow>,
+    /// What "muted" is decided against: a mute with an end lapses.
+    now: u64,
+}
+
+impl View for Timeline {
+    fn json(&self) -> Json {
+        let Timeline { notes, now } = self;
+        arr(notes.iter().map(|n| note(n, *now)))
+    }
+
+    fn prose(&self) {
+        let Timeline { notes, now } = self;
+        if notes.is_empty() {
+            empty_state();
+            return;
+        }
+
+        // One column width for the whole listing, from the longest name
+        // actually present. A fixed width either wraps on long names or wastes
+        // half the terminal on short ones, and slugs vary by more than either
+        // allows for.
+        let width = name_width(notes);
+
+        let mut current_day = String::new();
+        for n in notes {
+            let day = day_of(n);
+            if day != current_day {
+                if !current_day.is_empty() {
+                    say!();
+                }
+                say!("{day}");
+                current_day = day;
+            }
+            say!("  {}", row(n, width, *now));
+        }
+    }
 }
 
 /// The column width a listing needs, bounded so one long name cannot push every
@@ -1161,103 +1485,164 @@ fn row(n: &NoteRow, width: usize, now: u64) -> String {
 pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     let n = find(&store, name)?;
-
-    if json {
-        say!("{}", note_json(&n));
-        return Ok(());
-    }
-
-    say!("{}", n.slug);
-    say!("{}", "-".repeat(n.slug.chars().count()));
-    if let Some(a) = &n.alias {
-        say!("also {a}");
-    }
-
-    match &n.text {
-        Some(t) => say!("{t}"),
-        None if n.redacted_at.is_some() => say!("(content destroyed)"),
-        None if n.redaction_queued => {
-            say!("(content withheld — queued for destruction)");
-            say!();
-            say!("It is still recoverable: capture redact --cancel <id>");
-            say!("Listed by: capture status");
-        }
-        None => say!("(no readable text)"),
-    }
-
-    say!();
-
-    // What it was recognised as, first, because it is the most consequential
-    // thing about a note and this command said none of it. A task never said
-    // it was due, a series never said its rule, and `carries-forward` — which
-    // only a person can set (§3.6) — had no surface at all to confirm it took.
-    //
-    // The descriptor is taken from the projection rather than re-rendered
-    // here: `promotion_of` renders it once when the fields are written, and a
-    // second rendering would be a second version of the truth. The desktop's
-    // note page reads the same column, so the two surfaces agree by
-    // construction rather than by both being kept up to date.
     // A plain note is the one kind with nothing to say — `Promoted::Note`
-    // renders to an empty descriptor — and it gets no line rather than a label
-    // with nothing after it, for the reason at the top of this module.
-    if let Some(p) = store.promotion_of(&n.tgt)?.filter(|p| p.kind != "note") {
-        // A task's descriptor already opens with its own kind, and the other
-        // two do not. Printing the label anyway would read "task  task · due
-        // …", so the repeat comes off here rather than being pre-empted in the
-        // renderer, which has surfaces of its own that want the full string.
-        // "done" survives this, because that is a state and not the kind.
-        let rest = p
-            .descriptor
-            .strip_prefix(&p.kind)
-            .map(|r| r.strip_prefix(" · ").unwrap_or(r))
-            .unwrap_or(&p.descriptor);
-        let authored = if p.pinned { "  (yours)" } else { "" };
-        if rest.is_empty() {
-            say!("{}{}", p.kind, authored);
-        } else {
-            say!("{:<10}{}{}", p.kind, rest, authored);
+    // renders to an empty descriptor — and it gets no promotion rather than a
+    // label with nothing after it, for the reason at the top of this module.
+    let promotion = store.promotion_of(&n.tgt)?.filter(|p| p.kind != "note");
+    let links = store.links_from(&n.tgt)?;
+    let backlinks = store.links_to(&n.tgt)?;
+    answer(
+        &Page {
+            note: n,
+            promotion,
+            links,
+            backlinks,
+            now: now_ms() as u64,
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// One note in full: its fields, what it was recognised as, and its links.
+struct Page {
+    note: NoteRow,
+    promotion: Option<projection::PromotionRow>,
+    links: Vec<LinkRow>,
+    backlinks: Vec<Backlink>,
+    now: u64,
+}
+
+impl View for Page {
+    fn json(&self) -> Json {
+        let Page {
+            note: n,
+            promotion,
+            links,
+            backlinks,
+            now,
+        } = self;
+        // What it was recognised as was printed and never carried here, so a
+        // script could not ask a note whether it is a task without reading
+        // `tasks` and looking for it.
+        let promotion = match promotion {
+            None => Json::Null,
+            Some(projection::PromotionRow {
+                kind,
+                as_: _, // the decoded fields; `descriptor` is their one rendering
+                descriptor,
+                pinned,
+                grammar: _,    // which recognizer, not what it said
+                confidence: _, // likewise
+            }) => obj([
+                ("kind", kind.into()),
+                ("descriptor", descriptor.into()),
+                ("authored", (*pinned).into()),
+            ]),
+        };
+        note(n, *now).and([
+            ("promotion", promotion),
+            ("links", arr(links.iter().map(link_json))),
+            ("backlinks", arr(backlinks.iter().map(backlink_json))),
+        ])
+    }
+
+    fn prose(&self) {
+        let Page {
+            note: n,
+            promotion,
+            links,
+            backlinks,
+            ..
+        } = self;
+        say!("{}", n.slug);
+        say!("{}", "-".repeat(n.slug.chars().count()));
+        if let Some(a) = &n.alias {
+            say!("also {a}");
+        }
+
+        match &n.text {
+            Some(t) => say!("{t}"),
+            None if n.redacted_at.is_some() => say!("(content destroyed)"),
+            None if n.redaction_queued => {
+                say!("(content withheld — queued for destruction)");
+                say!();
+                say!("It is still recoverable: capture redact --cancel <id>");
+                say!("Listed by: capture status");
+            }
+            None => say!("(no readable text)"),
+        }
+
+        say!();
+
+        // What it was recognised as, first, because it is the most
+        // consequential thing about a note and this command said none of it. A
+        // task never said it was due, a series never said its rule, and
+        // `carries-forward` — which only a person can set (§3.6) — had no
+        // surface at all to confirm it took.
+        //
+        // The descriptor is taken from the projection rather than re-rendered
+        // here: `promotion_of` renders it once when the fields are written, and
+        // a second rendering would be a second version of the truth. The
+        // desktop's note page reads the same column, so the two surfaces agree
+        // by construction rather than by both being kept up to date.
+        if let Some(p) = promotion {
+            // A task's descriptor already opens with its own kind, and the
+            // other two do not. Printing the label anyway would read "task
+            // task · due …", so the repeat comes off here rather than being
+            // pre-empted in the renderer, which has surfaces of its own that
+            // want the full string. "done" survives this, because that is a
+            // state and not the kind.
+            let rest = p
+                .descriptor
+                .strip_prefix(&p.kind)
+                .map(|r| r.strip_prefix(" · ").unwrap_or(r))
+                .unwrap_or(&p.descriptor);
+            let authored = if p.pinned { "  (yours)" } else { "" };
+            if rest.is_empty() {
+                say!("{}{}", p.kind, authored);
+            } else {
+                say!("{:<10}{}{}", p.kind, rest, authored);
+            }
+        }
+
+        say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));
+        if n.updated != n.created {
+            say!("updated   {}", stamp(n.updated.0, n.tz.as_deref()));
+        }
+        if !n.tags.is_empty() {
+            say!("tags      {}", n.tags.join(" "));
+        }
+        if n.pinned {
+            say!("pinned    yes");
+        }
+        if let Some(until) = n.muted_until {
+            say!(
+                "muted     {}",
+                if until == 0 {
+                    "indefinitely".to_string()
+                } else {
+                    format!("until {}", stamp(until, n.tz.as_deref()))
+                }
+            );
+        }
+        if let Some(at) = n.redacted_at {
+            say!("redacted  {}", stamp(at, n.tz.as_deref()));
+        }
+        if n.divergences > 0 {
+            // Reported, never prompted. A divergence is information about the
+            // note, not a task the reader has to clear before continuing.
+            say!(
+                "versions  {} independent, none superseded",
+                n.divergences + 1
+            );
+        }
+
+        if !links.is_empty() || !backlinks.is_empty() {
+            say!();
+            print_links(links, backlinks);
         }
     }
-
-    say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));
-    if n.updated != n.created {
-        say!("updated   {}", stamp(n.updated.0, n.tz.as_deref()));
-    }
-    if !n.tags.is_empty() {
-        say!("tags      {}", n.tags.join(" "));
-    }
-    if n.pinned {
-        say!("pinned    yes");
-    }
-    if let Some(until) = n.muted_until {
-        say!(
-            "muted     {}",
-            if until == 0 {
-                "indefinitely".to_string()
-            } else {
-                format!("until {}", stamp(until, n.tz.as_deref()))
-            }
-        );
-    }
-    if let Some(at) = n.redacted_at {
-        say!("redacted  {}", stamp(at, n.tz.as_deref()));
-    }
-    if n.divergences > 0 {
-        // Reported, never prompted. A divergence is information about the note,
-        // not a task the reader has to clear before continuing.
-        say!(
-            "versions  {} independent, none superseded",
-            n.divergences + 1
-        );
-    }
-
-    let out = store.links_from(&n.tgt)?;
-    let back = store.links_to(&n.tgt)?;
-    if !out.is_empty() || !back.is_empty() {
-        say!();
-        print_links(&out, &back);
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------- links ----
@@ -1266,25 +1651,49 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
 pub fn links(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
     let n = find(&store, name)?;
-    let out = store.links_from(&n.tgt)?;
-    let back = store.links_to(&n.tgt)?;
-
-    if json {
-        say!(
-            "{{\"note\":{},\"links\":[{}],\"backlinks\":[{}]}}",
-            quote(&n.slug),
-            out.iter().map(link_json).collect::<Vec<_>>().join(","),
-            back.iter().map(backlink_json).collect::<Vec<_>>().join(",")
-        );
-        return Ok(());
-    }
-
-    if out.is_empty() && back.is_empty() {
-        say!("{} has no links in either direction.", n.slug);
-        return Ok(());
-    }
-    print_links(&out, &back);
+    answer(
+        &Links {
+            links: store.links_from(&n.tgt)?,
+            backlinks: store.links_to(&n.tgt)?,
+            slug: n.slug,
+        },
+        json,
+    );
     Ok(())
+}
+
+struct Links {
+    slug: String,
+    links: Vec<LinkRow>,
+    backlinks: Vec<Backlink>,
+}
+
+impl View for Links {
+    fn json(&self) -> Json {
+        let Links {
+            slug,
+            links,
+            backlinks,
+        } = self;
+        obj([
+            ("note", slug.into()),
+            ("links", arr(links.iter().map(link_json))),
+            ("backlinks", arr(backlinks.iter().map(backlink_json))),
+        ])
+    }
+
+    fn prose(&self) {
+        let Links {
+            slug,
+            links,
+            backlinks,
+        } = self;
+        if links.is_empty() && backlinks.is_empty() {
+            say!("{slug} has no links in either direction.");
+            return;
+        }
+        print_links(links, backlinks);
+    }
 }
 
 fn print_links(out: &[LinkRow], back: &[Backlink]) {
@@ -1334,28 +1743,50 @@ pub fn search(paths: &StorePaths, query: &str, json: bool) -> Result<()> {
     let now = now_ms() as u64;
     let hits = store.search(query, now)?;
 
-    let rows: Vec<NoteRow> = hits
+    let notes: Vec<NoteRow> = hits
         .iter()
         .filter_map(|t| store.note(t).ok().flatten())
         .collect();
 
-    if json {
-        say!(
-            "[{}]",
-            rows.iter().map(note_json).collect::<Vec<_>>().join(",")
-        );
-        return Ok(());
+    answer(
+        &Search {
+            query: query.to_string(),
+            notes,
+            now,
+        },
+        json,
+    );
+    Ok(())
+}
+
+struct Search {
+    query: String,
+    notes: Vec<NoteRow>,
+    now: u64,
+}
+
+impl View for Search {
+    fn json(&self) -> Json {
+        // The query is the question, not part of the answer.
+        let Search {
+            query: _,
+            notes,
+            now,
+        } = self;
+        arr(notes.iter().map(|n| note(n, *now)))
     }
 
-    if rows.is_empty() {
-        say!("Nothing matches {query}.");
-        return Ok(());
+    fn prose(&self) {
+        let Search { query, notes, now } = self;
+        if notes.is_empty() {
+            say!("Nothing matches {query}.");
+            return;
+        }
+        let width = name_width(notes);
+        for n in notes {
+            say!("{}", row(n, width, *now));
+        }
     }
-    let width = name_width(&rows);
-    for n in &rows {
-        say!("{}", row(n, width, now_ms() as u64));
-    }
-    Ok(())
 }
 
 // ----------------------------------------------------------------- time ----
@@ -1403,69 +1834,74 @@ fn first_line(text: &str) -> String {
 }
 
 // ----------------------------------------------------------------- json ----
-//
-// Written by hand rather than derived. These structures cross into scripts, and
-// a serialiser attached to the storage types would make every future field
-// rename a silent breaking change to someone's pipeline.
 
-pub(crate) fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// A note's own fields, wherever a note is rendered.
+///
+/// No `..`: a field added to `NoteRow` does not compile here until it is
+/// either rendered or set aside with a reason.
+fn note(n: &NoteRow, now: u64) -> Json {
+    let NoteRow {
+        tgt: _, // the name below is how every command refers to a note
+        slug,
+        alias,
+        text,
+        created,
+        updated,
+        tz,
+        pinned,
+        muted_until,
+        redacted_at,
+        redaction_queued,
+        credential,
+        tags,
+        parent: _, // no listing or page draws it yet
+        divergences,
+    } = n;
+    // `slug` first: `tools/converge.sh` reads it as the first field.
+    obj([
+        ("slug", slug.into()),
+        ("alias", alias.into()),
+        ("text", text.into()),
+        ("captured_ms", created.0.into()),
+        ("updated_ms", updated.0.into()),
+        ("tz", tz.into()),
+        ("tags", arr(tags)),
+        ("pinned", (*pinned).into()),
+        // In force, not merely present. This was `muted_until.is_some()`, so a
+        // mute that had ended was reported for ever — the mistake the unmute
+        // change took out of ten SQL predicates, still here in the one place a
+        // script would look.
+        ("muted", n.is_muted(now).into()),
+        // `0` is indefinite, as the page's "indefinitely" says.
+        ("muted_until", (*muted_until).into()),
+        ("redacted", n.is_redacted().into()),
+        ("redacted_at", (*redacted_at).into()),
+        // Withheld and still cancellable, as against destroyed. The prose has
+        // always said which; without this a script saw a note with no text.
+        ("redaction_queued", (*redaction_queued).into()),
+        ("credential", (*credential).into()),
+        ("divergences", divergences.into()),
+    ])
 }
 
-fn opt(s: Option<&str>) -> String {
-    match s {
-        Some(v) => quote(v),
-        None => "null".to_string(),
-    }
+fn link_json(l: &LinkRow) -> Json {
+    let LinkRow {
+        name,
+        // What `broken` and `resolved` below are computed from.
+        resolved: _,
+        now: _,
+        target_slug,
+    } = l;
+    obj([
+        ("name", name.into()),
+        ("resolved", target_slug.into()),
+        ("broken", l.is_broken().into()),
+    ])
 }
 
-fn note_json(n: &NoteRow) -> String {
-    format!(
-        "{{\"slug\":{},\"alias\":{},\"text\":{},\"captured_ms\":{},\"updated_ms\":{},\"tz\":{},\
-          \"tags\":[{}],\"pinned\":{},\"muted\":{},\"redacted\":{},\"divergences\":{}}}",
-        quote(&n.slug),
-        opt(n.alias.as_deref()),
-        opt(n.text.as_deref()),
-        n.created.0,
-        n.updated.0,
-        opt(n.tz.as_deref()),
-        n.tags
-            .iter()
-            .map(|t| quote(t))
-            .collect::<Vec<_>>()
-            .join(","),
-        n.pinned,
-        n.muted_until.is_some(),
-        n.is_redacted(),
-        n.divergences
-    )
-}
-
-fn link_json(l: &LinkRow) -> String {
-    format!(
-        "{{\"name\":{},\"resolved\":{},\"broken\":{}}}",
-        quote(&l.name),
-        opt(l.target_slug.as_deref()),
-        l.is_broken()
-    )
-}
-
-fn backlink_json(b: &Backlink) -> String {
-    format!("{{\"slug\":{},\"as\":{}}}", quote(&b.slug), quote(&b.name))
+fn backlink_json(b: &Backlink) -> Json {
+    let Backlink { tgt: _, slug, name } = b;
+    obj([("slug", slug.into()), ("as", name.into())])
 }
 
 /// What has come due, and what it will do about it.
@@ -1510,72 +1946,164 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     // only the overdue would answer the question with silence, which is what
     // they were already looking at.
     const AHEAD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-    let rows = store.due_by(now + AHEAD_MS, now, &zone)?;
-
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .map(|d| {
-                format!(
-                    "{{\"at\":{},\"timed\":{},\"text\":{}}}",
-                    d.at,
-                    d.timed,
-                    quote(&d.text)
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        say!("Nothing due.");
-        say!();
-        // Before the explanation, because it changes what the explanation
-        // means. "Nothing due" over captures nobody has read is not an answer
-        // about scheduling at all.
-        say_if_unsettled(&store, &settled);
-        say!("A capture speaks when it names a time — \"dentist thursday 2pm\".");
-        say!("One with no time never becomes overdue.");
-        return Ok(());
-    }
+    let found = store.due_by(now + AHEAD_MS, now, &zone)?;
 
     let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
     let hour = hour_of(now, &zone);
 
-    for d in &rows {
+    let mut rows = Vec::new();
+    for d in found {
         // Said rather than implied. A moment already delivered still shows,
         // because "it fired and you missed it" and "it never fired" are
         // different answers to the same question and only one of them is a
         // bug.
         let state = if ops.alerted(&d.tgt.0, d.occ, d.at)? {
-            "delivered".into()
+            Will::Delivered
         } else if d.at > now {
-            "waiting".into()
+            Will::Wait
         } else {
             match deliver_late(hour, d.timed, false, now.saturating_sub(d.at)) {
-                Delivery::Now => "now".into(),
-                Delivery::At(h) => format!("held to {h:02}:00"),
+                Delivery::Now => Will::Now,
+                Delivery::At(h) => Will::Hold(h),
                 // Said plainly rather than shown as a pending delivery that
                 // will never happen. It is still outstanding and still listed;
                 // what it will not do is interrupt anybody about it.
-                Delivery::Stale => "too late to say".into(),
+                Delivery::Stale => Will::Stale,
             }
         };
-        let z = capture_time::Zone::new(&zone).unwrap_or_else(utc);
-        let when = capture_time::local_of(d.at, z).format("%a %H:%M");
-        say!("  {:<13} {:<10} {}", state, when.to_string(), d.text);
+        rows.push(Coming {
+            slug: store.slug_of(&d.tgt)?.unwrap_or_default(),
+            d,
+            state,
+        });
     }
 
-    let overdue = rows.iter().filter(|d| d.at <= now).count();
-    say!();
-    match overdue {
-        0 => say!("{} coming, none due yet.", rows.len()),
-        n if n == rows.len() => say!("{n} due."),
-        n => say!("{n} due, {} more coming.", rows.len() - n),
-    }
-    say_if_unsettled(&store, &settled);
+    answer(
+        &DueList {
+            rows,
+            now,
+            zone: capture_time::Zone::new(&zone).unwrap_or_else(utc),
+            unread: unread(&store),
+            unsettled: settled.err().map(|e| e.to_string()),
+        },
+        json,
+    );
     Ok(())
+}
+
+/// Everything due within the week, and what will happen about each.
+struct DueList {
+    rows: Vec<Coming>,
+    now: i64,
+    zone: capture_time::Zone,
+    unread: usize,
+    /// Why the captures could not be read first, if they could not.
+    unsettled: Option<String>,
+}
+
+struct Coming {
+    slug: String,
+    d: projection::Due,
+    state: Will,
+}
+
+/// What delivery will do about one moment.
+enum Will {
+    Delivered,
+    Wait,
+    Now,
+    /// Held to this hour, because it would otherwise land in quiet hours.
+    Hold(u32),
+    Stale,
+}
+
+impl View for DueList {
+    fn json(&self) -> Json {
+        let DueList {
+            rows,
+            now: _,  // already decided each row's state
+            zone: _, // `at` is an instant; the zone only draws it
+            unread,
+            unsettled,
+        } = self;
+        let items = rows.iter().map(|Coming { slug, d, state }| {
+            let projection::Due {
+                tgt: _, // named by `slug`
+                at,
+                occ,
+                text,
+                timed,
+            } = d;
+            let (state, held_to) = match state {
+                Will::Delivered => ("delivered", None),
+                Will::Wait => ("waiting", None),
+                Will::Now => ("now", None),
+                Will::Hold(h) => ("held", Some(*h)),
+                Will::Stale => ("stale", None),
+            };
+            obj([
+                ("slug", slug.into()),
+                ("at", at.into()),
+                ("occ", (*occ).into()),
+                ("timed", (*timed).into()),
+                ("text", text.into()),
+                // What it will do. The whole of what this command is for, and
+                // the JSON listed the moments without it.
+                ("state", state.into()),
+                ("held_to", held_to.into()),
+            ])
+        });
+        // An object, so the two admissions the prose makes have somewhere to
+        // go: a list read over unread captures, or one that could not read
+        // them at all, is not the same answer as the list alone.
+        obj([
+            ("due", arr(items)),
+            ("unread", unread.into()),
+            ("unsettled", unsettled.into()),
+        ])
+    }
+
+    fn prose(&self) {
+        let DueList {
+            rows,
+            now,
+            zone,
+            unread,
+            unsettled,
+        } = self;
+        if rows.is_empty() {
+            say!("Nothing due.");
+            say!();
+            // Before the explanation, because it changes what the explanation
+            // means. "Nothing due" over captures nobody has read is not an
+            // answer about scheduling at all.
+            say_if_unsettled(*unread, unsettled.as_deref());
+            say!("A capture speaks when it names a time — \"dentist thursday 2pm\".");
+            say!("One with no time never becomes overdue.");
+            return;
+        }
+
+        for Coming { d, state, .. } in rows {
+            let state = match state {
+                Will::Delivered => "delivered".to_string(),
+                Will::Wait => "waiting".to_string(),
+                Will::Now => "now".to_string(),
+                Will::Hold(h) => format!("held to {h:02}:00"),
+                Will::Stale => "too late to say".to_string(),
+            };
+            let when = capture_time::local_of(d.at, *zone).format("%a %H:%M");
+            say!("  {:<13} {:<10} {}", state, when.to_string(), d.text);
+        }
+
+        let overdue = rows.iter().filter(|r| r.d.at <= *now).count();
+        say!();
+        match overdue {
+            0 => say!("{} coming, none due yet.", rows.len()),
+            n if n == rows.len() => say!("{n} due."),
+            n => say!("{n} due, {} more coming.", rows.len() - n),
+        }
+        say_if_unsettled(*unread, unsettled.as_deref());
+    }
 }
 
 /// What this command could not read, and therefore cannot speak for.
@@ -1585,14 +2113,14 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
 /// list below may be missing entries for a reason that has nothing to do with
 /// scheduling; say who has the store. If it succeeded, a non-zero count is the
 /// ordinary staleness line.
-fn say_if_unsettled(store: &Store, settled: &Result<usize>) {
-    if let Err(e) = settled {
+fn say_if_unsettled(unread: usize, unsettled: Option<&str>) {
+    if let Some(e) = unsettled {
         say!();
         say!("Captures could not be read first: {e}");
         say!("So this may be missing something. Try again once that finishes.");
         return;
     }
-    say_if_behind(store);
+    say_if_behind(unread);
 }
 
 /// The local hour, for the delivery decision.
@@ -1608,76 +2136,76 @@ fn hour_of(now: i64, zone: &str) -> u32 {
 /// exists for every tag the moment somebody writes one.
 pub fn list(paths: &StorePaths, tag: &str, json: bool) -> Result<()> {
     let store = open(paths)?;
-    let rows = store.list(tag, now_ms().max(0) as u64)?;
-
-    if json {
-        let items: Vec<String> = rows
-            .iter()
-            .map(|e| {
-                format!(
-                    "{{\"item\":{},\"done\":{},\"ord\":{}}}",
-                    quote(&e.text),
-                    e.done,
-                    match e.ord {
-                        Some(o) => o.to_string(),
-                        None => "null".into(),
-                    }
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        // Said rather than printed as an empty result, because the two mean
-        // different things: nothing carries this tag, as against a list that
-        // has been emptied.
-        // Not "nothing carries this tag", which would be a claim about the
-        // tag rather than about the list. A note can carry `#{tag}` and have
-        // no place on a list: the tag page holds everything, and a list holds
-        // the half somebody can tick off.
-        say!("Nothing on the #{tag} list.");
-        say!();
-        say!("Start one by capturing:  #{tag}: first thing, second thing");
-        say!("Everything carrying the tag:  capture mentions #{tag}");
-        return Ok(());
-    }
-
-    for e in &rows {
-        // A box rather than a colour, so it survives a pipe and a terminal
-        // that has opinions.
-        say!("  [{}] {}", if e.done { "x" } else { " " }, e.text);
-    }
-
-    let left = rows.iter().filter(|e| !e.done).count();
-    say!();
-    match left {
-        0 => say!("All {} done.", rows.len()),
-        n => say!("{n} of {} left.", rows.len()),
-    }
+    answer(
+        &List {
+            tag: tag.to_string(),
+            rows: store.list(tag, now_ms().max(0) as u64)?,
+        },
+        json,
+    );
     Ok(())
+}
+
+struct List {
+    tag: String,
+    rows: Vec<projection::ListEntry>,
+}
+
+impl View for List {
+    fn json(&self) -> Json {
+        // The tag is the question.
+        let List { tag: _, rows } = self;
+        arr(rows.iter().map(|e| {
+            let projection::ListEntry {
+                tgt: _, // the line's source, which no surface names
+                ord,
+                text,
+                done,
+                task: _, // an implementation of `done`, not a fact of its own
+            } = e;
+            obj([
+                ("item", text.into()),
+                ("done", (*done).into()),
+                ("ord", (*ord).into()),
+            ])
+        }))
+    }
+
+    fn prose(&self) {
+        let List { tag, rows } = self;
+        if rows.is_empty() {
+            // Said rather than printed as an empty result, because the two
+            // mean different things: nothing carries this tag, as against a
+            // list that has been emptied.
+            // Not "nothing carries this tag", which would be a claim about the
+            // tag rather than about the list. A note can carry `#{tag}` and
+            // have no place on a list: the tag page holds everything, and a
+            // list holds the half somebody can tick off.
+            say!("Nothing on the #{tag} list.");
+            say!();
+            say!("Start one by capturing:  #{tag}: first thing, second thing");
+            say!("Everything carrying the tag:  capture mentions #{tag}");
+            return;
+        }
+
+        for e in rows {
+            // A box rather than a colour, so it survives a pipe and a terminal
+            // that has opinions.
+            say!("  [{}] {}", if e.done { "x" } else { " " }, e.text);
+        }
+
+        let left = rows.iter().filter(|e| !e.done).count();
+        say!();
+        match left {
+            0 => say!("All {} done.", rows.len()),
+            n => say!("{n} of {} left.", rows.len()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_strings_are_escaped() {
-        assert_eq!(quote("plain"), "\"plain\"");
-        assert_eq!(quote("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(quote("a\nb"), "\"a\\nb\"");
-        assert_eq!(quote("back\\slash"), "\"back\\\\slash\"");
-    }
-
-    #[test]
-    fn control_characters_do_not_escape_the_string() {
-        // Capture is verbatim, so a note may contain anything at all. A raw
-        // control byte in the output would produce JSON a consumer rejects.
-        let out = quote("bell\u{7}here");
-        assert!(out.contains("\\u0007"), "got {out}");
-    }
 
     #[test]
     fn a_long_line_is_shortened_only_in_lists() {

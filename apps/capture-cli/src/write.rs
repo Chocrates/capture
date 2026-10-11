@@ -32,8 +32,9 @@ use capture_store::{Error, Result, StorePaths};
 use capture_store::session::Session;
 
 // One home for what a sigil names; see `read::split_mention`.
+use crate::json::{Json, View, answer, arr, obj};
+use crate::read::now_ms;
 use crate::read::split_mention;
-use crate::read::{now_ms, quote};
 
 /// Resolve a name against the projection, or say it is not there.
 fn find(s: &Session, name: &str) -> Result<EventId> {
@@ -1066,18 +1067,28 @@ pub fn tick(paths: StorePaths, tag: &str, item: &str, done: bool) -> Result<()> 
 /// bug `settle` exists to stop. A held lock is an error and says who holds it.
 pub fn settle(paths: &StorePaths, json: bool) -> Result<()> {
     let n = capture_store::promote::settle(paths)?;
-
-    if json {
-        say!("{{\"promoted\":{n}}}");
-        return Ok(());
-    }
-
-    match n {
-        0 => say!("Nothing was waiting to be read."),
-        1 => say!("Read 1 capture."),
-        n => say!("Read {n} captures."),
-    }
+    answer(&Settled { read: n }, json);
     Ok(())
+}
+
+/// How many captures a settle read.
+struct Settled {
+    read: usize,
+}
+
+impl View for Settled {
+    fn json(&self) -> Json {
+        let Settled { read } = self;
+        obj([("promoted", read.into())])
+    }
+
+    fn prose(&self) {
+        match self.read {
+            0 => say!("Nothing was waiting to be read."),
+            1 => say!("Read 1 capture."),
+            n => say!("Read {n} captures."),
+        }
+    }
 }
 
 /// Copies kept before a redaction, and bringing one back.
@@ -1136,57 +1147,99 @@ pub fn recover(paths: StorePaths, id: Option<&str>, json: bool) -> Result<()> {
     let body = capture_store::session::capture_body(&found.text)?;
     let written = s.capture(&body)?;
 
-    if json {
-        say!("{{\"slug\":{}}}", quote(&written.slug));
-        return Ok(());
-    }
-
-    say!("Written as a new note:  {}", written.slug);
-    say!();
-    say!("The redaction still stands. The original note is still destroyed, and");
-    say!("this is a fresh capture carrying the text the copy held — a different");
-    say!("note, with its own name.");
+    answer(&Recovered { slug: written.slug }, json);
     Ok(())
 }
 
+/// A copy written back as a new note.
+struct Recovered {
+    slug: String,
+}
+
+impl View for Recovered {
+    fn json(&self) -> Json {
+        let Recovered { slug } = self;
+        obj([("slug", slug.into())])
+    }
+
+    fn prose(&self) {
+        say!("Written as a new note:  {}", self.slug);
+        say!();
+        say!("The redaction still stands. The original note is still destroyed, and");
+        say!("this is a fresh capture carrying the text the copy held — a different");
+        say!("note, with its own name.");
+    }
+}
+
 fn list_recoverable(kept: &[capture_store::ops::Snapshot], now: u64, json: bool) -> Result<()> {
-    if json {
-        let items: Vec<String> = kept
-            .iter()
-            .map(|s| {
+    answer(
+        &Kept {
+            copies: kept.to_vec(),
+            now,
+            zone: local_zone(),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// The copies still inside their retention.
+struct Kept {
+    copies: Vec<capture_store::ops::Snapshot>,
+    now: u64,
+    zone: capture_time::Zone,
+}
+
+impl View for Kept {
+    fn json(&self) -> Json {
+        // The zone only draws `taken_at`, which is an instant.
+        let Kept {
+            copies,
+            now,
+            zone: _,
+        } = self;
+        arr(copies.iter().map(|s| {
+            let capture_store::ops::Snapshot {
+                redact,
+                tgt: _, // destroyed; nothing can be done with its id
+                taken_at,
+                expires_at,
+                text,
+            } = s;
+            obj([
+                ("id", capture_store::mutate::short(redact).into()),
                 // `taken_at` beside the retention: a consumer can do nothing
                 // with a rendered date and everything with a number, and the
-                // field has been carried this far and dropped at the surface.
-                format!(
-                    "{{\"id\":{},\"taken_at\":{},\"expires_in_ms\":{}}}",
-                    quote(&capture_store::mutate::short(&s.redact)),
-                    s.taken_at,
-                    s.expires_at.saturating_sub(now)
-                )
-            })
-            .collect();
-        say!("[{}]", items.join(","));
-        return Ok(());
+                // field had been carried this far and dropped at the surface.
+                ("taken_at", taken_at.into()),
+                ("expires_in_ms", expires_at.saturating_sub(*now).into()),
+                // The first line, as the listing prints it, and no more: this
+                // is for recognising a copy, not for reading destroyed content
+                // back out of a listing.
+                ("first_line", first_line(text).into()),
+            ])
+        }))
     }
 
-    if kept.is_empty() {
-        say!("Nothing is being kept.");
+    fn prose(&self) {
+        let Kept { copies, now, zone } = self;
+        if copies.is_empty() {
+            say!("Nothing is being kept.");
+            say!();
+            say!("A copy is taken before a redaction destroys anything, and expires on");
+            say!("its own. None is inside its retention now.");
+            return;
+        }
+
+        say!("Copies of content that was destroyed, kept so a misfire is recoverable.");
         say!();
-        say!("A copy is taken before a redaction destroys anything, and expires on");
-        say!("its own. None is inside its retention now.");
-        return Ok(());
+        for s in copies {
+            say!("{}", recoverable_line(s, *now, *zone));
+        }
+        say!();
+        say!("Bring one back with:  capture recover <id>");
+        say!("It is written as a new note; the redaction itself still stands.");
     }
-
-    say!("Copies of content that was destroyed, kept so a misfire is recoverable.");
-    say!();
-    let zone = local_zone();
-    for s in kept {
-        say!("{}", recoverable_line(s, now, zone));
-    }
-    say!();
-    say!("Bring one back with:  capture recover <id>");
-    say!("It is written as a new note; the redaction itself still stands.");
-    Ok(())
 }
 
 /// One line of the recoverable listing.

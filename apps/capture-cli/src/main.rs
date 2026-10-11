@@ -26,6 +26,7 @@ mod pair;
 mod args;
 mod backup;
 mod input;
+mod json;
 mod read;
 mod shell;
 mod verify;

@@ -36,6 +36,7 @@ use capture_store::{
     store,
 };
 
+use crate::json::{Json, View, answer, arr, obj};
 use crate::read;
 
 // The table, its lookup and the value in force all live in `capture-store`,
@@ -72,36 +73,79 @@ pub fn log(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
         .collect();
     events.sort_by_key(|e| e.header.hlc);
 
-    if json {
-        let rows: Vec<String> = events
-            .iter()
-            .map(|e| {
-                format!(
-                    "{{\"id\":\"{}\",\"kind\":\"{}\",\"seq\":{},\"origin\":\"{}\",\"wall_ms\":{}}}",
-                    hex(&e.header.id().0[..8]),
-                    kind_name(e.header.kind),
-                    e.header.seq,
-                    hex(&e.header.dev.short()),
-                    e.header.hlc.wall
-                )
-            })
-            .collect();
-        say!("[{}]", rows.join(","));
-        return Ok(());
+    answer(
+        &History {
+            name: name.to_string(),
+            events: events
+                .iter()
+                .map(|e| Written {
+                    id: e.header.id().0,
+                    kind: e.header.kind,
+                    seq: e.header.seq,
+                    origin: hex(&e.header.dev.short()),
+                    wall: e.header.hlc.wall,
+                })
+                .collect(),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// One note's events, oldest first.
+struct History {
+    name: String,
+    events: Vec<Written>,
+}
+
+/// One event, as the audit trail names it.
+struct Written {
+    id: [u8; 32],
+    kind: Kind,
+    seq: u64,
+    origin: String,
+    wall: u64,
+}
+
+impl View for History {
+    fn json(&self) -> Json {
+        // The name is the question.
+        let History { name: _, events } = self;
+        arr(events.iter().map(
+            |Written {
+                 id,
+                 kind,
+                 seq,
+                 origin,
+                 wall,
+             }| {
+                obj([
+                    // Eight bytes here and four in prose: a script may need
+                    // to tell apart what a person never will.
+                    ("id", hex(&id[..8]).into()),
+                    ("kind", kind_name(*kind).into()),
+                    ("seq", seq.into()),
+                    ("origin", origin.into()),
+                    ("wall_ms", wall.into()),
+                ])
+            },
+        ))
     }
 
-    say!("{name}");
-    for e in &events {
-        say!(
-            "  {}  {:<14} {} seq {}  {}",
-            hex(&e.header.id().0[..4]),
-            kind_name(e.header.kind),
-            hex(&e.header.dev.short()),
-            e.header.seq,
-            when(e.header.hlc.wall)
-        );
+    fn prose(&self) {
+        let History { name, events } = self;
+        say!("{name}");
+        for e in events {
+            say!(
+                "  {}  {:<14} {} seq {}  {}",
+                hex(&e.id[..4]),
+                kind_name(e.kind),
+                e.origin,
+                e.seq,
+                when(e.wall)
+            );
+        }
     }
-    Ok(())
 }
 
 fn kind_name(k: Kind) -> &'static str {
@@ -593,58 +637,7 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     let addresses = ops.peer_addresses()?;
     let now = crate::read::now_ms() as u64;
 
-    let seen = |k: &[u8; 32]| addresses.iter().find(|p| &p.key == k);
-
-    if json {
-        let out: Vec<String> = members
-            .iter()
-            .map(|k| {
-                let p = seen(k);
-                format!(
-                    "{{\"key\":\"{}\",\"self\":{},\"addr\":{},\"last_seen\":{}}}",
-                    short_key(k),
-                    k == &me,
-                    p.and_then(|p| p.addr.as_deref())
-                        .map_or("null".into(), |a| format!("\"{a}\"")),
-                    p.and_then(|p| p.last_seen)
-                        .map_or("null".into(), |t| t.to_string()),
-                )
-            })
-            .collect();
-        say!("[{}]", out.join(","));
-        return Ok(());
-    }
-
-    for k in &members {
-        if k == &me {
-            say!("  {}  this device", short_key(k));
-            continue;
-        }
-        // The address and the last contact are separate facts, and a peer can
-        // have either without the other: one that only ever dials in is
-        // demonstrably alive at no address this device can call.
-        match seen(k) {
-            Some(p) => {
-                let at = p.addr.clone().unwrap_or_else(|| "no address".into());
-                match p.last_seen {
-                    Some(t) => say!(
-                        "  {}  {at} — last reached {} ago",
-                        short_key(k),
-                        ms(now.saturating_sub(t))
-                    ),
-                    None => say!("  {}  {at} — never reached", short_key(k)),
-                }
-            }
-            None => say!("  {}  never seen on any network", short_key(k)),
-        }
-    }
-    if members.len() == 1 {
-        say!();
-        say!("No other devices. To add one:  capture pair");
-        return Ok(());
-    }
-
-    // What the rows above cannot say.
+    // What the rows cannot say.
     //
     // "never reached" is a fact about a peer and reads as a fact about the
     // network. Whether a round has ever run is a different question with a
@@ -652,39 +645,160 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     // goes looking at their Wi-Fi. Beside the rows rather than instead of them:
     // the two together are a complete sentence.
     let others = members.iter().filter(|k| **k != me).count();
-    if let Some((_, text)) = capture_store::syncstate::sync_state(&ops, others, now)?.message() {
-        say!();
-        say!("{text}");
-    }
+    let sync = if others == 0 {
+        None
+    } else {
+        capture_store::syncstate::sync_state(&ops, others, now)?
+            .message()
+            .map(|(_, text)| text)
+    };
+
+    answer(
+        &Peers {
+            peers: members
+                .iter()
+                .map(|k| {
+                    let p = addresses.iter().find(|p| &p.key == k);
+                    Peer {
+                        key: short_key(k),
+                        me: k == &me,
+                        addr: p.and_then(|p| p.addr.clone()),
+                        last_seen: p.and_then(|p| p.last_seen),
+                        seen: p.is_some(),
+                    }
+                })
+                .collect(),
+            now,
+            sync,
+        },
+        json,
+    );
     Ok(())
+}
+
+/// Every device in the roster, and whether sync has ever reached any of them.
+struct Peers {
+    peers: Vec<Peer>,
+    now: u64,
+    /// The sentence about sync as a whole, where there is one to say.
+    sync: Option<String>,
+}
+
+struct Peer {
+    key: String,
+    me: bool,
+    addr: Option<String>,
+    last_seen: Option<u64>,
+    /// Whether it has ever been seen on any network, address or not.
+    seen: bool,
+}
+
+impl View for Peers {
+    fn json(&self) -> Json {
+        let Peers {
+            peers,
+            now: _, // `last_seen` is an instant; "ago" is for people
+            sync,
+        } = self;
+        // An object rather than the bare array it was, because the sync state
+        // is about the roster rather than any one row of it.
+        obj([
+            (
+                "peers",
+                arr(peers.iter().map(
+                    |Peer {
+                         key,
+                         me,
+                         addr,
+                         last_seen,
+                         seen,
+                     }| {
+                        obj([
+                            ("key", key.into()),
+                            ("self", (*me).into()),
+                            ("addr", addr.into()),
+                            ("last_seen", (*last_seen).into()),
+                            ("seen", (*seen).into()),
+                        ])
+                    },
+                )),
+            ),
+            ("sync", sync.into()),
+        ])
+    }
+
+    fn prose(&self) {
+        let Peers { peers, now, sync } = self;
+        for p in peers {
+            if p.me {
+                say!("  {}  this device", p.key);
+                continue;
+            }
+            // The address and the last contact are separate facts, and a peer
+            // can have either without the other: one that only ever dials in
+            // is demonstrably alive at no address this device can call.
+            if !p.seen {
+                say!("  {}  never seen on any network", p.key);
+                continue;
+            }
+            let at = p.addr.clone().unwrap_or_else(|| "no address".into());
+            match p.last_seen {
+                Some(t) => say!(
+                    "  {}  {at} — last reached {} ago",
+                    p.key,
+                    ms(now.saturating_sub(t))
+                ),
+                None => say!("  {}  {at} — never reached", p.key),
+            }
+        }
+        if peers.len() == 1 {
+            say!();
+            say!("No other devices. To add one:  capture pair");
+            return;
+        }
+        if let Some(text) = sync {
+            say!();
+            say!("{text}");
+        }
+    }
 }
 
 /// Events that are authentic but this device cannot use.
 pub fn quarantine(paths: &StorePaths, json: bool) -> Result<()> {
     let state = read::open(paths)?;
-    let rows = state.quarantined()?;
-
-    if json {
-        let out: Vec<String> = rows
-            .iter()
-            .map(|(id, reason)| {
-                format!("{{\"id\":\"{}\",\"reason\":\"{reason}\"}}", hex(&id.0[..8]))
-            })
-            .collect();
-        say!("[{}]", out.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        say!("Nothing is quarantined.");
-        return Ok(());
-    }
-    say!("Set aside — authentic, and holding their positions, but unusable here.");
-    say!();
-    for (id, reason) in &rows {
-        say!("  {}  {reason}", hex(&id.0[..8]));
-    }
+    answer(
+        &SetAside {
+            rows: state.quarantined()?,
+        },
+        json,
+    );
     Ok(())
+}
+
+struct SetAside {
+    rows: Vec<(capture_core::id::EventId, String)>,
+}
+
+impl View for SetAside {
+    fn json(&self) -> Json {
+        let SetAside { rows } = self;
+        arr(rows
+            .iter()
+            .map(|(id, reason)| obj([("id", hex(&id.0[..8]).into()), ("reason", reason.into())])))
+    }
+
+    fn prose(&self) {
+        let SetAside { rows } = self;
+        if rows.is_empty() {
+            say!("Nothing is quarantined.");
+            return;
+        }
+        say!("Set aside — authentic, and holding their positions, but unusable here.");
+        say!();
+        for (id, reason) in rows {
+            say!("  {}  {reason}", hex(&id.0[..8]));
+        }
+    }
 }
 
 /// Events stored but not folded, and why.
@@ -714,67 +828,97 @@ pub fn held(paths: &StorePaths, json: bool) -> Result<()> {
         .map(|e| (e.header.id(), e.header.kind))
         .collect();
 
-    if json {
-        let out: Vec<String> = rows
-            .iter()
-            .map(|(id, reason)| {
-                format!(
-                    "{{\"id\":\"{}\",\"reason\":\"{reason}\",\"kind\":{}}}",
-                    hex(&id.0[..8]),
-                    kinds.get(id).map(|k| k.0).unwrap_or(0)
-                )
-            })
-            .collect();
-        say!("[{}]", out.join(","));
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        say!("Nothing is held.");
-        say!();
-        say!("Every event in the log has a rule this build understands.");
-        return Ok(());
-    }
-
-    say!("Stored, authentic, and not folded — this build has no rule for them.");
-    say!();
-    for (id, reason) in &rows {
-        match kinds.get(id) {
-            Some(k) => say!("  {}  kind {}  {reason}", hex(&id.0[..8]), k.0),
-            None => say!("  {}  kind unknown  {reason}", hex(&id.0[..8])),
-        }
-    }
-    say!();
-    say!("A kind this build does not have is usually a newer one on another");
-    say!("device. These are re-examined on every rebuild, so an upgrade picks");
-    say!("them up without anything being lost.");
+    answer(
+        &Held {
+            rows: rows
+                .into_iter()
+                .map(|(id, reason)| (hex(&id.0[..8]), kinds.get(&id).map(|k| k.0), reason))
+                .collect(),
+        },
+        json,
+    );
     Ok(())
+}
+
+/// Held events: id, kind where the log knows it, and why.
+struct Held {
+    rows: Vec<(String, Option<u16>, String)>,
+}
+
+impl View for Held {
+    fn json(&self) -> Json {
+        let Held { rows } = self;
+        arr(rows.iter().map(|(id, kind, reason)| {
+            obj([
+                ("id", id.into()),
+                ("reason", reason.into()),
+                // `0` for one the log has no record of, as before — no kind
+                // is numbered zero.
+                ("kind", kind.unwrap_or(0).into()),
+            ])
+        }))
+    }
+
+    fn prose(&self) {
+        let Held { rows } = self;
+        if rows.is_empty() {
+            say!("Nothing is held.");
+            say!();
+            say!("Every event in the log has a rule this build understands.");
+            return;
+        }
+
+        say!("Stored, authentic, and not folded — this build has no rule for them.");
+        say!();
+        for (id, kind, reason) in rows {
+            match kind {
+                Some(k) => say!("  {id}  kind {k}  {reason}"),
+                None => say!("  {id}  kind unknown  {reason}"),
+            }
+        }
+        say!();
+        say!("A kind this build does not have is usually a newer one on another");
+        say!("device. These are re-examined on every rebuild, so an upgrade picks");
+        say!("them up without anything being lost.");
+    }
 }
 
 /// Events that failed authentication.
 pub fn rejected(paths: &StorePaths, json: bool) -> Result<()> {
     let ops = Ops::open_read(&paths.ops)?;
-    let counts = ops.rejected_counts()?;
-
-    if json {
-        let out: Vec<String> = counts
-            .iter()
-            .map(|(reason, n)| format!("{{\"reason\":\"{reason}\",\"count\":{n}}}"))
-            .collect();
-        say!("[{}]", out.join(","));
-        return Ok(());
-    }
-
-    if counts.is_empty() {
-        say!("No event has failed authentication.");
-        return Ok(());
-    }
-    say!("Refused — not authenticated, holding no position in any sequence.");
-    say!();
-    for (reason, n) in &counts {
-        say!("  {n:<6} {reason}");
-    }
+    answer(
+        &Refused {
+            counts: ops.rejected_counts()?,
+        },
+        json,
+    );
     Ok(())
+}
+
+struct Refused {
+    counts: std::collections::BTreeMap<String, u64>,
+}
+
+impl View for Refused {
+    fn json(&self) -> Json {
+        let Refused { counts } = self;
+        arr(counts
+            .iter()
+            .map(|(reason, n)| obj([("reason", reason.into()), ("count", n.into())])))
+    }
+
+    fn prose(&self) {
+        let Refused { counts } = self;
+        if counts.is_empty() {
+            say!("No event has failed authentication.");
+            return;
+        }
+        say!("Refused — not authenticated, holding no position in any sequence.");
+        say!();
+        for (reason, n) in counts {
+            say!("  {n:<6} {reason}");
+        }
+    }
 }
 
 // --------------------------------------------------------------- rebuild ----
