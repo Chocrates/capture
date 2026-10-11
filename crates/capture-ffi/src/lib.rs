@@ -93,6 +93,18 @@ pub struct Alert {
     pub delivered: bool,
 }
 
+/// When the alarm should next go off, and whether that moment earns an exact
+/// alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct Wake {
+    /// The instant to wake at.
+    pub at_ms: i64,
+    /// Whether this is a moment somebody named a time for, rather than a hold
+    /// being released or a retry — the only case worth the exact-alarm
+    /// permission.
+    pub exact: bool,
+}
+
 /// One line of a list: an item written into a list capture, or a task that
 /// carries the list's tag.
 ///
@@ -857,13 +869,8 @@ impl Archive {
     /// same calculation the core already does, differing at the edges nobody
     /// looks at until a clock goes back.
     pub fn hold_until(&self, timed: bool, armed: bool, late_by_ms: i64) -> Result<Option<i64>> {
-        let zone = capture_time::Zone::new(&self.zone_name())
-            .or_else(|| capture_time::Zone::new("UTC"))
-            .ok_or_else(|| CaptureError::Refused {
-                reason: "no usable timezone".into(),
-            })?;
-
         let now = self.now_ms() as i64;
+        let zone = resolve_zone(&self.zone_name())?;
         let hour = capture_time::civil_clock(now, zone).0;
 
         let until = match capture_store::notifier::deliver_late(hour, timed, armed, late_by_ms) {
@@ -878,20 +885,38 @@ impl Archive {
             // answer.
             capture_store::notifier::Delivery::Stale => capture_store::notifier::next_batch(hour),
         };
+        at_hour(now, zone, until).map(Some)
+    }
 
-        // Today if that hour is still ahead, tomorrow otherwise. Equal counts
-        // as past: it is already that hour, and the decision to hold was made
-        // knowing so.
-        let today = capture_time::civil_date(now, zone);
-        let date = if until > hour {
-            today
-        } else {
-            capture_time::add_days(now, zone, 1).ok_or_else(|| CaptureError::Refused {
-                reason: "tomorrow could not be worked out".into(),
-            })?
-        };
-
-        Ok(capture_time::at_local(date, until, 0, zone))
+    /// When the alarm should next go off, if at all.
+    ///
+    /// # Why this is not "the next undelivered moment"
+    ///
+    /// It was, on the phone: the alarm was armed for the first moment not yet
+    /// delivered, and one already past was armed for a second from now. But a
+    /// moment can stay undelivered on purpose — held to morning by quiet hours,
+    /// held to the next batch, or too old to announce at all — and each of
+    /// those came round a second later, was held again, and armed again. A
+    /// Pixel left with one invoice from a fortnight before woke 20,105 times in
+    /// an hour and a half, every 0.3 seconds, as the top waker on the phone.
+    ///
+    /// So the question is asked of each moment the way delivery will ask it,
+    /// and the answer is when delivery will next *do* something about it:
+    ///
+    /// - still ahead: its own instant, exact if it named a time of day;
+    /// - due now: `soonest_ms` from now — a second when arming after a capture
+    ///   or on resume, and minutes when arming after a ring that could not post
+    ///   it, so a blocked channel is a handful of wakes rather than a loop;
+    /// - held: the instant the hold ends;
+    /// - too old to say: never. It is still listed; it will not interrupt.
+    pub fn next_wake(&self, within_ms: i64, soonest_ms: i64) -> Result<Option<Wake>> {
+        let alerts = self.due(within_ms)?;
+        wake_for(
+            &alerts,
+            self.now_ms() as i64,
+            resolve_zone(&self.zone_name())?,
+            soonest_ms,
+        )
     }
 
     /// The most recent notes, newest first.
@@ -2895,5 +2920,181 @@ fn summarise(n: capture_store::projection::NoteRow) -> NoteSummary {
         kind: "note".into(),
         descriptor: String::new(),
         items: Vec::new(),
+    }
+}
+
+/// A zone by name, or UTC.
+///
+/// Outside the exported block: everything in there crosses the boundary, and a
+/// zone is not something Kotlin is handed.
+fn resolve_zone(name: &str) -> Result<capture_time::Zone> {
+    capture_time::Zone::new(name)
+        .or_else(|| capture_time::Zone::new("UTC"))
+        .ok_or_else(|| CaptureError::Refused {
+            reason: "no usable timezone".into(),
+        })
+}
+
+/// The next instant a given local hour comes round.
+///
+/// Today if that hour is still ahead, tomorrow otherwise. Equal counts as past:
+/// it is already that hour, and the decision to hold was made knowing so.
+fn at_hour(now: i64, zone: capture_time::Zone, hour: u32) -> Result<i64> {
+    let today = capture_time::civil_date(now, zone);
+    let date = if hour > capture_time::civil_clock(now, zone).0 {
+        today
+    } else {
+        capture_time::add_days(now, zone, 1).ok_or_else(|| CaptureError::Refused {
+            reason: "tomorrow could not be worked out".into(),
+        })?
+    };
+    capture_time::at_local(date, hour, 0, zone).ok_or_else(|| CaptureError::Refused {
+        reason: "that hour does not exist today".into(),
+    })
+}
+
+/// The decision behind [`Archive::next_wake`], with the clock passed in.
+fn wake_for(
+    alerts: &[Alert],
+    now: i64,
+    zone: capture_time::Zone,
+    soonest_ms: i64,
+) -> Result<Option<Wake>> {
+    use capture_store::notifier::{Delivery, deliver_late};
+
+    let hour = capture_time::civil_clock(now, zone).0;
+    let mut best: Option<Wake> = None;
+    for a in alerts.iter().filter(|a| !a.delivered) {
+        let late_by = now - a.at_ms;
+        let wake = if late_by < 0 {
+            Wake {
+                at_ms: a.at_ms,
+                exact: a.timed,
+            }
+        } else {
+            // `armed: false`, as the ring asks it. Asking differently here
+            // would be arming for an answer delivery will not give.
+            match deliver_late(hour, a.timed, false, late_by) {
+                Delivery::Now => Wake {
+                    at_ms: now + soonest_ms.max(1_000),
+                    exact: false,
+                },
+                Delivery::At(h) => Wake {
+                    at_ms: at_hour(now, zone, h)?,
+                    exact: false,
+                },
+                Delivery::Stale => continue,
+            }
+        };
+        best = match best {
+            Some(b) if (b.at_ms, !b.exact) <= (wake.at_ms, !wake.exact) => Some(b),
+            _ => Some(wake),
+        };
+    }
+    Ok(best)
+}
+
+#[cfg(test)]
+mod wake {
+    use super::*;
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    fn chicago() -> capture_time::Zone {
+        capture_time::Zone::new("America/Chicago").unwrap()
+    }
+
+    /// An instant in Chicago, from a date and an hour.
+    fn at(date: &str, hour: u32) -> i64 {
+        capture_time::at_local(
+            capture_time::FloatingDate::parse(date).unwrap(),
+            hour,
+            0,
+            chicago(),
+        )
+        .unwrap()
+    }
+
+    fn alert(at_ms: i64, timed: bool, delivered: bool) -> Alert {
+        Alert {
+            slug: "n".into(),
+            text: "t".into(),
+            at_ms,
+            occ: None,
+            timed,
+            delivered,
+        }
+    }
+
+    #[test]
+    fn a_moment_too_old_to_say_never_wakes_anything() {
+        // The phone that found this: one invoice due a fortnight before,
+        // undelivered on purpose, armed for a second from now for ever.
+        let now = at("2026-10-10", 20);
+        let old = alert(at("2026-09-20", 0), false, false);
+        assert_eq!(wake_for(&[old], now, chicago(), 1_000).unwrap(), None);
+    }
+
+    #[test]
+    fn a_held_moment_wakes_when_the_hold_ends_not_now() {
+        // 23:00 is quiet. A capture due at 22:30 with no time of day is held
+        // to morning, and the alarm belongs at the end of the hold.
+        let now = at("2026-10-10", 23);
+        let held = alert(now - HOUR / 2, false, false);
+        let w = wake_for(&[held], now, chicago(), 1_000).unwrap().unwrap();
+        assert!(w.at_ms > now + HOUR, "woke during the hold: {w:?}");
+        assert_eq!(
+            capture_time::civil_date(w.at_ms, chicago()).to_string(),
+            "2026-10-11"
+        );
+        assert!(!w.exact);
+    }
+
+    #[test]
+    fn something_ahead_wakes_at_its_own_moment() {
+        let now = at("2026-10-10", 20);
+        let ahead = alert(now + HOUR, true, false);
+        let w = wake_for(&[ahead], now, chicago(), 1_000).unwrap().unwrap();
+        assert_eq!(
+            w,
+            Wake {
+                at_ms: now + HOUR,
+                exact: true
+            }
+        );
+    }
+
+    #[test]
+    fn something_due_now_waits_the_soonest_it_is_given() {
+        let now = at("2026-10-10", 15);
+        let due = || alert(now - 60_000, true, false);
+        assert_eq!(
+            wake_for(&[due()], now, chicago(), 1_000)
+                .unwrap()
+                .unwrap()
+                .at_ms,
+            now + 1_000
+        );
+        // After a ring that could not post it: minutes, not a loop.
+        assert_eq!(
+            wake_for(&[due()], now, chicago(), 5 * 60_000)
+                .unwrap()
+                .unwrap()
+                .at_ms,
+            now + 5 * 60_000
+        );
+    }
+
+    #[test]
+    fn the_earliest_of_several_wins_and_delivered_ones_are_ignored() {
+        let now = at("2026-10-10", 20);
+        let alerts = [
+            alert(at("2026-09-20", 0), false, false),
+            alert(now + 2 * HOUR, true, false),
+            alert(now + HOUR, true, true),
+            alert(now + 3 * HOUR, false, false),
+        ];
+        let w = wake_for(&alerts, now, chicago(), 1_000).unwrap().unwrap();
+        assert_eq!(w.at_ms, now + 2 * HOUR);
     }
 }

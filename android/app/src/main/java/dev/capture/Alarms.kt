@@ -67,8 +67,13 @@ object Alarms {
      * Called after every capture, on every resume, on boot, and by the alarm
      * itself once it has fired. Cheap, and safe to call when nothing is
      * pending: the archive answers with nothing and no alarm is set.
+     *
+     * `soonestMs` is how long to wait for something that is due already. A
+     * second after a capture or on resume; [RETRY_MS] after a ring, because
+     * anything still due then is something the ring could not post, and asking
+     * again a second later is the wake loop with extra steps.
      */
-    fun rearm(context: Context) {
+    fun rearm(context: Context, soonestMs: Long = 1_000) {
         val manager = context.getSystemService(AlarmManager::class.java) ?: return
         val archive = Store.of(context)
 
@@ -99,17 +104,21 @@ object Alarms {
         // writer flock and refuses when a sync round holds it (`session.rs`),
         // and flock conflicts between file descriptions in the same process —
         // so an alarm firing while a round is mid-exchange is exactly this.
-        val due = runCatching { archive.due(HORIZON_MS) }
-        val next = due.getOrNull()?.firstOrNull { !it.delivered }
+        //
+        // *When* is the archive's answer, not the first undelivered moment. A
+        // moment held to morning or too old to say is undelivered on purpose,
+        // and arming for it a second from now rang, held it again, and armed
+        // again: 20,105 wakes in an hour and a half on a Pixel, from one
+        // invoice due a fortnight before. `nextWake` asks each moment the way
+        // the ring will, so a hold is armed for its end and a stale moment for
+        // nothing.
+        val wake = runCatching { archive.nextWake(HORIZON_MS, soonestMs) }
+        val next = wake.getOrNull()
 
         val at = when {
-            next != null ->
-                // Something already overdue wants the alarm as soon as the
-                // platform will give it, not at a time in the past — which some
-                // versions treat as "immediately" and others as nonsense.
-                maxOf(next.atMs, System.currentTimeMillis() + 1_000)
+            next != null -> next.atMs
 
-            due.isFailure ->
+            wake.isFailure ->
                 // Could not read the archive. Keep the chain alive and ask
                 // again: the contention this comes from is a sync round holding
                 // the writer lock for a bounded window of seconds, so by the
@@ -131,7 +140,7 @@ object Alarms {
         // Exact only where the capture named a time of day, and only for a real
         // moment — a retry is this code asking itself a question again and has
         // no precision worth spending a permission on.
-        val exact = next != null && next.timed && allowed
+        val exact = next != null && next.exact && allowed
 
         // Set first, recorded afterwards, and recorded from what happened.
         //
@@ -245,56 +254,10 @@ object Alarms {
             }
         }
 
-        // Whatever is next, including anything just held. An alarm at the hour
-        // a hold expires is what releases it.
-        rearm(context)
-        scheduleHoldRelease(context, due)
-    }
-
-    /**
-     * An alarm for the moment at which something held becomes sayable.
-     *
-     * Without this a held alert waits for the next *moment* to come due, which
-     * could be days — so one held at 23:00 would arrive when something else
-     * happened to fire rather than at 07:00.
-     *
-     * The instant comes from the archive rather than being worked out here.
-     * Turning "07:00" into a moment is date arithmetic, and doing it on the
-     * surface would be a second implementation of a calculation the core
-     * already makes — differing at exactly the edges nobody looks at until a
-     * clock goes back.
-     */
-    private fun scheduleHoldRelease(context: Context, due: List<Alert>) {
-        val archive = Store.of(context)
-        val at = due.filter { !it.delivered }
-            .mapNotNull {
-                val lateBy = System.currentTimeMillis() - it.atMs
-                // A moment too old to announce is not held either — a hold is a
-                // promise to say it later, and there is no later. Arming for
-                // one would wake the device at every batch hour to decide
-                // again that it has nothing to say, which is a slow version of
-                // the wake loop rather than a different thing.
-                if (runCatching { archive.tooLateToSay(lateBy) }.getOrDefault(false)) {
-                    null
-                } else {
-                    runCatching { archive.holdUntil(it.timed, false, lateBy) }.getOrNull()
-                }
-            }
-            .minOrNull() ?: return
-
-        val manager = context.getSystemService(AlarmManager::class.java) ?: return
-        runCatching {
-            manager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                at,
-                PendingIntent.getBroadcast(
-                    context,
-                    1,
-                    Intent(context, Ring::class.java),
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                ),
-            )
-        }
+        // Whatever is next, including anything just held — `nextWake` arms
+        // for the hour a hold ends, which is what releases it. Anything still
+        // due now is something this ring could not post, so it waits minutes.
+        rearm(context, RETRY_MS)
     }
 
     /**
