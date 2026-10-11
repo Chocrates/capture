@@ -573,6 +573,14 @@ pub struct Condition {
     /// everything is urgent is one where nothing is.
     pub tier: String,
     pub text: String,
+    /// The platform permission whose absence this is, where it is one:
+    /// `notifications` or `exact_alarms`.
+    ///
+    /// So a surface that lists permissions with a button each can leave these
+    /// out of its list of problems rather than saying the same thing twice in
+    /// two places — and can tell which ones a single tap fixes, without
+    /// matching on the wording.
+    pub permission: Option<String>,
 }
 
 /// An open archive.
@@ -1154,6 +1162,7 @@ impl Archive {
             if reason == "post_retire" {
                 out.push(Condition {
                     tier: "worth-knowing".into(),
+                    permission: None,
                     text: format!(
                         "{n} event(s) arrived from a device that was retired, authored \
                          after the point the retirement named. They are kept, unused, \
@@ -1166,6 +1175,7 @@ impl Archive {
             if reason == "collision" {
                 out.push(Condition {
                     tier: "attention".into(),
+                    permission: None,
                     text: format!(
                         "{n} event(s) arrived claiming a position this device has already                          filled — two devices have been writing as the same origin. The                          arriving events were not merged and their contents are kept."
                     ),
@@ -1174,6 +1184,7 @@ impl Archive {
             }
             out.push(Condition {
                 tier: "attention".into(),
+                permission: None,
                 text: format!("{n} event(s) failed authentication ({reason})"),
             });
         }
@@ -1198,8 +1209,9 @@ impl Archive {
         if self.setting("alerts.silenced")?.as_deref() == Some("1") {
             out.push(Condition {
                 tier: "attention".into(),
+                permission: Some("notifications".into()),
                 text: "this device cannot show notifications, so nothing will be said when a \
-                       time arrives. Settings › Apps › capture › Notifications"
+                       time arrives. Allow them under Settings"
                     .into(),
             });
         }
@@ -1207,9 +1219,10 @@ impl Archive {
         if self.setting("alerts.inexact")?.as_deref() == Some("1") {
             out.push(Condition {
                 tier: "attention".into(),
+                permission: Some("exact_alarms".into()),
                 text: "alerts fire approximately — this device has not been allowed exact \
-                       alarms, so a time may be up to an hour late. Settings › Apps › \
-                       capture › Alarms & reminders"
+                       alarms, so a time may be up to an hour late. Allow alarms & reminders \
+                       under Settings"
                     .into(),
             });
         }
@@ -1226,7 +1239,9 @@ impl Archive {
         if self.setting("alerts.unscheduled")?.as_deref() == Some("1") {
             out.push(Condition {
                 tier: "attention".into(),
-                text: "nothing is scheduled to wake this device, so no time will be                        announced until capture is opened again"
+                permission: None,
+                text: "nothing is scheduled to wake this device, so no time will be \
+                       announced until capture is opened again"
                     .into(),
             });
         }
@@ -1234,6 +1249,7 @@ impl Archive {
         if capture_store::spool::in_use(&self.paths.spool)? {
             out.push(Condition {
                 tier: "attention".into(),
+                permission: None,
                 text: "captures are being spooled — the store could not be written".into(),
             });
         }
@@ -1241,6 +1257,7 @@ impl Archive {
         for (_id, owed) in ops.redactions_outstanding()? {
             out.push(Condition {
                 tier: "attention".into(),
+                permission: None,
                 text: format!(
                     "a redaction has not been acknowledged by {} device(s); until it is, \
                      the content may still exist on them",
@@ -1281,6 +1298,7 @@ impl Archive {
             if let Some(text) = trouble {
                 out.push(Condition {
                     tier: "attention".into(),
+                    permission: None,
                     text,
                 });
             }
@@ -1351,6 +1369,7 @@ impl Archive {
         if let Some((tier, text)) = sync.message() {
             out.push(Condition {
                 tier: tier.into(),
+                permission: None,
                 text,
             });
         }
@@ -1366,6 +1385,7 @@ impl Archive {
             if ops.last_round_had_discovery()? == Some(false) {
                 out.push(Condition {
                     tier: "worth-knowing".into(),
+                    permission: None,
                     text: "the last sync ran without discovery, so it could only \
                            reach devices whose address is already known"
                         .into(),
@@ -1385,6 +1405,7 @@ impl Archive {
             {
                 out.push(Condition {
                     tier: "worth-knowing".into(),
+                    permission: None,
                     text: format!("the last sync reported: {t}"),
                 });
             }
@@ -1411,6 +1432,7 @@ impl Archive {
             if !known {
                 out.push(Condition {
                     tier: "attention".into(),
+                    permission: None,
                     text: format!(
                         "times are set to be announced on device {who}, which is not a \
                          device this archive knows — so nothing will be announced anywhere"
@@ -1419,6 +1441,7 @@ impl Archive {
             } else if !mine.starts_with(&wanted) {
                 out.push(Condition {
                     tier: "worth-knowing".into(),
+                    permission: None,
                     text: format!("times are announced on device {who}, not on this one"),
                 });
             }
@@ -1427,6 +1450,7 @@ impl Archive {
         for (_id, reason) in store.quarantined()? {
             out.push(Condition {
                 tier: "worth-knowing".into(),
+                permission: None,
                 text: format!("an event was set aside: {reason}"),
             });
         }

@@ -308,6 +308,9 @@ class Model(private val archive: Archive) : ViewModel() {
             is Screen.Tasks -> load {
                 tasks = archive.tasks()
                 unread = archive.unread()
+                // For the banner. The screen the application opens on is the
+                // one place a problem is certain to be seen.
+                conditions = archive.health()
             }
             is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
             is Screen.Wiki -> load {

@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.ClickableText
@@ -480,7 +481,40 @@ fun Tasks(
     onOpen: (String) -> Unit,
     onDone: (String, Boolean) -> Unit,
     onAgenda: () -> Unit,
+    attention: List<Condition>,
+    onAttention: () -> Unit,
 ) {
+    // What is stopping this from working, on the screen that is always seen.
+    //
+    // These were listed only under Health — the tab opened least, by the
+    // person least likely to be looking for a fault. A phone that cannot show
+    // notifications says so here, on the screen it opens on, rather than
+    // after the alert that mattered never arrived. Absent when nothing is
+    // wrong: a line saying all is well is one more thing to read past.
+    if (attention.isNotEmpty()) {
+        Card(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                .clickable { onAttention() },
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text(
+                    attention.first().text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (attention.size > 1) {
+                        "and ${attention.size - 1} more — tap to see"
+                    } else {
+                        "Tap to fix"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        }
+    }
     Row(
         Modifier.fillMaxWidth().padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1048,8 +1082,11 @@ fun Health(
     permits: List<PermitState>,
     onPermit: (Permit) -> Unit,
 ) {
-    val attention = conditions.filter { it.tier == "attention" }
-    val knowing = conditions.filter { it.tier != "attention" }
+    // A missing permission is shown once, as a row with a button, rather than
+    // again here as a sentence telling somebody where to find that button.
+    val listed = conditions.filter { it.permission == null }
+    val attention = listed.filter { it.tier == "attention" }
+    val knowing = listed.filter { it.tier != "attention" }
 
     // Which device a retirement has been begun for, and not yet confirmed.
     // Held here rather than per row so the dialog is drawn once, outside the

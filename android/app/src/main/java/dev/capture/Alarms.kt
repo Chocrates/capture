@@ -73,9 +73,28 @@ object Alarms {
      * anything still due then is something the ring could not post, and asking
      * again a second later is the wake loop with extra steps.
      */
+    /**
+     * Whether this device can speak at all, recorded on every arming and every
+     * return to the application — not only when a ring tries and fails.
+     *
+     * Only the ring recorded it, so a phone with notifications switched off
+     * reported nothing wrong until an alert had already been dropped: the one
+     * moment telling somebody is too late to help.
+     */
+    fun recordCanSpeak(context: Context) {
+        runCatching {
+            Store.of(context).setAlertsSilenced(
+                context.getSystemService(NotificationManager::class.java)
+                    ?.areNotificationsEnabled() != true,
+            )
+        }
+    }
+
     fun rearm(context: Context, soonestMs: Long = 1_000) {
         val manager = context.getSystemService(AlarmManager::class.java) ?: return
         val archive = Store.of(context)
+
+        recordCanSpeak(context)
 
         // Whether this device is the one that speaks (§2.4.1).
         //

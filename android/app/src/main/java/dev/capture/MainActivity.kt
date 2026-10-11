@@ -192,6 +192,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermits()
+        // Before the screen is loaded, so a banner reflects what the platform
+        // allows now rather than what it allowed at the last ring.
+        Alarms.recordCanSpeak(this)
         // Whatever came due while the app was away. The desktop settles on
         // every command that writes; a phone is opened rather than invoked, so
         // this is where it happens.
@@ -393,6 +396,8 @@ private fun App(
                     onOpen = { model.go(Screen.Note(it)) },
                     onDone = model::setDone,
                     onAgenda = { model.go(Screen.Agenda(model.today())) },
+                    attention = model.conditions.filter { it.tier == "attention" },
+                    onAttention = { model.go(Screen.Health) },
                 )
                 is Screen.Wiki -> Wiki(
                     pages = model.pages,
