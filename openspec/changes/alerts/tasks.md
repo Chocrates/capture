@@ -45,7 +45,7 @@
 - [ ] 7.2 The doze case: something an hour out, phone untouched, screen off. This is what `setExactAndAllowWhileIdle` exists for and the emulator models it least faithfully.
   - **Forced doze passed on the Pixel 8 Pro (2026-10-10), natural doze still open.** `dumpsys deviceidle force-idle` with the screen off: an exact alarm for 21:20 posted at 21:20:00.183 with the device reporting `IDLE` before and after, and re-armed itself exact for the next moment. Forced idle is the platform's own test hook and weaker evidence than an hour untouched, which is why this stays unticked.
   - Setting this up found a **wake loop**: `rearm` armed for the first undelivered moment, including held and too-late ones, at now+1s — 20,105 wakes in 1h37m from one stale invoice. Fixed by `Archive::next_wake` (a84417f).
-- [ ] 7.3 A reboot with something scheduled beyond it.
+- [x] 7.3 A reboot with something scheduled beyond it. **Pixel 8 Pro, 2026-10-10 22:52:** an exact alarm for 07:30 the next morning, `adb reboot`, unlocked, neither app opened. Afterwards `dumpsys alarm` held `dev.capture.dev`'s Ring alarm at 07:30:00 exactly, and `ops.db` showed the `Restarted` receiver had recorded the zone and that alerts were scheduled, exact and able to post. That 07:30 alert is also the natural-doze case for 7.2: a phone left overnight.
 
 ## 8. Closing
 
