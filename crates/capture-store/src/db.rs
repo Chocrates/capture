@@ -76,6 +76,23 @@ pub fn create_schema(c: &Connection, schema: &str) -> Result<()> {
 
 fn apply(c: &Connection, writable: bool) -> Result<()> {
     c.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
+    // `muted(muted_until, now)`, so a query asks whether a mute holds by
+    // calling the same function Rust does rather than restating the rule.
+    // See `projection::muted_in_force`.
+    c.create_scalar_function(
+        "muted",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let until: Option<i64> = ctx.get(0)?;
+            let now: i64 = ctx.get(1)?;
+            Ok(crate::projection::muted_in_force(
+                until.map(|u| u.max(0) as u64),
+                now.max(0) as u64,
+            ))
+        },
+    )?;
     if writable {
         // Persisted in the file; setting it repeatedly is harmless.
         c.pragma_update(None, "journal_mode", "WAL")?;

@@ -693,8 +693,7 @@ const ALERTABLE: &str = "n.text IS NOT NULL
        AND n.redacted_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM redact_queue q
                        WHERE q.tgt = n.tgt AND q.cancelled = 0)
-       AND (n.muted_until IS NULL
-            OR (n.muted_until != 0 AND n.muted_until <= ?2))";
+       AND NOT muted(n.muted_until, ?2)";
 
 /// Which notes may be offered in review, and when one becomes eligible again.
 ///
@@ -749,8 +748,7 @@ fn review_eligible() -> String {
         //
         // `?1` is already the clock, for the backoff ladder below.
         "n.text IS NOT NULL
-       AND (n.muted_until IS NULL
-            OR (n.muted_until != 0 AND n.muted_until <= ?1))
+       AND NOT muted(n.muted_until, ?1)
        AND n.redacted_at IS NULL
        AND COALESCE(r.deferred, 0) < {declined}
        AND (r.last_shown IS NULL
@@ -971,11 +969,22 @@ impl NoteRow {
     /// `tools/duplicated.py` is for; this is at least the one copy every Rust
     /// caller shares.
     pub fn is_muted(&self, now: u64) -> bool {
-        match self.muted_until {
-            None => false,
-            Some(0) => true,
-            Some(ends) => ends > now,
-        }
+        muted_in_force(self.muted_until, now)
+    }
+}
+
+/// Whether a recorded mute holds at `now`: zero is indefinite, rather than
+/// "ended in 1970", and any other value is an end that may have passed.
+///
+/// The one copy. The queries ask it through the SQL function `muted`, which
+/// every connection registers (`db::apply`) — before that they spelled the
+/// rule out ten times, three of them once wrongly, and `NoteRow::is_muted` was
+/// an eleventh. A rule written in two languages is two rules.
+pub fn muted_in_force(muted_until: Option<u64>, now: u64) -> bool {
+    match muted_until {
+        None => false,
+        Some(0) => true,
+        Some(ends) => ends > now,
     }
 }
 
@@ -1891,8 +1900,7 @@ impl Store {
              JOIN fts_map m ON m.rowid = f.rowid
              JOIN notes n ON n.tgt = m.tgt
              WHERE note_fts MATCH ?1
-               AND (n.muted_until IS NULL
-                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
+               AND NOT muted(n.muted_until, ?2)
              ORDER BY rank",
         )?;
         let rows = st.query_map(params![query, now as i64], |r| r.get::<_, Vec<u8>>(0))?;
@@ -2037,8 +2045,7 @@ impl Store {
             "SELECT {NOTE_COLUMNS}
              FROM notes n JOIN mentions m ON m.tgt = n.tgt
              WHERE m.sigil = ?1 AND m.value = ?2
-               AND (n.muted_until IS NULL
-                    OR (n.muted_until != 0 AND n.muted_until <= ?3))
+               AND NOT muted(n.muted_until, ?3)
              ORDER BY n.created_wall DESC"
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -2151,8 +2158,7 @@ impl Store {
                             END
               AND en.name = lower(m.value)
              WHERE en.ent_id = ?1
-               AND (n.muted_until IS NULL
-                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
+               AND NOT muted(n.muted_until, ?2)
              ORDER BY n.created_wall DESC"
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -2240,8 +2246,7 @@ impl Store {
                JOIN entities e ON e.ent_id = en.ent_id
               WHERE en.kind = ?1
                 AND (e.note_tgt IS NULL OR n.tgt != e.note_tgt)
-                AND (n.muted_until IS NULL
-                     OR (n.muted_until != 0 AND n.muted_until <= ?2))
+                AND NOT muted(n.muted_until, ?2)
               GROUP BY en.ent_id",
         )?;
         let counts = st.query_map(params![kind, now as i64], |r| {
@@ -2478,8 +2483,7 @@ impl Store {
             "SELECT li.tgt, li.ord, li.item, li.done
                FROM list_items li JOIN notes n ON n.tgt = li.tgt
               WHERE li.tag = ?1
-                AND (n.muted_until IS NULL
-                     OR (n.muted_until != 0 AND n.muted_until <= ?2))
+                AND NOT muted(n.muted_until, ?2)
               ORDER BY n.created_wall ASC, li.ord ASC",
         )?;
         let rows = st.query_map(params![tag, now as i64], |r| {
@@ -2663,8 +2667,7 @@ impl Store {
              WHERE (EXISTS (SELECT 1 FROM tags t WHERE t.tgt = n.tgt AND t.tag = ?1)
                  OR EXISTS (SELECT 1 FROM mentions m
                             WHERE m.tgt = n.tgt AND m.sigil = '#' AND m.value = ?1))
-               AND (n.muted_until IS NULL
-                    OR (n.muted_until != 0 AND n.muted_until <= ?2))
+               AND NOT muted(n.muted_until, ?2)
              ORDER BY n.created_wall DESC"
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -2732,14 +2735,12 @@ impl Store {
                SELECT m.value AS value, m.tgt AS tgt
                  FROM mentions m JOIN notes n ON n.tgt = m.tgt
                  WHERE m.sigil = ?1 AND n.redacted_at IS NULL
-                   AND (n.muted_until IS NULL
-                        OR (n.muted_until != 0 AND n.muted_until <= ?2))
+                   AND NOT muted(n.muted_until, ?2)
                UNION
                SELECT t.tag AS value, t.tgt AS tgt
                  FROM tags t JOIN notes n ON n.tgt = t.tgt
                  WHERE ?1 = '#' AND n.redacted_at IS NULL
-                   AND (n.muted_until IS NULL
-                        OR (n.muted_until != 0 AND n.muted_until <= ?2))
+                   AND NOT muted(n.muted_until, ?2)
              )
              GROUP BY value
              ORDER BY n DESC, value ASC",
