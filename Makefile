@@ -41,7 +41,7 @@ SCRATCH ?= /tmp/capture-scratch-$(USER)
 export CAPTURE_SILENT := 1
 
 .DEFAULT_GOAL := help
-.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios json accept purity duplicated deny \
+.PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios json roster accept purity duplicated deny \
         android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired unreached aside \
         build release install install-chord scratch demo smoke tasks clean distclean
 
@@ -68,7 +68,7 @@ setup:
 # ---------------------------------------------------------------- gates ----
 
 ## ci: everything CI runs — do this before pushing
-ci: fmt-check lint test pty tamper roundtrip spool redact scenarios json purity unwired unreached duplicated aside deny
+ci: fmt-check lint test pty tamper roundtrip spool redact scenarios json roster purity unwired unreached duplicated aside deny
 	@echo
 	@echo 'ci: all gates passed'
 	@echo '     (not included: `make android` — it needs an SDK, an NDK and a'
@@ -253,6 +253,12 @@ scenarios:
 ## json: every `--json` output parses and carries what the prose says
 json:
 	$(CARGO) test -p capture-cli --test json -- --ignored --test-threads=1
+
+## roster: pair, retire, re-admit and acknowledge, across two real archives
+#
+# One thread, because pairing binds a fixed port.
+roster:
+	$(CARGO) test -p capture-cli --test roster -- --ignored --test-threads=1
 
 ## redact: destroy content and check what has to survive it
 redact:

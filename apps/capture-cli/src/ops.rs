@@ -633,7 +633,14 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     let identity = capture_store::identity::Identity::load(paths)?;
     let me = identity.public().to_bytes();
 
-    let members = roster_now(paths)?.keys;
+    // As this device holds it, which is not quite as the log folds it: a
+    // device refuses to apply a retirement of itself that it did not issue
+    // (§5.3), and the gate already honours that. Without the same step here a
+    // device another had retired listed every peer but itself — no "this
+    // device" row at all — while still writing and syncing as a member.
+    let mut roster = roster_now(paths)?;
+    roster.honour_self(&me);
+    let members = roster.keys;
     let addresses = ops.peer_addresses()?;
     let now = crate::read::now_ms() as u64;
 

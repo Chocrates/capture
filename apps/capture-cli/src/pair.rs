@@ -103,9 +103,17 @@ pub fn accept(paths: StorePaths, code: &str, at: Option<&str>) -> Result<()> {
     let grant = capture_store::pairing::accept_code(&paths, &digits, &addr, now())?;
 
     say!("Joined. {} vouched for this device.", short(&grant.pubkey));
+    // The admitter's roster as it stood before admitting this device, so this
+    // one is counted here. Without it a pair of two said "1 device(s) in the
+    // roster" to the device that had just become the second.
+    let me = Identity::load(&paths)?.public().to_bytes();
+    let mut members: std::collections::BTreeSet<[u8; 32]> =
+        grant.members.iter().map(|k| **k).collect();
+    members.insert(grant.pubkey);
+    members.insert(me);
     say!(
         "{} device(s) in the roster; the archive arrives on the next sync.",
-        grant.members.len().max(1)
+        members.len()
     );
     if grant.incarnation.is_none() {
         say!();

@@ -1670,3 +1670,146 @@ fn an_entity_mute_is_lifted_by_another_spelling() {
         "a spelling that reaches the entity could not lift its mute"
     );
 }
+
+/// An export made before a redaction is reported until somebody says it was
+/// dealt with, and `exports-pruned` is how they say it.
+///
+/// §1.1: redaction cannot reach a backup. The files are somewhere this program
+/// cannot look, so the warning is acknowledged rather than self-clearing — and
+/// the acknowledgement is the only way it ever goes away, which no test had
+/// exercised.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_stale_export_is_reported_until_it_is_said_to_be_pruned() {
+    let s = Store::new("exports-pruned");
+    assert!(
+        s.ok(&["exports-pruned"])
+            .contains("No exports are known to be stale"),
+        "nothing should be stale before anything was exported"
+    );
+
+    let doomed = s.capture("the budget is 40k");
+    let other = s.capture("an unrelated note");
+    s.ok(&["settle"]);
+    s.ok(&["export"]);
+    s.ok(&["redact", &doomed, "--force"]);
+
+    // Past the window, and a write to carry the destruction out: reads take no
+    // writer lock, so the drain only runs on a writing command.
+    let later = jiff::Timestamp::now() + jiff::SignedDuration::from_mins(40);
+    s.at(&later.to_string(), &["pin", &other]);
+
+    let status = s.ok(&["status"]);
+    assert!(
+        status.contains("older export files still contain"),
+        "a destroyed note still in an export went unreported: {status}"
+    );
+
+    let said = s.ok(&["exports-pruned"]);
+    assert!(said.contains("Acknowledged. 1 redaction(s)"), "{said}");
+    assert!(
+        said.contains("Nothing was checked"),
+        "it must not claim to have looked at the files: {said}"
+    );
+    assert!(
+        !s.ok(&["status"])
+            .contains("older export files still contain"),
+        "an acknowledged stale export is still reported"
+    );
+}
+
+/// What became of an offered note decides whether it is offered again.
+///
+/// §2.8: engaging with a note sends it round again later; pushing it away twice
+/// stops it being offered at all. Both verbs were invoked by no test, so the
+/// one outcome a person can never see — a note that silently never comes back
+/// — was unchecked in both directions.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn engaging_brings_a_note_back_and_deferring_twice_does_not() {
+    let s = Store::new("review-outcomes");
+    let kept = s.capture("revisit the pricing idea in Q2");
+    let dropped = s.capture("a thought about gardens");
+    s.ok(&["settle"]);
+
+    let offered = s.ok(&["review", "--json"]);
+    assert!(
+        offered.contains(&kept) && offered.contains(&dropped),
+        "{offered}"
+    );
+
+    // Each outcome is an event in the note's own history. Counted, because a
+    // year on an engaged note and a never-touched one are both offered, so the
+    // listing below cannot tell whether `engaged` did anything at all.
+    let reviews = |name: &str| {
+        s.ok(&["log", name, "--json"])
+            .matches("\"kind\":\"review\"")
+            .count()
+    };
+    let (k0, d0) = (reviews(&kept), reviews(&dropped));
+    assert!(s.ok(&["engaged", &kept]).contains("Noted"));
+    assert_eq!(reviews(&kept), k0 + 1, "engaging wrote nothing");
+    assert!(s.ok(&["deferred", &dropped]).contains("Pushed away"));
+    s.ok(&["deferred", &dropped]);
+    assert_eq!(reviews(&dropped), d0 + 2, "deferring wrote nothing");
+
+    // A year on, long past any interval: the engaged note is due again, and
+    // the twice-deferred one is gone from review for good.
+    let later = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 400)).to_string();
+    let then = s.at(&later, &["review", "--json"]);
+    assert!(
+        then.contains(&kept),
+        "an engaged note never came back: {then}"
+    );
+    assert!(
+        !then.contains(&dropped),
+        "a note pushed away twice was offered again: {then}"
+    );
+
+    // A name that is not a note is not an outcome.
+    let (code, said) = s.run(&["engaged", "no-such-note"]);
+    assert_eq!(code, 2, "{said}");
+}
+
+/// `capture read` says what the recognizer makes of text, and stores nothing.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn reading_text_shows_the_recognizer_and_stores_nothing() {
+    let s = Store::new("read");
+    let said = s.ok(&["read", "dentist thursday 2pm"]);
+    assert!(
+        said.contains("a moment:") && said.contains("14:00"),
+        "{said}"
+    );
+    assert!(said.contains("enough to decide on its own"), "{said}");
+
+    let said = s.ok(&["read", "send sarah the doc"]);
+    assert!(said.contains("a task, by its verb"), "{said}");
+    assert!(said.contains("under the bar"), "{said}");
+
+    assert_eq!(
+        s.ok(&["timeline", "--json"]).trim(),
+        "[]",
+        "read stored something"
+    );
+}
+
+/// The usage text and the version, by every spelling that asks for them.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn help_and_version_answer_however_they_are_asked() {
+    let s = Store::new("help");
+    for ask in ["help", "--help"] {
+        let said = s.ok(&[ask]);
+        assert!(said.starts_with("capture — capture first"), "{ask}: {said}");
+        assert!(
+            said.contains("capture pair"),
+            "{ask}: the usage is cut short"
+        );
+    }
+    let said = s.ok(&["--version"]);
+    assert_eq!(
+        said.trim(),
+        format!("capture {}", env!("CARGO_PKG_VERSION"))
+    );
+}
