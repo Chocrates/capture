@@ -1774,6 +1774,41 @@ impl Archive {
         Ok(capture_store::mutate::accept_near_miss(&self.paths, &name)?)
     }
 
+    /// The hour this note wrote without am or pm, if it has one to ask about.
+    ///
+    /// Separate from `suggestion`, which is offered only where nothing was
+    /// promoted: a bare hour *is* promoted — to its day or its rule — and what
+    /// is missing is only the time.
+    pub fn unclear_hour(&self, name: String) -> Result<Option<u32>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        let Some(row) = store.note(&tgt)? else {
+            return Err(CaptureError::NotFound { name });
+        };
+        let promotion = store.promotion_of(&tgt)?;
+        Ok(capture_store::promote::asks_hour(
+            row.text.as_deref(),
+            promotion.as_ref(),
+        ))
+    }
+
+    /// Answer "2am or 2pm?" by writing it into the text.
+    ///
+    /// An ordinary edit, like `accept_near_miss`; the note re-promotes with the
+    /// time before this returns. Answers the text as it now reads.
+    pub fn settle_hour(&self, name: String, pm: bool) -> Result<String> {
+        use capture_store::mutate::Half;
+        let _w = self.write_lock()?;
+        let half = if pm { Half::Pm } else { Half::Am };
+        Ok(capture_store::mutate::settle_hour(
+            &self.paths,
+            &name,
+            half,
+        )?)
+    }
+
     /// Take the reading the archive offered but would not act on.
     ///
     /// The other half of the confidence floor. Below it a recognition is shown

@@ -1,11 +1,12 @@
 ## 1. An hour without am or pm is asked
 
-- [ ] 1.1 Tests first (capture-parse): "every monday at 2" and "on oct 15th at 2" carry `unclear_hour: Some(2)` and no time; "at 2pm", "at 14", "at 0", "at noon" are unaffected; existing "at 7" assertions change to the question.
-- [ ] 1.2 `clock_after`: 1–12 after a marker is not a time; recognition records the unclear hour; bump the grammar version.
-- [ ] 1.3 `capture_parse::unclear_hour(text)` → hour and insertion offset; the near-miss offer generalises to a choice.
-- [ ] 1.4 `mutate::settle_hour(paths, name, am|pm)` inserts the meridiem as an ordinary edit; store test that the series re-promotes to 14:00 and the offer disappears.
-- [ ] 1.5 Surfaces: review offers it; `capture show` names it; `capture hour NAME am|pm`; FFI `unclear_hour`/`settle_hour`; phone banner and note page; desktop note page.
-- [ ] 1.6 DESIGN.md §3.1.5's "every day at 7 → 07:00" example corrected.
+- [x] 1.1 Tests first (capture-parse): "every monday at 2" and "on oct 15th at 2" carry `unclear_hour: Some(2)` and no time; "at 2pm", "at 14", "at 0", "at noon" are unaffected; existing "at 7" assertions change to the question.
+- [x] 1.2 `clock_after`: 1–12 after a marker is not a time; recognition records the unclear hour; bump the grammar version.
+- [x] 1.3 `capture_parse::unclear_hour(text)` → hour and insertion offset; the near-miss offer generalises to a choice.
+- [x] 1.4 `mutate::settle_hour(paths, name, am|pm)` inserts the meridiem as an ordinary edit; store test that the series re-promotes to 14:00 and the offer disappears.
+- [~] 1.5 Surfaces: review offers it; `capture show` names it; `capture hour NAME am|pm`; FFI `unclear_hour`/`settle_hour`; phone banner and note page; desktop note page.
+  - Done and tested: review line, `show` (prose and JSON), `capture hour`, FFI, desktop note page (IPC test), phone note page (builds). `settle_hour` re-promotes before returning — the CLI scenario caught `show` still reading "every Mon" when it only edited. The phone's calendar rows ask too, in 4.2. **Not yet seen on the phone**: wireless adb was off.
+- [x] 1.6 DESIGN.md §3.1.5's "every day at 7 → 07:00" example corrected.
 
 ## 2. One calendar read
 

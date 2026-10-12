@@ -42,6 +42,7 @@ fn main() {
             ipc::set_kind,
             ipc::as_task,
             ipc::fix_list,
+            ipc::settle_hour,
             ipc::tagged,
             ipc::wiki_index,
             ipc::set_parent,

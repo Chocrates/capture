@@ -117,6 +117,23 @@ pub struct Recognition {
     pub markers: Markers,
     /// The grammar this was produced by.
     pub grammar: u32,
+    /// A bare hour that could have been either half of the clock.
+    pub unclear_hour: Option<UnclearHour>,
+}
+
+/// An hour written without am or pm, which the recognizer will not guess.
+///
+/// "gym every monday at 2" was scheduled for 02:00, and "dentist on oct 15th at
+/// 2" with it — found in use on 2026-10-12. A guess that is right most days is
+/// the failure noticed only when it matters, at 2 am on the day; the person
+/// chose being asked. So the date or the rule promotes without a time, and this
+/// records what to ask and where the answer goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnclearHour {
+    /// The hour as written, 1 to 12.
+    pub hour: u32,
+    /// Byte offset just past the number, where `am` or `pm` would go.
+    pub at: usize,
 }
 
 /// What kind of anchor a match found, which is what its band depends on.
@@ -230,6 +247,7 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
             confidence: 100,
             markers,
             grammar: crate::GRAMMAR_VERSION,
+            unclear_hour: None,
         };
     }
 
@@ -248,14 +266,17 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
     // The capture is not refused and its text is untouched (§3.1, §3.1.3). It
     // simply carries no date, and a task verb still reads as a task with none —
     // below the floor, so it offers rather than asserts.
+    let mut unclear_hour = None;
     if markers.date.is_none()
-        && let Some((shape, confidence)) = temporal(&tokens, now, zone, head_is_verb)
+        && let Some((shape, confidence)) =
+            temporal(&tokens, now, zone, head_is_verb, &mut unclear_hour)
     {
         return Recognition {
             shape,
             confidence,
             markers,
             grammar: crate::GRAMMAR_VERSION,
+            unclear_hour,
         };
     }
 
@@ -271,6 +292,7 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         confidence: if head_is_verb { band::TASK_VERB } else { 0 },
         markers,
         grammar: crate::GRAMMAR_VERSION,
+        unclear_hour: None,
     }
 }
 
@@ -346,10 +368,11 @@ fn temporal(
     now: i64,
     zone: Zone,
     head_is_verb: bool,
+    unclear: &mut Option<UnclearHour>,
 ) -> Option<(Shape, u32)> {
     // Recurrence first: `every weekday at 7` also contains a weekday, and the
     // longer reading is the one meant.
-    if let Some(r) = recurrence(tokens) {
+    if let Some(r) = recurrence(tokens, unclear) {
         return Some(r);
     }
     if let Some(r) = range(tokens, now, zone) {
@@ -359,11 +382,11 @@ fn temporal(
     // reading: a day into a due date. A range is a span of days and a
     // recurrence is a rule, and neither becomes a task by being introduced by a
     // verb — "review the docs every friday" is still a recurring obligation.
-    point(tokens, now, zone, head_is_verb)
+    point(tokens, now, zone, head_is_verb, unclear)
 }
 
 /// `every weekday at 7`, `each tuesday`, `daily`.
-fn recurrence(tokens: &[Token<'_>]) -> Option<(Shape, u32)> {
+fn recurrence(tokens: &[Token<'_>], unclear: &mut Option<UnclearHour>) -> Option<(Shape, u32)> {
     let at = tokens
         .iter()
         .position(|t| matches!(t.class, Class::RecHead | Class::FreqWord) && guarded(tokens, t))?;
@@ -451,22 +474,37 @@ fn recurrence(tokens: &[Token<'_>]) -> Option<(Shape, u32)> {
     Some((
         Shape::Recurring {
             rule,
-            at_minute: clock_after(tokens, i),
+            at_minute: clock_after(tokens, i, unclear),
         },
         band::RECURRENCE,
     ))
 }
 
 /// A time of day appearing after position `i`, with or without a marker.
-fn clock_after(tokens: &[Token<'_>], mut i: usize) -> Option<u32> {
+///
+/// A bare number after a marker is an hour, but only `0` and `13`–`23` say
+/// which one. `1`–`12` is recorded in `unclear` and is not a time: see
+/// [`UnclearHour`].
+fn clock_after(
+    tokens: &[Token<'_>],
+    mut i: usize,
+    unclear: &mut Option<UnclearHour>,
+) -> Option<u32> {
     while i < tokens.len() {
         match tokens[i].class {
             Class::Marker => i += 1,
             Class::Clock { hour, minute, .. } => return Some(hour * 60 + minute),
             Class::TodWord => return tod_minutes(tokens[i].text),
-            // A bare number is a time here only because a marker preceded it:
+            // A bare number is an hour here only because a marker preceded it:
             // "every weekday at 7". Without the marker it stays a number.
             Class::Number(n) if n <= 23 && i > 0 && tokens[i - 1].class == Class::Marker => {
+                if (1..=12).contains(&n) {
+                    *unclear = Some(UnclearHour {
+                        hour: n,
+                        at: tokens[i].end,
+                    });
+                    return None;
+                }
                 return Some(n * 60);
             }
             _ => return None,
@@ -543,7 +581,13 @@ fn month_number(word: &str) -> Option<u8> {
 }
 
 /// `dentist thursday 2pm`, `on aug 14`, `in 3 weeks`, `tomorrow morning`.
-fn point(tokens: &[Token<'_>], now: i64, zone: Zone, head_is_verb: bool) -> Option<(Shape, u32)> {
+fn point(
+    tokens: &[Token<'_>],
+    now: i64,
+    zone: Zone,
+    head_is_verb: bool,
+    unclear: &mut Option<UnclearHour>,
+) -> Option<(Shape, u32)> {
     for (i, t) in tokens.iter().enumerate() {
         if !guarded(tokens, t) {
             continue;
@@ -656,7 +700,7 @@ fn point(tokens: &[Token<'_>], now: i64, zone: Zone, head_is_verb: bool) -> Opti
         let (minutes, vague) = match after.map(|t| t.class) {
             Some(Class::Clock { hour, minute, .. }) => (Some(hour * 60 + minute), false),
             Some(Class::TodWord) => (tod_minutes(after?.text), true),
-            _ => match clock_after(tokens, i + consumed) {
+            _ => match clock_after(tokens, i + consumed, unclear) {
                 Some(m) => (Some(m), false),
                 None => (None, false),
             },

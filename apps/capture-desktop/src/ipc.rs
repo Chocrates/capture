@@ -220,6 +220,8 @@ pub struct Page {
     pub promotion: Option<Promotion>,
     /// A reading the recognizer had but did not act on.
     pub suggestion: Option<String>,
+    /// An hour written without am or pm, to ask about.
+    pub unclear_hour: Option<u32>,
 }
 
 /// What a note currently is, beside what was captured.
@@ -473,7 +475,10 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
 
         let versions = row.divergences + 1;
 
-        let promotion = s.promotion_of(&tgt)?.map(|p| Promotion {
+        let row_promotion = s.promotion_of(&tgt)?;
+        let unclear_hour =
+            capture_store::promote::asks_hour(row.text.as_deref(), row_promotion.as_ref());
+        let promotion = row_promotion.map(|p| Promotion {
             kind: p.kind,
             descriptor: p.descriptor,
             pinned: p.pinned,
@@ -501,6 +506,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             versions,
             promotion,
             suggestion,
+            unclear_hour,
         })
     })())
 }
@@ -786,6 +792,19 @@ pub fn accept_suggestion(name: String) -> std::result::Result<String, String> {
 pub fn fix_list(name: String) -> std::result::Result<String, String> {
     wire((|| {
         capture_store::mutate::accept_near_miss(&paths()?, &name)
+    })())
+}
+
+/// Answer "2am or 2pm?" by writing it into the text.
+///
+/// An ordinary edit, like `fix_list`, and the note re-promotes with the time
+/// before this returns. Answers the text as it now reads.
+#[tauri::command]
+pub fn settle_hour(name: String, pm: bool) -> std::result::Result<String, String> {
+    wire((|| {
+        use capture_store::mutate::Half;
+        let half = if pm { Half::Pm } else { Half::Am };
+        capture_store::mutate::settle_hour(&paths()?, &name, half)
     })())
 }
 

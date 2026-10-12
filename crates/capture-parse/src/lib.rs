@@ -69,7 +69,7 @@ extern crate alloc;
 mod recognize;
 mod token;
 
-pub use recognize::{Markers, Recognition, Shape, When, recognize};
+pub use recognize::{Markers, Recognition, Shape, UnclearHour, When, recognize};
 pub use token::{Class, Token, tokenize};
 
 /// The version of the vocabulary, the grammar and the bands, together.
@@ -125,7 +125,24 @@ pub use token::{Class, Token, tokenize};
 /// This is why the version rises rather than the fix shipping quietly: every
 /// capture already parsed under 5 recorded the prose date, and only a reparse
 /// replaces it. A pinned promotion still wins.
-pub const GRAMMAR_VERSION: u32 = 6;
+///
+/// Version 7 stops guessing which half of the clock a bare hour means. "gym
+/// every monday at 2" was a series at 02:00; it is now a series on Mondays with
+/// no time, and an [`UnclearHour`] asks. Every capture parsed under 6 that read
+/// "at 2" as 02:00 is read again, which is the only way an archive already
+/// holding a 2 am gym loses it.
+pub const GRAMMAR_VERSION: u32 = 7;
+
+/// The hour a capture gave without am or pm, if it gave one.
+///
+/// The same reading the recognizer makes, asked on its own so a surface can
+/// offer the choice without re-deriving where the number was. Independent of
+/// the moment and zone: whether "at 2" is unclear does not depend on when it
+/// was written.
+pub fn unclear_hour(text: &str) -> Option<UnclearHour> {
+    let utc = capture_time::Zone::new("UTC")?;
+    recognize(text, 0, utc).unclear_hour
+}
 
 /// A word the recognizer knows, and what it is worth.
 ///

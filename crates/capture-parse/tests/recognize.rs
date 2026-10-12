@@ -80,10 +80,13 @@ fn the_five_worked_examples_parse_as_the_document_says() {
     match r.shape {
         Shape::Recurring { rule, at_minute } => {
             assert_eq!(rule.freq, 0, "expected daily");
-            assert_eq!(at_minute, Some(7 * 60), "expected 07:00");
+            // §3.1's worked example said 07:00. A bare hour is asked about
+            // now, because the same guess put "gym at 2" at 2 am.
+            assert_eq!(at_minute, None, "no time without am or pm");
         }
         other => panic!("walk the dog every day at 7 -> {other:?}"),
     }
+    assert_eq!(r.unclear_hour.map(|u| u.hour), Some(7));
 
     let r = read("vacation aug 1-14");
     match r.shape {
@@ -132,14 +135,89 @@ fn a_weekday_said_on_that_weekday_means_today() {
 
 #[test]
 fn every_weekday_at_seven_is_five_days_a_week() {
-    match read("every weekday at 7").shape {
+    match read("every weekday at 7am").shape {
         Shape::Recurring { rule, at_minute } => {
             assert_eq!(rule.freq, 1, "weekly");
             assert_eq!(rule.by_day, 0b0001_1111, "Mon to Fri");
             assert_eq!(at_minute, Some(7 * 60));
         }
-        other => panic!("every weekday at 7 -> {other:?}"),
+        other => panic!("every weekday at 7am -> {other:?}"),
     }
+}
+
+// An hour without am or pm is asked, not guessed.
+//
+// "gym every monday at 2" was scheduled for 02:00, and so was "dentist on oct
+// 15th at 2" — found in use. The person chose being asked over any guess.
+
+#[test]
+fn a_bare_hour_in_a_series_is_asked_not_guessed() {
+    let r = read("go to the gym every monday at 2");
+    match r.shape {
+        Shape::Recurring { rule, at_minute } => {
+            assert_eq!(rule.by_day, 0b0000_0001, "Monday");
+            assert_eq!(at_minute, None, "no time of day was given");
+        }
+        other => panic!("-> {other:?}"),
+    }
+    let u = r.unclear_hour.expect("the hour is asked about");
+    assert_eq!(u.hour, 2);
+    assert_eq!(
+        &"go to the gym every monday at 2"[..u.at],
+        "go to the gym every monday at 2"
+    );
+    assert!(
+        promotes("go to the gym every monday at 2"),
+        "the series still promotes"
+    );
+}
+
+#[test]
+fn a_bare_hour_on_a_day_keeps_the_day() {
+    let text = "dentist on oct 15th at 2";
+    let r = read(text);
+    match r.shape {
+        Shape::Point(When::Date(d)) => assert_eq!((d.month, d.day), (10, 15)),
+        other => panic!("-> {other:?}"),
+    }
+    let u = r.unclear_hour.expect("the hour is asked about");
+    assert_eq!((u.hour, &text[..u.at]), (2, text));
+    assert!(promotes(text), "the day still promotes");
+}
+
+#[test]
+fn twelve_is_asked_about_too() {
+    assert_eq!(
+        read("lunch every friday at 12")
+            .unclear_hour
+            .map(|u| u.hour),
+        Some(12)
+    );
+}
+
+#[test]
+fn an_hour_that_says_which_is_not_asked_about() {
+    for (text, minute) in [
+        ("gym every monday at 2pm", 14 * 60),
+        ("standup every weekday at 14", 14 * 60),
+        ("backup every day at 0", 0),
+        ("gym every monday at 14:30", 14 * 60 + 30),
+        ("lunch every friday at noon", 12 * 60),
+    ] {
+        let r = read(text);
+        assert_eq!(r.unclear_hour, None, "{text}");
+        match r.shape {
+            Shape::Recurring { at_minute, .. } => assert_eq!(at_minute, Some(minute), "{text}"),
+            other => panic!("{text} -> {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_number_that_is_not_a_clock_is_not_asked_about() {
+    // "in 3 weeks" is a marker and a number too, and it is an offset.
+    assert_eq!(read("revisit in 3 weeks").unclear_hour, None);
+    assert_eq!(read("budget 40k, revisit in Q2").unclear_hour, None);
 }
 
 #[test]

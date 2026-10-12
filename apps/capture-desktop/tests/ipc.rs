@@ -206,6 +206,23 @@ fn the_window_answers_what_the_store_holds() {
         "unmuting a note that is not muted was accepted"
     );
 
+    // ------------------------------------------------------------------ hour
+    //
+    // "gym every monday at 2" was a series at 2 am. The page asks instead, and
+    // the answer goes into the text.
+    let gym = capture(&paths, "go to the gym every monday at 2");
+    capture_store::promote::settle(&paths).unwrap();
+    assert_eq!(ipc::note(gym.clone()).unwrap().unclear_hour, Some(2));
+    let text = ipc::settle_hour(gym.clone(), true).expect("answering answers");
+    assert_eq!(text, "go to the gym every monday at 2pm");
+    let page = ipc::note(gym).unwrap();
+    assert_eq!(page.unclear_hour, None, "still asking after the answer");
+    assert!(
+        page.promotion
+            .is_some_and(|p| p.descriptor.contains("14:00")),
+        "the answer did not time the series"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

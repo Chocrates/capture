@@ -1491,10 +1491,12 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let promotion = store.promotion_of(&n.tgt)?.filter(|p| p.kind != "note");
     let links = store.links_from(&n.tgt)?;
     let backlinks = store.links_to(&n.tgt)?;
+    let unclear_hour = capture_store::promote::asks_hour(n.text.as_deref(), promotion.as_ref());
     answer(
         &Page {
             note: n,
             promotion,
+            unclear_hour,
             links,
             backlinks,
             now: now_ms() as u64,
@@ -1508,6 +1510,8 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
 struct Page {
     note: NoteRow,
     promotion: Option<projection::PromotionRow>,
+    /// An hour written without am or pm, which the promotion left untimed.
+    unclear_hour: Option<u32>,
     links: Vec<LinkRow>,
     backlinks: Vec<Backlink>,
     now: u64,
@@ -1518,6 +1522,7 @@ impl View for Page {
         let Page {
             note: n,
             promotion,
+            unclear_hour,
             links,
             backlinks,
             now,
@@ -1542,6 +1547,7 @@ impl View for Page {
         };
         note(n, *now).and([
             ("promotion", promotion),
+            ("unclear_hour", (*unclear_hour).into()),
             ("links", arr(links.iter().map(link_json))),
             ("backlinks", arr(backlinks.iter().map(backlink_json))),
         ])
@@ -1551,6 +1557,7 @@ impl View for Page {
         let Page {
             note: n,
             promotion,
+            unclear_hour,
             links,
             backlinks,
             ..
@@ -1604,6 +1611,12 @@ impl View for Page {
             } else {
                 say!("{:<10}{}{}", p.kind, rest, authored);
             }
+        }
+
+        // Asked, right under what it was read as, because that line is
+        // missing its time and this is why.
+        if let Some(h) = unclear_hour {
+            say!("time      {h}am or {h}pm?  capture hour {} am|pm", n.slug);
         }
 
         say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));

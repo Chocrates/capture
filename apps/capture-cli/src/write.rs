@@ -961,6 +961,19 @@ fn day_of(ms: i64) -> String {
         .unwrap_or_else(|_| "an unknown day".into())
 }
 
+/// Answer "2am or 2pm?" for a capture that wrote a bare hour.
+///
+/// Prints the new text, because the answer went into what somebody wrote.
+pub fn hour(paths: StorePaths, name: &str, pm: bool) -> Result<()> {
+    use capture_store::mutate::Half;
+    let half = if pm { Half::Pm } else { Half::Am };
+    let settled = capture_store::mutate::settle_hour(&paths, name, half)?;
+    say!("Now reads:");
+    say!();
+    say!("  {settled}");
+    Ok(())
+}
+
 /// Insert the character a capture was missing to be a list.
 ///
 /// Says what it did, because it changed what somebody wrote. Accepting a type

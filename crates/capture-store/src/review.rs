@@ -254,6 +254,14 @@ pub fn open(paths: &StorePaths, now: i64) -> Result<Offered> {
                 i.note.text.as_deref(),
             ) {
                 (None, Some(text)) => suggestion_for(text, i.note.tz.as_deref(), now),
+                // Promoted, but to a day or a rule with no time, because the
+                // hour said neither am nor pm. Worth a line here: a review is
+                // where somebody is already looking at what they wrote.
+                (Some(p), Some(text)) => crate::promote::asks_hour(Some(text), Some(&p)).map(|h| {
+                    format!(
+                        "\"at {h}\" has no am or pm, so this has no time yet. Which did you mean?"
+                    )
+                }),
                 _ => None,
             },
             text: i.note.text.clone(),

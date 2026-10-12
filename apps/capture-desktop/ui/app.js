@@ -895,6 +895,25 @@ async function showNote(name, into = view) {
     into.append(box);
   }
 
+  // An hour written without am or pm. Asked rather than guessed: "gym every
+  // monday at 2" was a series at 2 am. Each button names what it will write,
+  // because the answer goes into the text.
+  if (page.unclear_hour != null) {
+    const h = page.unclear_hour;
+    const box = el("div", "suggestion");
+    box.append(el("p", null, `No time yet — "at ${h}" could be either. Which?`));
+    for (const [label, pm] of [[`${h}am`, false], [`${h}pm`, true]]) {
+      const b = el("button", "act", label);
+      b.addEventListener("click", async () => {
+        const text = await call("settle_hour", { name: n.slug, pm });
+        toast(`Now reads: ${text}`);
+        showNote(n.slug);
+      });
+      box.append(b);
+    }
+    into.append(box);
+  }
+
   const meta = el("p", "day");
   meta.textContent = `captured ${stamp(n.captured_ms, n.tz)}`;
   if (n.updated_ms !== n.captured_ms) {

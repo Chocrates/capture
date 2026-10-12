@@ -1779,3 +1779,29 @@ fn a_reworded_item_keeps_its_tick_through_the_binding() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// "gym every monday at 2" asks on the phone, and answering times it.
+#[test]
+fn a_bare_hour_is_asked_and_answered_from_the_phone() {
+    let root = scratch("hour");
+    let a = Archive::open(root.clone()).unwrap();
+    let Captured::Stored { slug } = a.capture("go to the gym every monday at 2".into()).unwrap()
+    else {
+        panic!("spooled with a writable store")
+    };
+
+    assert_eq!(a.unclear_hour(slug.clone()).unwrap(), Some(2));
+    let text = a.settle_hour(slug.clone(), true).unwrap();
+    assert_eq!(text, "go to the gym every monday at 2pm");
+    assert_eq!(
+        a.unclear_hour(slug.clone()).unwrap(),
+        None,
+        "nothing left to ask"
+    );
+    assert!(
+        a.settle_hour(slug.clone(), true).is_err(),
+        "answering twice rewrote the text again"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

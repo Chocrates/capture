@@ -761,6 +761,22 @@ pub fn task(done: bool, due: Option<&str>) -> Promoted {
     })
 }
 
+/// The hour to ask "am or pm?" about, if this note has one to ask.
+///
+/// One rule for every surface. The text is what the question is about, but a
+/// promotion the person authored is theirs and already says when: asking them
+/// to settle an hour their own pinned time ignores would be asking about
+/// nothing.
+pub fn asks_hour(
+    text: Option<&str>,
+    promotion: Option<&crate::projection::PromotionRow>,
+) -> Option<u32> {
+    if promotion.is_some_and(|p| p.pinned) {
+        return None;
+    }
+    capture_parse::unclear_hour(text?).map(|u| u.hour)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

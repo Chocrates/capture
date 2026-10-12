@@ -123,6 +123,11 @@ pub enum Command {
     FixList {
         name: String,
     },
+    /// Say whether a bare hour meant am or pm.
+    Hour {
+        name: String,
+        pm: bool,
+    },
     /// Tick one item of a capture, by its number.
     TickAt {
         name: String,
@@ -692,6 +697,18 @@ where
         // "accept": this rewrites what somebody wrote, where accepting a type
         // leaves it alone, and the two should not sound the same.
         "fix-list" => one_name(&args[1..], "fix-list", |name, _| Command::FixList { name }),
+        // `capture hour <note> am|pm`. Answers the question a bare hour
+        // raised, by writing the answer into the text.
+        "hour" => match &args[1..] {
+            [name, half] if half == "am" || half == "pm" => Ok(Command::Hour {
+                name: name.clone(),
+                pm: half == "pm",
+            }),
+            _ => Err(Bad::Value {
+                command: "hour".into(),
+                problem: "give the note and am or pm: capture hour <note> pm".into(),
+            }),
+        },
         "tick-at" | "untick-at" => {
             let done = args[0] == "tick-at";
             match &args[1..] {
@@ -1482,6 +1499,7 @@ TIME AND TASKS
                                this one only, with its own details
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
+  capture hour <note> am|pm      say which half of the clock "at 2" meant
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
                                (untick-at puts it back; use this where two
                                 items read the same)
@@ -2174,6 +2192,26 @@ mod tests {
                 at: None
             })
         );
+    }
+
+    #[test]
+    fn hour_takes_a_note_and_a_half() {
+        assert_eq!(
+            p(&["hour", "gym", "pm"]),
+            Ok(Command::Hour {
+                name: "gym".into(),
+                pm: true
+            })
+        );
+        assert_eq!(
+            p(&["hour", "gym", "am"]),
+            Ok(Command::Hour {
+                name: "gym".into(),
+                pm: false
+            })
+        );
+        assert!(p(&["hour", "gym"]).is_err());
+        assert!(p(&["hour", "gym", "14"]).is_err());
     }
 
     #[test]

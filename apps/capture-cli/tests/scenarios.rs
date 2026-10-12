@@ -1854,3 +1854,26 @@ fn muting_a_tag_reaches_notes_that_wrote_it_inline() {
         "{found}"
     );
 }
+
+/// "gym every monday at 2" asks which 2, and `capture hour` answers.
+///
+/// Found in use: it was a series at 02:00, and nothing said so.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_bare_hour_is_asked_and_answered() {
+    let s = Store::new("hour");
+    let slug = s.capture("go to the gym every monday at 2");
+
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("2am or 2pm?"), "{shown}");
+    assert!(!shown.contains("02:00"), "guessed 2 am: {shown}");
+    let json = s.ok(&["show", &slug, "--json"]);
+    assert!(json.contains("\"unclear_hour\":2"), "{json}");
+
+    let said = s.ok(&["hour", &slug, "pm"]);
+    assert!(said.contains("go to the gym every monday at 2pm"), "{said}");
+
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("14:00"), "{shown}");
+    assert!(!shown.contains("2am or 2pm?"), "still asking: {shown}");
+}

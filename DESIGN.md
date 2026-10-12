@@ -1708,7 +1708,8 @@ Instead, every input lands as a `capture`, and **type is derived**:
 
 ```
 "dentist thursday 2pm"            → timed event, Thu 14:00, 30m default
-"walk the dog every day at 7"     → recurring obligation, daily 07:00
+"walk the dog every day at 7am"   → recurring obligation, daily 07:00
+"walk the dog every day at 7"     → recurring obligation, daily, untimed — "7am or 7pm?"
 "vacation aug 1-14"               → all-day event, floating dates
 "send sarah the migration doc"    → task, no due date
 "budget 40k, revisit in Q2"       → note, with a Q2 review nudge
@@ -1896,6 +1897,12 @@ Everything the five worked examples in §3.1 need, and nothing else. `dentist th
 `point( anchor=weekday, clock=hour+meridiem )`; `walk the dog every day at 7` is
 `recurrence( rec_head, rec_body=unit, clock )`; `vacation aug 1-14` is the first `range`
 production; `in 3 weeks` is the `"in" number unit` anchor.
+
+A bare hour after a marker is a clock only when it says which half of the day: `0` and
+`13`–`23`. A bare `1`–`12` is not guessed (changed 2026-10-12, grammar 7): `at 7` promotes the
+day or the rule without a time and asks "7am or 7pm?", and the answer is an ordinary edit that
+inserts the meridiem. The guess this replaced read `at 7` as 07:00, which is right for a dog
+walk and put "gym every monday at 2" at 2 am.
 
 #### The guards, which matter more than the grammar
 

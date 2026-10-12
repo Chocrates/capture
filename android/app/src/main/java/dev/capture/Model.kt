@@ -129,6 +129,9 @@ class Model(private val archive: Archive) : ViewModel() {
      * it costs a parse.
      */
     var suggestion by mutableStateOf<String?>(null)
+
+    /** An hour this note wrote without am or pm, to ask about. */
+    var unclearHour by mutableStateOf<UInt?>(null)
         private set
     var hits by mutableStateOf<List<NoteSummary>>(emptyList())
         private set
@@ -338,6 +341,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 pending = archive.pendingRedaction(to.name)
                 recording = archive.recordingOf(to.name)
                 suggestion = archive.suggestion(to.name)
+                unclearHour = archive.unclearHour(to.name)
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
@@ -430,6 +434,9 @@ class Model(private val archive: Archive) : ViewModel() {
      */
     fun fixList(name: String) = after(name) { archive.acceptNearMiss(name) }
 
+    /** Answer "2am or 2pm?"; the note re-reads with its time. */
+    fun settleHour(name: String, pm: Boolean) = after(name) { archive.settleHour(name, pm) }
+
     // --- entities ------------------------------------------------------------
     //
     // Re-read the page rather than patching it. A merge changes which notes the
@@ -475,6 +482,7 @@ class Model(private val archive: Archive) : ViewModel() {
         // A kind that just changed is a kind the recognizer is no longer
         // suggesting, so the offer has to be re-asked rather than left up.
         suggestion = archive.suggestion(name)
+        unclearHour = archive.unclearHour(name)
         // The lists behind this note are now stale in a way that is visible
         // the moment the back gesture happens.
         timeline = archive.timeline(100u)

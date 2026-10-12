@@ -314,6 +314,19 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                     TextButton({ model.accept(note.slug) }) { Text("Yes, that's what it is") }
                 }
             }
+            // An hour written without am or pm. Asked rather than guessed:
+            // "gym every monday at 2" was a series at 2 am. Each button says
+            // what it will write, because the answer goes into the text.
+            model.unclearHour?.let { h ->
+                Text(
+                    "No time yet — \"at $h\" could be either. Which?",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Row {
+                    TextButton({ model.settleHour(note.slug, false) }) { Text("${h}am") }
+                    TextButton({ model.settleHour(note.slug, true) }) { Text("${h}pm") }
+                }
+            }
             recording?.let { Listen(it, model) }
         }
         HorizontalDivider()

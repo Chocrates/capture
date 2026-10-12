@@ -440,6 +440,63 @@ pub fn accept_near_miss(paths: &StorePaths, name: &str) -> Result<String> {
     Ok(fixed)
 }
 
+/// Which half of the clock an unclear hour meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Half {
+    Am,
+    Pm,
+}
+
+impl Half {
+    fn word(self) -> &'static str {
+        match self {
+            Half::Am => "am",
+            Half::Pm => "pm",
+        }
+    }
+}
+
+/// Answer "2am or 2pm?" for a capture that wrote a bare hour.
+///
+/// An ordinary edit, like accepting a near miss and for the same reason: the
+/// person's words are what the promotion is read from, so the answer goes into
+/// the words — `at 2` becomes `at 2pm` — and the capture re-promotes with a
+/// time. Writing a promotion beside unchanged text would leave the text still
+/// saying something the calendar no longer does.
+///
+/// Inserted directly after the number and nowhere else, so nothing else the
+/// person wrote moves. Refused where there is no unclear hour, so a surface
+/// offering it on the wrong capture fails loudly instead of rewriting text.
+pub fn settle_hour(paths: &StorePaths, name: &str, half: Half) -> Result<String> {
+    let text = {
+        let store = crate::projection::current(paths)?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        store
+            .text_of(&tgt)?
+            .ok_or_else(|| crate::Error::Usage(String::from("that capture has no readable text")))?
+    };
+
+    let Some(unclear) = capture_parse::unclear_hour(&text) else {
+        return Err(crate::Error::Usage(String::from(
+            "that capture has no hour without am or pm",
+        )));
+    };
+
+    let mut settled = String::with_capacity(text.len() + 2);
+    settled.push_str(&text[..unclear.at]);
+    settled.push_str(half.word());
+    settled.push_str(&text[unclear.at..]);
+
+    edit(paths, name, &settled)?;
+    // Read again now rather than at the next sweep. The point of answering is
+    // the time it gives, and a surface that showed "every Mon" straight after
+    // the answer "pm" would read as the answer not having taken.
+    crate::promote::settle(paths)?;
+    Ok(settled)
+}
+
 /// Dismiss a note's divergence.
 ///
 /// Dismissing is not choosing. Both versions stay in the log and in the version
