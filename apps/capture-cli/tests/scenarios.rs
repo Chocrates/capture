@@ -1877,3 +1877,27 @@ fn a_bare_hour_is_asked_and_answered() {
     assert!(shown.contains("14:00"), "{shown}");
     assert!(!shown.contains("2am or 2pm?"), "still asking: {shown}");
 }
+
+/// `capture cal` draws a month from the same read as every other surface.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_month_shows_a_weekly_series_on_each_of_its_days() {
+    let s = Store::new("cal");
+    let gym = s.capture("gym every monday at 2pm");
+    s.ok(&["settle"]);
+
+    let json = s.ok(&["cal", "--json"]);
+    let mondays = json.matches(&format!("\"slug\":\"{gym}\"")).count();
+    assert!(
+        (1..=5).contains(&mondays),
+        "a weekly series lands once a week in a month, got {mondays}: {json}"
+    );
+    assert!(json.contains("\"kind\":\"timed\""), "{json}");
+
+    let prose = s.ok(&["cal"]);
+    assert!(prose.contains("14:00"), "{prose}");
+    assert!(prose.contains(&gym), "{prose}");
+
+    let week = s.ok(&["cal", "--week"]);
+    assert!(!week.contains(" Mo  Tu"), "a week has no grid: {week}");
+}

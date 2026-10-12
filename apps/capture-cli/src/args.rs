@@ -26,6 +26,15 @@
 //! not understood is an error rather than a guess.
 
 /// What the user asked for.
+/// Which stretch of days `capture cal` shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalSpan {
+    /// A month, as `YYYY-MM`; this one when absent.
+    Month(Option<String>),
+    /// The Monday-to-Sunday week containing a day; this one when absent.
+    Week(Option<String>),
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     /// Capture. Carries the text source rather than the text, because reading
@@ -50,6 +59,11 @@ pub enum Command {
     /// What occurs and what is due, for a day.
     Agenda {
         day: Option<String>,
+        json: bool,
+    },
+    /// A month or a week, and what happens on each day of it.
+    Cal {
+        span: CalSpan,
         json: bool,
     },
     /// Notes promoted to tasks.
@@ -499,6 +513,24 @@ where
                 }
             }
             Ok(Command::Timeline { limit, json })
+        }
+        // `capture cal [YYYY-MM]`, `capture cal --week [YYYY-MM-DD]`.
+        "cal" => {
+            let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--json").collect();
+            let json = has_json(&args[1..]);
+            let span = match rest.as_slice() {
+                [] => CalSpan::Month(None),
+                [w] if *w == "--week" => CalSpan::Week(None),
+                [w, d] if *w == "--week" => CalSpan::Week(Some((*d).clone())),
+                [m] if !m.starts_with('-') => CalSpan::Month(Some((*m).clone())),
+                [.., extra] => {
+                    return Err(Bad::UnknownFlag {
+                        command: "cal".into(),
+                        flag: (*extra).clone(),
+                    });
+                }
+            };
+            Ok(Command::Cal { span, json })
         }
         "agenda" => {
             let rest = &args[1..];
@@ -1482,6 +1514,8 @@ READING
 
 TIME AND TASKS
   capture agenda [day]           what is due and what occurs, default today
+  capture cal [YYYY-MM]          a month, and what happens on each day
+  capture cal --week [day]       the week containing a day, default this one
   capture tasks                  open tasks, newest first
   capture list <tag>             a list: its items, and what is left
   capture due                    what will speak, and when
@@ -2212,6 +2246,32 @@ mod tests {
         );
         assert!(p(&["hour", "gym"]).is_err());
         assert!(p(&["hour", "gym", "14"]).is_err());
+    }
+
+    #[test]
+    fn cal_takes_a_month_or_a_week() {
+        assert_eq!(
+            p(&["cal"]),
+            Ok(Command::Cal {
+                span: CalSpan::Month(None),
+                json: false
+            })
+        );
+        assert_eq!(
+            p(&["cal", "2026-11", "--json"]),
+            Ok(Command::Cal {
+                span: CalSpan::Month(Some("2026-11".into())),
+                json: true
+            })
+        );
+        assert_eq!(
+            p(&["cal", "--week", "2026-10-15"]),
+            Ok(Command::Cal {
+                span: CalSpan::Week(Some("2026-10-15".into())),
+                json: false
+            })
+        );
+        assert!(p(&["cal", "--month"]).is_err());
     }
 
     #[test]

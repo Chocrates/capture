@@ -2216,6 +2216,276 @@ impl View for List {
     }
 }
 
+// -------------------------------------------------------------------- cal ---
+
+/// A month or a week, and what happens on each day.
+///
+/// The store's calendar read, the same one the phone's grid and the desktop's
+/// draw from, so the three cannot disagree about a day.
+pub fn cal(paths: &StorePaths, span: &crate::args::CalSpan, json: bool) -> Result<()> {
+    use crate::args::CalSpan;
+    let store = open(paths)?;
+    let zone = capture_time::Zone::new(&local_zone()).unwrap_or_else(utc);
+    let now = now_ms();
+    let today = capture_time::civil_date(now, zone);
+    let shift = |d: capture_time::FloatingDate, n: i64| {
+        capture_time::at_local(d, 12, 0, zone)
+            .and_then(|noon| capture_time::add_days(noon, zone, n))
+            .ok_or_else(|| Error::Usage(format!("no day {n} from {d}")))
+    };
+
+    let (from, to, month) = match span {
+        CalSpan::Month(m) => {
+            let first = match m {
+                None => capture_time::FloatingDate::new(today.year, today.month, 1),
+                Some(m) => capture_time::FloatingDate::parse(&format!("{m}-01")),
+            }
+            .ok_or_else(|| Error::Usage(format!("{:?} is not a month; use YYYY-MM", m)))?;
+            let (y, mo) = if first.month == 12 {
+                (first.year + 1, 1)
+            } else {
+                (first.year, first.month + 1)
+            };
+            let next = capture_time::FloatingDate::new(y, mo, 1)
+                .ok_or_else(|| Error::Usage("no month after that one".into()))?;
+            (first, shift(next, -1)?, true)
+        }
+        CalSpan::Week(d) => {
+            let day = match d {
+                None => today,
+                Some(d) => capture_time::FloatingDate::parse(d)
+                    .ok_or_else(|| Error::Usage(format!("'{d}' is not a date; use YYYY-MM-DD")))?,
+            };
+            let monday = shift(day, -(weekday(day) as i64))?;
+            (monday, shift(monday, 6)?, false)
+        }
+    };
+
+    let days = capture_store::calendar::days(&store, from, to, zone, now)?;
+    answer(
+        &Cal {
+            days,
+            month,
+            today,
+            zone,
+            unread: unread(&store),
+        },
+        json,
+    );
+    Ok(())
+}
+
+/// Monday is zero, as everywhere else in this archive.
+fn weekday(d: capture_time::FloatingDate) -> u32 {
+    // 1970-01-01 was a Thursday. Days are counted at noon UTC so no offset can
+    // carry the count across midnight.
+    let utc = capture_time::Zone::new("UTC").expect("UTC is always present");
+    let ms = capture_time::at_local(d, 12, 0, utc).unwrap_or(0);
+    ((ms.div_euclid(86_400_000) + 3).rem_euclid(7)) as u32
+}
+
+struct Cal {
+    days: Vec<capture_store::calendar::Day>,
+    /// A whole month, which gets a grid above the list.
+    month: bool,
+    today: capture_time::FloatingDate,
+    zone: capture_time::Zone,
+    unread: usize,
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+impl Cal {
+    /// "Mon 12 Oct 14:00", for saying where a moved occurrence came from.
+    fn when(&self, ms: i64) -> String {
+        let d = capture_time::civil_date(ms, self.zone);
+        let (h, m) = capture_time::civil_clock(ms, self.zone);
+        format!(
+            "{} {} {} {h:02}:{m:02}",
+            DAYS[weekday(d) as usize],
+            d.day,
+            &MONTHS[d.month as usize - 1][..3]
+        )
+    }
+
+    fn clock(&self, ms: i64) -> String {
+        let (h, m) = capture_time::civil_clock(ms, self.zone);
+        format!("{h:02}:{m:02}")
+    }
+}
+
+impl View for Cal {
+    fn json(&self) -> Json {
+        use capture_store::calendar::{Item, ItemKind};
+        let Cal {
+            days,
+            month: _, // a rendering choice; the days say which they are
+            today,
+            zone: _, // the instants are absolute
+            unread,
+        } = self;
+        let item = |i: &Item| {
+            let Item {
+                tgt: _, // the slug names it
+                slug,
+                text,
+                kind,
+                series,
+                occ,
+                start_ms,
+                end_ms,
+                moved_from,
+                skipped,
+                done,
+                title,
+                shift,
+                unclear_hour,
+                column: _, // layout for an hour axis; nothing here draws one
+                columns: _,
+            } = i;
+            obj([
+                ("slug", slug.into()),
+                ("text", text.into()),
+                (
+                    "kind",
+                    match kind {
+                        ItemKind::AllDay => "all_day",
+                        ItemKind::Timed => "timed",
+                        ItemKind::Due => "due",
+                    }
+                    .into(),
+                ),
+                ("series", (*series).into()),
+                ("occ", (*occ).into()),
+                ("start_ms", start_ms.into()),
+                ("end_ms", (*end_ms).into()),
+                ("moved_from", (*moved_from).into()),
+                ("skipped", (*skipped).into()),
+                ("done", (*done).into()),
+                ("title", title.into()),
+                ("shift", shift.into()),
+                ("unclear_hour", (*unclear_hour).into()),
+            ])
+        };
+        obj([
+            ("today", today.to_string().into()),
+            (
+                "days",
+                arr(days.iter().map(|d| {
+                    obj([
+                        ("date", d.date.to_string().into()),
+                        ("busy", d.busy().into()),
+                        ("items", arr(d.items.iter().map(item))),
+                    ])
+                })),
+            ),
+            ("unread", unread.into()),
+        ])
+    }
+
+    fn prose(&self) {
+        use capture_store::calendar::ItemKind;
+        let Some(first) = self.days.first() else {
+            return;
+        };
+
+        if self.month {
+            // A grid first, as `cal` draws one: a * beside a day with
+            // something on it, brackets around today.
+            say!(
+                "{} {}",
+                MONTHS[first.date.month as usize - 1],
+                first.date.year
+            );
+            say!("{}", DAYS.map(|d| format!(" {:<3}", &d[..2])).join(""));
+            let mut line = "    ".repeat(weekday(first.date) as usize);
+            for d in &self.days {
+                let mark = if d.busy() { '*' } else { ' ' };
+                let cell = if d.date == self.today {
+                    format!("[{:>2}]", d.date.day)
+                } else {
+                    format!(" {:>2}{mark}", d.date.day)
+                };
+                line.push_str(&cell);
+                if weekday(d.date) == 6 {
+                    say!("{}", line.trim_end());
+                    line.clear();
+                }
+            }
+            if !line.trim().is_empty() {
+                say!("{}", line.trim_end());
+            }
+            say!();
+        }
+
+        let mut any = false;
+        for d in &self.days {
+            if d.items.is_empty() {
+                continue;
+            }
+            any = true;
+            say!(
+                "{} {} {}",
+                DAYS[weekday(d.date) as usize],
+                d.date.day,
+                &MONTHS[d.date.month as usize - 1][..3]
+            );
+            for i in &d.items {
+                let at = match i.kind {
+                    ItemKind::AllDay => "all day".to_string(),
+                    ItemKind::Due => "due".to_string(),
+                    ItemKind::Timed => match i.end_ms {
+                        Some(e) => format!("{}–{}", self.clock(i.start_ms), self.clock(e)),
+                        None => self.clock(i.start_ms),
+                    },
+                };
+                let what = i
+                    .title
+                    .clone()
+                    .or_else(|| i.text.clone())
+                    .unwrap_or_default();
+                let mut notes = Vec::new();
+                if let Some(from) = i.moved_from {
+                    notes.push(format!("moved from {}", self.when(from)));
+                }
+                if i.skipped {
+                    notes.push(format!("skipped — capture unskip {} {}", i.slug, d.date));
+                }
+                if i.done {
+                    notes.push("done".into());
+                }
+                if let Some(h) = i.unclear_hour {
+                    notes.push(format!("{h}am or {h}pm? capture hour {} am|pm", i.slug));
+                }
+                let notes = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", notes.join("; "))
+                };
+                say!("  {at:<11}  {what}  [{}]{notes}", i.slug);
+            }
+        }
+        if !any {
+            say!("Nothing on these days.");
+        }
+        say_if_behind(self.unread);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

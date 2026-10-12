@@ -488,6 +488,52 @@ pub struct AgendaEntry {
     /// The cluster decides, not the day: a single three-way overlap at noon
     /// must not squeeze the morning into thirds.
     pub columns: u32,
+    /// An instance of a series, so "change this and later" applies.
+    pub series: bool,
+    /// The occurrence's name — where the rule put it — for move, skip and
+    /// done. `None` for a task or an all-day one-off.
+    pub occ: Option<i64>,
+    /// Where the rule put it, when it was moved somewhere else.
+    pub moved_from: Option<i64>,
+    /// Skipped: shown as skipped with Restore, never drawn as happening.
+    pub skipped: bool,
+    /// A title for this occurrence only.
+    pub title: Option<String>,
+    /// An hour written without am or pm, which is why this has no time.
+    pub unclear_hour: Option<u32>,
+}
+
+impl From<capture_store::calendar::Item> for AgendaEntry {
+    fn from(i: capture_store::calendar::Item) -> AgendaEntry {
+        use capture_store::calendar::ItemKind;
+        AgendaEntry {
+            slug: i.slug,
+            text: i.text,
+            start_ms: i.start_ms,
+            all_day: i.kind != ItemKind::Timed,
+            due: i.kind == ItemKind::Due,
+            done: i.done,
+            end_ms: i.end_ms,
+            column: i.column as u32,
+            columns: i.columns as u32,
+            series: i.series,
+            occ: i.occ,
+            moved_from: i.moved_from,
+            skipped: i.skipped,
+            title: i.title,
+            unclear_hour: i.unclear_hour,
+        }
+    }
+}
+
+/// One day of a calendar: its date and what happens on it.
+#[derive(Debug, uniffi::Record)]
+pub struct CalendarDay {
+    /// `YYYY-MM-DD`, a local day.
+    pub date: String,
+    pub items: Vec<AgendaEntry>,
+    /// Whether a grid should mark it. Skipped things do not count.
+    pub busy: bool,
 }
 
 /// Where an open task sits on a surface asking what is outstanding.
@@ -583,25 +629,6 @@ pub enum NoteKind {
     // without a time (§3.6). A bare "make this an event" has nothing to put
     // there. Saying when is how something becomes an event, which is what the
     // capture text and the recognizer already do.
-}
-
-impl capture_store::calendar::Timed for AgendaEntry {
-    fn start_ms(&self) -> i64 {
-        self.start_ms
-    }
-
-    fn end_ms(&self) -> Option<i64> {
-        self.end_ms
-    }
-
-    fn on_axis(&self) -> bool {
-        !self.all_day && !self.due
-    }
-
-    fn place(&mut self, column: usize, columns: usize) {
-        self.column = column as u32;
-        self.columns = columns as u32;
-    }
 }
 
 /// A named page, as the wiki sidebar lists it.
@@ -1079,93 +1106,42 @@ impl Archive {
     /// including the daylight-saving cases, and a second answer to that
     /// question is a calendar that disagrees with itself.
     pub fn agenda(&self, day: String) -> Result<Vec<AgendaEntry>> {
+        Ok(self
+            .calendar(day.clone(), day)?
+            .pop()
+            .map(|d| d.items)
+            .unwrap_or_default())
+    }
+
+    /// Every day from `from` to `to` inclusive, and what happens on each.
+    ///
+    /// The store's one calendar read, which the one-day agenda is a case of:
+    /// a month grid, a week strip and the day beneath them come from the same
+    /// answer, so the marks on the grid cannot disagree with the list.
+    ///
+    /// Days are local days in the zone the person is in, not UTC. That was the
+    /// agenda's own bug once: 19:00 in Chicago is already tomorrow in UTC, so
+    /// the last hours of every evening fell off the day they belong to.
+    pub fn calendar(&self, from: String, to: String) -> Result<Vec<CalendarDay>> {
         let store = self.read()?;
-        // The zone the person is in, not UTC.
-        //
-        // `today()` answers in the system zone, so a day string arriving here
-        // names a *local* day — and turning it into a UTC window put the day
-        // boundary in the wrong place by the offset. West of Greenwich that
-        // meant the agenda went empty for the last hours of every evening:
-        // 19:00 in Chicago is already tomorrow in UTC, so everything happening
-        // today fell outside the window today was asking for.
-        //
-        // Falls back to UTC only where the system zone has no IANA name, which
-        // is the one case where there is nothing better to use.
         let zone = capture_time::Zone::new(self.zone_name().as_str())
             .or_else(|| capture_time::Zone::new("UTC"))
             .expect("UTC is always present");
-        let date =
-            capture_time::FloatingDate::parse(&day).ok_or_else(|| CaptureError::Refused {
-                reason: format!("{day:?} is not a date — write it as 2026-09-15"),
-            })?;
-        let from =
-            capture_time::at_local(date, 0, 0, zone).ok_or_else(|| CaptureError::Refused {
-                reason: format!("{day:?} is a day that does not exist"),
-            })?;
-        let to = from + 24 * 60 * 60 * 1000;
-
-        let mut out = Vec::new();
-
-        // All-day entries first, in their own band. They are floating dates
-        // with no position on an hour axis (§4.4).
-        for tgt in store.all_day_on(&day)? {
-            out.push(AgendaEntry {
-                slug: store.slug_of(&tgt)?.unwrap_or_default(),
-                text: store.text_of(&tgt)?,
-                start_ms: from,
-                all_day: true,
-                due: false,
-                done: false,
-                end_ms: None,
-                column: 0,
-                columns: 1,
-            });
-        }
-
-        // `happening_between`, not `occurring_between`. The second is series
-        // expansions only: a one-off event lives in `promotions` and gains an
-        // occurrence row only once somebody writes an exception against it. So
-        // the phone's agenda showed recurring things and silently omitted
-        // every single-instance event — "dentist thursday 2pm", promoted at
-        // 85% confidence, on no calendar at all. Both other surfaces already
-        // called the right one; this was the third implementation of the same
-        // question and the one that got it wrong.
-        for (tgt, occ) in store.happening_between(from, to)? {
-            out.push(AgendaEntry {
-                slug: store.slug_of(&tgt)?.unwrap_or_default(),
-                text: store.text_of(&tgt)?,
-                start_ms: occ.start_ms,
-                all_day: occ.all_day,
-                due: false,
-                done: occ.done,
-                end_ms: occ.end_ms,
-                column: 0,
-                columns: 1,
-            });
-        }
-
-        for (tgt, done) in store.tasks_due_on(&day)? {
-            out.push(AgendaEntry {
-                slug: store.slug_of(&tgt)?.unwrap_or_default(),
-                text: store.text_of(&tgt)?,
-                start_ms: from,
-                all_day: true,
-                due: true,
-                done,
-                end_ms: None,
-                column: 0,
-                columns: 1,
-            });
-        }
-
-        // Packed here, by the same code the desktop runs. Two implementations
-        // would be two answers to "do these overlap", both plausible, neither
-        // checked against the other, and visible only as two devices
-        // disagreeing about what Tuesday looks like.
-        capture_store::calendar::pack(&mut out);
-
-        out.sort_by_key(|e| (e.all_day, e.start_ms));
-        Ok(out)
+        let date = |d: &str| {
+            capture_time::FloatingDate::parse(d).ok_or_else(|| CaptureError::Refused {
+                reason: format!("{d:?} is not a date — write it as 2026-09-15"),
+            })
+        };
+        let now = jiff::Timestamp::now().as_millisecond();
+        let days = capture_store::calendar::days(&store, date(&from)?, date(&to)?, zone, now)?;
+        Ok(days
+            .into_iter()
+            .map(|d| CalendarDay {
+                date: d.date.to_string(),
+                busy: d.busy(),
+                items: d.items.into_iter().map(AgendaEntry::from).collect(),
+            })
+            .collect())
     }
 
     /// Every page that has a name, for the wiki.

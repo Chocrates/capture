@@ -82,6 +82,7 @@ fn run(command: Command) -> Result<()> {
         Command::Capture(source) => capture(&source),
         Command::Timeline { limit, json } => read::timeline(&paths()?, limit, json),
         Command::Show { name, json } => read::show(&paths()?, &name, json),
+        Command::Cal { span, json } => read::cal(&paths()?, &span, json),
         Command::Agenda { day, json } => read::agenda(&paths()?, day.as_deref(), json),
         Command::Tasks { json } => read::tasks(&paths()?, json),
         Command::Settle { json } => write::settle(&paths()?, json),

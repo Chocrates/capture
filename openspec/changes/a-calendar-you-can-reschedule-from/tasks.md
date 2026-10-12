@@ -10,10 +10,11 @@
 
 ## 2. One calendar read
 
-- [ ] 2.1 Tests first (capture-store): `calendar(from, to)` over a weekly series, a one-off, a dated task, an all-day item, a moved occurrence (on its new day, with `moved_from`), a skipped one (returned, flagged), and a range past the horizon (refused by name).
-- [ ] 2.2 `projection::calendar`; the one-day agenda reads through it.
-- [ ] 2.3 CLI `capture cal [YYYY-MM | --week [DATE]] [--json]` as a view (json.rs pattern), scenarios test.
-- [ ] 2.4 FFI `calendar(from, to)`.
+- [x] 2.1 Tests first (capture-store): `calendar(from, to)` over a weekly series, a one-off, a dated task, an all-day item, a moved occurrence (on its new day, with `moved_from`), a skipped one (returned, flagged), and a range past the horizon (refused by name).
+- [~] 2.2 `projection::calendar`; the one-day agenda reads through it.
+  - Built as `capture_store::calendar::days` (beside the column packing it uses). The FFI's `agenda` is now `calendar(day, day)`, so the phone's day list and grid share one read — and the phone stops drawing skipped occurrences as happening, which the old FFI agenda did. **Not yet moved over:** the CLI's `agenda` (its JSON has today-only overdue/owed fields and a tested shape) and the desktop's `agenda`; the desktop moves in 5.1.
+- [x] 2.3 CLI `capture cal [YYYY-MM | --week [DATE]] [--json]` as a view (json.rs pattern), scenarios test.
+- [x] 2.4 FFI `calendar(from, to)`.
 
 ## 3. Occurrences named and moved by people
 

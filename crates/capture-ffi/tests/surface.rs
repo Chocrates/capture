@@ -1805,3 +1805,34 @@ fn a_bare_hour_is_asked_and_answered_from_the_phone() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Two weeks from the phone: a weekly series lands once a week, and only those
+/// days are marked.
+#[test]
+fn a_fortnight_marks_the_days_something_happens() {
+    let root = scratch("calendar");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("gym every monday at 2pm".into()).unwrap();
+    a.settle().unwrap();
+
+    let today = a.today();
+    let first = capture_time::FloatingDate::parse(&today).unwrap();
+    let zone = capture_time::Zone::new("UTC").unwrap();
+    let noon = capture_time::at_local(first, 12, 0, zone).unwrap();
+    let last = capture_time::add_days(noon, zone, 13).unwrap().to_string();
+
+    let days = a.calendar(today.clone(), last).unwrap();
+    assert_eq!(days.len(), 14);
+    let marked: Vec<_> = days.iter().filter(|d| d.busy).collect();
+    assert_eq!(marked.len(), 2, "two Mondays in a fortnight: {days:?}");
+    for d in marked {
+        let gym = &d.items[0];
+        assert!(gym.series && gym.occ.is_some() && !gym.skipped);
+    }
+
+    // The one-day agenda is the same read.
+    let monday = &days.iter().find(|d| d.busy).unwrap().date;
+    assert_eq!(a.agenda(monday.clone()).unwrap().len(), 1);
+
+    std::fs::remove_dir_all(&root).ok();
+}
