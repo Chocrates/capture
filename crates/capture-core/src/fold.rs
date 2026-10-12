@@ -442,8 +442,8 @@ pub struct OccState {
     /// Moved to a different time, if it has been.
     #[n(0)]
     pub moved_to: Option<(i64, Option<i64>)>,
-    /// Skipped. Retained but inert when the occurrence has also been moved —
-    /// see [`fold`] for why a move outranks a cancellation.
+    /// Skipped, at some point. Whether that still holds depends on what came
+    /// after it — see [`OccState::visible`].
     #[n(1)]
     pub cancelled: bool,
     /// Completed, for a recurring obligation (§3.6).
@@ -458,16 +458,25 @@ pub struct OccState {
     /// Notes on this occurrence only.
     #[n(5)]
     pub notes: Option<String>,
+    /// Whether the latest of its moves and cancellations was a cancellation.
+    ///
+    /// The fold reads events in a total order, so "latest" is the same answer
+    /// on every device whatever order they arrived in.
+    #[n(6)]
+    pub skipped_last: bool,
 }
 
 impl OccState {
     /// Whether this occurrence should be drawn.
     ///
     /// A cancelled occurrence is hidden, not gone: the cancellation is an
-    /// ordinary event and nothing has been destroyed. A moved one is drawn at
-    /// its new time even if something also cancelled it.
+    /// ordinary event and nothing has been destroyed. A move made after a
+    /// cancellation brings it back — somebody wanted it to happen after all,
+    /// and Restore is exactly that. A cancellation made after a move hides it
+    /// again: otherwise the gesture for dismissing a resurrected occurrence
+    /// would be the one gesture that cannot.
     pub fn visible(&self) -> bool {
-        self.moved_to.is_some() || !self.cancelled
+        !self.cancelled || (self.moved_to.is_some() && !self.skipped_last)
     }
 }
 
@@ -775,7 +784,10 @@ pub fn fold_seeded(events: &[Envelope], known: &Names) -> Projection {
             Kind::ENTITY_BIND => apply_entity_bind(&mut proj, e),
             Kind::OCC_MOVE => apply_occ_move(&mut proj, e),
             Kind::OCC_EDIT => apply_occ_edit(&mut proj, e),
-            Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| o.cancelled = true),
+            Kind::OCC_CANCEL => apply_occ(&mut proj, e, |o| {
+                o.cancelled = true;
+                o.skipped_last = true;
+            }),
             Kind::OCC_DONE => apply_occ(&mut proj, e, |o| o.done = true),
             Kind::ITEM_DONE => apply_item(&mut proj, e, true),
             Kind::ITEM_UNDONE => apply_item(&mut proj, e, false),
@@ -1550,6 +1562,7 @@ fn apply_occ_move(proj: &mut Projection, e: &Envelope) {
     if let Some(n) = proj.notes.get_mut(&tgt) {
         let o = n.occurrences.entry(m.occ).or_default();
         o.moved_to = Some((m.start_ms, m.end_ms));
+        o.skipped_last = false;
     }
 }
 
@@ -2622,6 +2635,58 @@ mod tests {
             assert_eq!(o.moved_to, Some((99, None)));
             assert!(o.visible(), "a moved occurrence was hidden by a cancel");
         }
+    }
+
+    /// Skipping a moved occurrence hides it, and skip, restore, skip ends
+    /// skipped.
+    ///
+    /// The bias above is right for a skip that came *first*: a later move is
+    /// somebody wanting it to happen. But it made every skip after a move a
+    /// silent no-op, and Restore is written as a move back to the original
+    /// time, so a second skip after a restore never took either — found on the
+    /// phone's calendar, where Skip and Restore are one tap apart. The one
+    /// gesture that was meant to dismiss a resurrected occurrence did nothing.
+    #[test]
+    fn a_skip_after_a_move_hides_it() {
+        let s = testing::mixed(69, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(9);
+        let skip = |d: &mut testing::Origin, at| {
+            d.author(Kind::OCC_CANCEL, Some(tgt), None, occ_body(42), at)
+        };
+        let back = |d: &mut testing::Origin, at| {
+            d.author(
+                Kind::OCC_MOVE,
+                Some(tgt),
+                None,
+                testing::encode(&crate::body::OccMoveBody {
+                    nonce: [0u8; 16],
+                    occ: 42,
+                    start_ms: 42,
+                    end_ms: None,
+                }),
+                at,
+            )
+        };
+
+        let first = skip(&mut d, 1_700_000_100_000);
+        let restored = back(&mut d, 1_700_000_200_000);
+        let again = skip(&mut d, 1_700_000_300_000);
+
+        for order in [
+            alloc::vec![first.clone(), restored.clone(), again.clone()],
+            alloc::vec![again.clone(), restored.clone(), first.clone()],
+        ] {
+            let mut set = s.events.clone();
+            set.extend(order);
+            let o = &fold(&set).notes[&tgt].occurrences[&42];
+            assert!(!o.visible(), "the second skip did not take");
+        }
+
+        // And a restore after that brings it back again.
+        let mut set = s.events.clone();
+        set.extend([first, restored, again, back(&mut d, 1_700_000_400_000)]);
+        assert!(fold(&set).notes[&tgt].occurrences[&42].visible());
     }
 
     #[test]

@@ -1836,3 +1836,74 @@ fn a_fortnight_marks_the_days_something_happens() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Sick on Monday, from the phone: preview, move, skip, restore, done.
+#[test]
+fn one_occurrence_is_changed_from_the_phone() {
+    let root = scratch("occurrences");
+    let a = Archive::open(root.clone()).unwrap();
+    let Captured::Stored { slug } = a.capture("gym every monday at 2pm".into()).unwrap() else {
+        panic!("spooled with a writable store")
+    };
+    a.settle().unwrap();
+
+    let today = a.today();
+    let first = capture_time::FloatingDate::parse(&today).unwrap();
+    let zone = capture_time::Zone::new("UTC").unwrap();
+    let noon = capture_time::at_local(first, 12, 0, zone).unwrap();
+    let last = capture_time::add_days(noon, zone, 13).unwrap().to_string();
+    let days = a.calendar(today, last).unwrap();
+    let monday = days.iter().find(|d| d.busy).expect("a Monday");
+    let occ = monday.items[0].occ.expect("named");
+
+    // Preview writes nothing.
+    let seen = a
+        .preview_move(slug.clone(), occ, "thursday 10am".into())
+        .unwrap();
+    assert!(seen.start_ms > occ, "Thursday after that Monday");
+    assert_eq!(
+        a.agenda(monday.date.clone()).unwrap().len(),
+        1,
+        "previewing moved it"
+    );
+
+    let landed = a
+        .move_occurrence(slug.clone(), occ, "thursday 10am".into())
+        .unwrap();
+    assert_eq!(landed, seen, "the move went where the preview said");
+    assert!(
+        a.agenda(monday.date.clone()).unwrap().is_empty(),
+        "still on Monday"
+    );
+
+    // A bare hour is asked about, not guessed.
+    let err = a
+        .preview_move(slug.clone(), occ, "friday at 2".into())
+        .unwrap_err();
+    assert!(format!("{err}").contains("2pm"), "{err}");
+
+    // Skipping the moved one takes: it is shown as skipped wherever it was,
+    // and on no day as happening. (It used to be a silent no-op, because a
+    // move outranked any cancellation, however much later.)
+    a.skip_occurrence(slug.clone(), occ).unwrap();
+    let fortnight = a
+        .calendar(days[0].date.clone(), days[13].date.clone())
+        .unwrap();
+    let all: Vec<_> = fortnight
+        .iter()
+        .flat_map(|d| &d.items)
+        .filter(|e| e.occ == Some(occ))
+        .collect();
+    assert!(!all.is_empty() && all.iter().all(|e| e.skipped), "{all:?}");
+    a.restore_occurrence(slug.clone(), occ).unwrap();
+    let day = a.agenda(monday.date.clone()).unwrap();
+    assert!(
+        day.iter()
+            .any(|e| e.occ == Some(occ) && !e.skipped && e.moved_from.is_none())
+    );
+
+    a.set_occurrence_done(slug.clone(), occ, true).unwrap();
+    assert!(a.agenda(monday.date.clone()).unwrap()[0].done);
+
+    std::fs::remove_dir_all(&root).ok();
+}

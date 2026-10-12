@@ -1901,3 +1901,35 @@ fn a_month_shows_a_weekly_series_on_each_of_its_days() {
     let week = s.ok(&["cal", "--week"]);
     assert!(!week.contains(" Mo  Tu"), "a week has no grid: {week}");
 }
+
+/// Sick on Monday: this one's gym goes to Thursday at 10, by date and in words.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn one_occurrence_is_moved_and_skipped_by_its_date() {
+    let s = Store::new("bydate");
+    let gym = s.capture("gym every monday at 2pm");
+    s.ok(&["settle"]);
+
+    // The first Monday in the calendar, by its date.
+    let json = s.ok(&["cal", "--json"]);
+    let monday = json
+        .split("\"date\":\"")
+        .skip(1)
+        .find(|d| d.contains(&format!("\"slug\":\"{gym}\"")) && !d[..12].contains("\"busy\":false"))
+        .map(|d| d[..10].to_string())
+        .expect("a Monday with the gym on it");
+
+    let said = s.ok(&["move", &gym, &monday, "--to", "thursday 10am"]);
+    assert!(
+        said.contains("moved to") && said.contains("10:00"),
+        "{said}"
+    );
+
+    let week = s.ok(&["cal", "--week", &monday]);
+    assert!(week.contains("moved from"), "{week}");
+
+    // A day it does not happen on is refused, naming days it does.
+    let (code, out) = s.run(&["skip", &gym, "2001-01-02"]);
+    assert_ne!(code, 0);
+    assert!(out.contains("nearest"), "{out}");
+}

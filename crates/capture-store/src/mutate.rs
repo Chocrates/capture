@@ -786,6 +786,49 @@ pub fn move_occurrence(
     Ok(())
 }
 
+/// Mark one occurrence of a series done, or not.
+///
+/// Here rather than in each surface: the command line and the desktop each
+/// wrote this event themselves, which is two places for one rule.
+pub fn set_occurrence_done(paths: &StorePaths, name: &str, occ: i64, done: bool) -> Result<()> {
+    let mut s = Session::open(paths.clone())?;
+    // Not `series`: a one-off event is ticked by the same event, under the
+    // occurrence it names itself (`happening_between` reports one so).
+    let tgt = find(&s, name)?;
+    let kind = if done {
+        Kind::OCC_DONE
+    } else {
+        Kind::OCC_UNDONE
+    };
+    s.append(kind, Some(tgt), None, |nonce| {
+        encode(&OccBody { nonce, occ })
+    })?;
+    Ok(())
+}
+
+/// Move one occurrence to where some text says, and say where that was.
+///
+/// The text is read by [`crate::calendar::resolve_move`], which a surface can
+/// call first to show the result before anything is written.
+pub fn move_occurrence_to(
+    paths: &StorePaths,
+    name: &str,
+    occ: i64,
+    text: &str,
+    now: i64,
+    zone: capture_time::Zone,
+) -> Result<(i64, Option<i64>)> {
+    let (start, end) = {
+        let store = crate::projection::current(paths)?;
+        let tgt = store
+            .resolve(name)?
+            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+        crate::calendar::resolve_move(&store, &tgt, occ, text, now, zone)?
+    };
+    move_occurrence(paths, name, occ, start, end)?;
+    Ok((start, end))
+}
+
 /// Give one occurrence its own title, location or notes.
 ///
 /// The first writer of `OCC_EDIT` anywhere. The kind has had a body type, a
@@ -829,7 +872,7 @@ fn series(s: &Session, name: &str, doing: &str) -> Result<EventId> {
     if s.state.occurrences_of(&tgt)?.is_empty() {
         return Err(Error::Usage(format!(
             "'{name}' has no occurrences, so there is nothing to {doing}. \
-             Occurrences come from a repeating capture — \"standup every weekday at 9\""
+             Occurrences come from a repeating capture — \"standup every weekday at 9am\""
         )));
     }
     Ok(tgt)

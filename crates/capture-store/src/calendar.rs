@@ -326,3 +326,131 @@ fn day(
     });
     Ok(items)
 }
+
+// ------------------------------------------------- one occurrence, by people
+
+/// The occurrence of a series on a local date, by the name exceptions use.
+///
+/// People name an occurrence by its day — "this Monday's gym" — and the log
+/// names it by the instant the rule produced (§3.5). This is the translation,
+/// and it refuses rather than guesses: a day the series does not happen on is
+/// answered with the nearest days it does, so the next try is not a guess too.
+pub fn occurrence_on(
+    store: &crate::projection::Store,
+    tgt: &capture_core::EventId,
+    date: capture_time::FloatingDate,
+    zone: capture_time::Zone,
+) -> crate::Result<i64> {
+    use crate::Error;
+    let occs: Vec<i64> = store.occurrences_of(tgt)?.iter().map(|o| o.occ).collect();
+    if occs.is_empty() {
+        return Err(Error::Usage(String::from(
+            "that is not a repeating series, so it has no occurrences to name",
+        )));
+    }
+    let on = |occ: &i64| capture_time::civil_date(*occ, zone);
+    let hits: Vec<i64> = occs.iter().copied().filter(|o| on(o) == date).collect();
+    match hits.as_slice() {
+        [one] => Ok(*one),
+        [] => {
+            let before = occs.iter().filter(|o| on(o) < date).max().map(on);
+            let after = occs.iter().filter(|o| on(o) > date).min().map(on);
+            let nearest: Vec<String> = [before, after]
+                .into_iter()
+                .flatten()
+                .map(|d| d.to_string())
+                .collect();
+            Err(Error::Usage(format!(
+                "it does not happen on {date}; the nearest days it does are {}",
+                nearest.join(" and ")
+            )))
+        }
+        many => Err(Error::Usage(format!(
+            "it happens {} times on {date}; name one by its start in milliseconds: {}",
+            many.len(),
+            many.iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// Where "thursday 10am" puts an occurrence, without writing anything.
+///
+/// Read by the same recognizer as a capture. "thursday" counts from the
+/// occurrence's own day when that is still ahead, and from now when it has
+/// passed: next week's gym moved "to thursday" is next week's Thursday — the
+/// first version read it against today and put it four days *before* the
+/// session it was moving — and a gym missed last Monday moved "to thursday"
+/// is the coming one, not a Thursday already gone.
+///
+/// - A day and a time is that moment.
+/// - A day alone keeps the occurrence's time of day: "move it to Thursday"
+///   means the same slot on another day.
+/// - A bare hour is refused with the question a capture would ask, rather
+///   than guessed (D1 of this change).
+///
+/// The length is kept, so an hour-long session moved is still an hour long.
+/// Returned as `(start, end)` so a surface can show it before confirming.
+pub fn resolve_move(
+    store: &crate::projection::Store,
+    tgt: &capture_core::EventId,
+    occ: i64,
+    text: &str,
+    now: i64,
+    zone: capture_time::Zone,
+) -> crate::Result<(i64, Option<i64>)> {
+    use crate::Error;
+    use capture_parse::{Shape, When};
+
+    let row = store
+        .occurrences_of(tgt)?
+        .into_iter()
+        .find(|o| o.occ == occ)
+        .ok_or_else(|| Error::Usage(String::from("there is no such occurrence")))?;
+
+    let its_day =
+        capture_time::at_local(capture_time::civil_date(occ, zone), 0, 0, zone).unwrap_or(occ);
+    let r = capture_parse::recognize(text, now.max(its_day), zone);
+    if let Some(u) = r.unclear_hour {
+        let h = u.hour;
+        return Err(Error::Usage(format!(
+            "\"{h}\" could be {h}am or {h}pm — say which"
+        )));
+    }
+    let start = match r.shape {
+        Shape::Point(When::Moment(ms)) => ms,
+        Shape::Point(When::Date(d)) | Shape::Task { due: Some(d) } => {
+            let (h, m) = if row.all_day {
+                (0, 0)
+            } else {
+                capture_time::civil_clock(row.start_ms, zone)
+            };
+            capture_time::at_local(d, h, m, zone)
+                .ok_or_else(|| Error::Usage(format!("{d} is not a day in this zone")))?
+        }
+        _ => {
+            return Err(Error::Usage(format!(
+                "could not read a day or a time in {text:?} — try \"thursday 10am\""
+            )));
+        }
+    };
+
+    // How long it lasts: its own end if an exception wrote one, else the
+    // series' length.
+    let length = row.end_ms.map(|e| e - row.start_ms).or_else(|| {
+        match store.promotion_of(tgt).ok().flatten()?.as_ {
+            capture_core::body::Promoted::Series(f) => match f.when {
+                capture_core::body::When::Timed {
+                    start_ms,
+                    end_ms: Some(e),
+                    ..
+                } => Some(e - start_ms),
+                _ => None,
+            },
+            _ => None,
+        }
+    });
+    Ok((start, length.map(|l| start + l)))
+}

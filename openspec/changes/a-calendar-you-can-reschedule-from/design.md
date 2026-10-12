@@ -72,7 +72,11 @@ scripts and for the existing tests.
 
 ### D5. Moving takes text, and keeps the time of day by default
 
-`--to "thursday 10am"` is read by the recognizer as a point. A day with no time
+`--to "thursday 10am"` is read by the recognizer as a point, counting from
+the occurrence's own day while it is ahead and from now once it has passed —
+next week's gym "to thursday" is next week's Thursday, and last week's missed
+one is the coming Thursday. (Counting from now always was the first version,
+and it moved next Monday's session to four days before it.) A day with no time
 ("thursday") keeps the occurrence's original time of day, because "move it to
 Thursday" means the same slot on another day. A bare hour is refused with the
 same question as D1 rather than guessed. The resolved instant is shown before
@@ -94,3 +98,19 @@ gains it and the phone's sheet offers it; nothing about its semantics changes.
 - A person who always means 7 am now answers a question once per capture. The
   answer is one tap, and writing "7am" avoids it entirely; the capture window's
   hint line already shows `friday 2pm`.
+
+### D7. A skip made after a move takes (fold change, found building this)
+
+The fold let any move outrank any cancellation (§6: "a resurrected occurrence
+is visible and one gesture to dismiss; a wrongly cancelled one is invisible").
+The gesture to dismiss it is a skip — which the move then outranked. And
+Restore is written as a move back to the original time, so skip → restore →
+skip left the occurrence showing. Both were silent no-ops, found writing the
+phone's test for the occurrence sheet, where Skip and Restore are one tap apart.
+
+Now the *later* of an occurrence's moves and cancellations decides, in the
+fold's total order (HLC, then origin), so every device agrees whatever order
+events arrived in. A skip that came first and a move after it still shows the
+occurrence — the case §6's bias was written for, and its test still passes.
+What changes is only a skip made after a move. Projection schema 14 rebuilds
+the hidden flags an older build wrote.

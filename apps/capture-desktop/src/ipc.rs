@@ -1370,25 +1370,7 @@ pub fn tasks() -> std::result::Result<Vec<TaskLine>, String> {
 /// Mark one occurrence complete, or not.
 #[tauri::command]
 pub fn set_occurrence(name: String, occ: i64, done: bool) -> std::result::Result<(), String> {
-    wire((|| {
-        let mut s = Session::open(paths()?)?;
-        let tgt = s
-            .state
-            .resolve(&name)?
-            .ok_or_else(|| Error::NotFound(name.clone()))?;
-        let kind = if done {
-            capture_core::event::Kind::OCC_DONE
-        } else {
-            capture_core::event::Kind::OCC_UNDONE
-        };
-        s.append(kind, Some(tgt), None, |nonce| {
-            let mut b = Vec::new();
-            minicbor::encode(&capture_core::body::OccBody { nonce, occ }, &mut b)
-                .expect("encoding into Vec is infallible");
-            b
-        })?;
-        Ok(())
-    })())
+    wire((|| capture_store::mutate::set_occurrence_done(&paths()?, &name, occ, done))())
 }
 
 /// Names beginning with what has been typed, for completing a link.

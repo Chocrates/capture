@@ -26,6 +26,41 @@
 //! not understood is an error rather than a guess.
 
 /// What the user asked for.
+/// One occurrence of a series, as somebody named it.
+///
+/// By its date, which is how people name one — "this Monday's" — or by the
+/// instant the rule produced, which is what the log calls it (§3.5) and what
+/// scripts already pass. Turned into the instant when the command runs,
+/// against the store, because only the store knows which days the series has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OccRef {
+    Ms(i64),
+    Date(String),
+}
+
+/// Where a moved occurrence goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveTo {
+    /// Exact instants, in milliseconds.
+    Ms { start_ms: i64, end_ms: Option<i64> },
+    /// Text such as "thursday 10am", read the way a capture is.
+    Text(String),
+}
+
+/// Read an occurrence's name: milliseconds, or a `YYYY-MM-DD` date.
+fn occ_ref(command: &str, v: &str) -> Result<OccRef, Bad> {
+    if let Ok(ms) = v.parse::<i64>() {
+        return Ok(OccRef::Ms(ms));
+    }
+    if capture_time::FloatingDate::parse(v).is_some() {
+        return Ok(OccRef::Date(v.to_string()));
+    }
+    Err(Bad::Value {
+        command: command.into(),
+        problem: format!("{v:?} names no occurrence; give its date, like 2026-10-12"),
+    })
+}
+
 /// Which stretch of days `capture cal` shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalSpan {
@@ -203,8 +238,8 @@ pub enum Command {
     Occurrence {
         /// The series.
         name: String,
-        /// Which occurrence, as its original start in milliseconds.
-        occ: i64,
+        /// Which occurrence.
+        occ: OccRef,
         /// Whether it is complete.
         done: bool,
     },
@@ -212,19 +247,17 @@ pub enum Command {
     Move {
         /// The series.
         name: String,
-        /// Which occurrence, as its original start in milliseconds.
-        occ: i64,
-        /// Where it now starts, in milliseconds.
-        start_ms: i64,
-        /// Where it now ends, where that is known.
-        end_ms: Option<i64>,
+        /// Which occurrence.
+        occ: OccRef,
+        /// Where it goes.
+        to: MoveTo,
     },
     /// Give one occurrence of a series its own details.
     Amend {
         /// The series.
         name: String,
-        /// Which occurrence, as its original start in milliseconds.
-        occ: i64,
+        /// Which occurrence.
+        occ: OccRef,
         /// A title for this occurrence only.
         title: Option<String>,
         /// A location for this occurrence only.
@@ -236,8 +269,8 @@ pub enum Command {
     Skip {
         /// The series.
         name: String,
-        /// Which occurrence, as its original start in milliseconds.
-        occ: i64,
+        /// Which occurrence.
+        occ: OccRef,
         /// Whether it is skipped.
         skipped: bool,
     },
@@ -646,17 +679,11 @@ where
                     name: name.clone(),
                     done,
                 }),
-                [name, occ] => occ
-                    .parse::<i64>()
-                    .map(|occ| Command::Occurrence {
-                        name: name.clone(),
-                        occ,
-                        done,
-                    })
-                    .map_err(|_| Bad::UnknownFlag {
-                        command: args[0].clone(),
-                        flag: occ.clone(),
-                    }),
+                [name, occ] => Ok(Command::Occurrence {
+                    name: name.clone(),
+                    occ: occ_ref(&args[0], occ)?,
+                    done,
+                }),
                 _ => Err(Bad::Value {
                     command: args[0].clone(),
                     problem: "expected a task, or a series and an occurrence".into(),
@@ -1003,13 +1030,20 @@ where
         "resolve" => one_name(&args[1..], "resolve", |name, _| Command::Resolve { name }),
         "log" => one_name(&args[1..], "log", |name, json| Command::Log { name, json }),
         "move" => match &args[1..] {
+            // `capture move gym 2026-10-12 --to "thursday 10am"`: how a person
+            // says it. First, because the four-argument millisecond form below
+            // would otherwise take `--to` for an end time.
+            [name, occ, to, text] if to == "--to" => Ok(Command::Move {
+                name: name.clone(),
+                occ: occ_ref(&args[0], occ)?,
+                to: MoveTo::Text(text.clone()),
+            }),
             // Named exactly as `capture done` and `capture skip` name one.
             [name, occ, start] | [name, occ, start, _] => {
                 let bad = |v: &String| Bad::UnknownFlag {
                     command: args[0].clone(),
                     flag: v.clone(),
                 };
-                let occ_ms = occ.parse::<i64>().map_err(|_| bad(occ))?;
                 let start_ms = start.parse::<i64>().map_err(|_| bad(start))?;
                 let end_ms = match &args[1..] {
                     [_, _, _, end] => Some(end.parse::<i64>().map_err(|_| bad(end))?),
@@ -1017,15 +1051,14 @@ where
                 };
                 Ok(Command::Move {
                     name: name.clone(),
-                    occ: occ_ms,
-                    start_ms,
-                    end_ms,
+                    occ: occ_ref(&args[0], occ)?,
+                    to: MoveTo::Ms { start_ms, end_ms },
                 })
             }
             _ => Err(Bad::Value {
                 command: args[0].clone(),
-                problem: "expected a series, the occurrence as its original start in \
-                          milliseconds, and the new start — capture show <series> lists them"
+                problem: "expected a series, the date of the occurrence and where it goes, \
+                          like: capture move gym 2026-10-12 --to \"thursday 10am\""
                     .into(),
             }),
         },
@@ -1055,10 +1088,7 @@ where
             };
             match positional.as_slice() {
                 [name, occ] => {
-                    let occ_ms = occ.parse::<i64>().map_err(|_| Bad::UnknownFlag {
-                        command: args[0].clone(),
-                        flag: (*occ).clone(),
-                    })?;
+                    let occ_ms = occ_ref(&args[0], occ)?;
                     let (title, location, notes) =
                         (flag("--title"), flag("--location"), flag("--notes"));
                     // An amendment that overrides nothing is a request that
@@ -1092,21 +1122,15 @@ where
             match &args[1..] {
                 // Named exactly as `capture done` names one, rather than a
                 // second convention for two of the five exceptions.
-                [name, occ] => occ
-                    .parse::<i64>()
-                    .map(|occ| Command::Skip {
-                        name: name.clone(),
-                        occ,
-                        skipped,
-                    })
-                    .map_err(|_| Bad::UnknownFlag {
-                        command: args[0].clone(),
-                        flag: occ.clone(),
-                    }),
+                [name, occ] => Ok(Command::Skip {
+                    name: name.clone(),
+                    occ: occ_ref(&args[0], occ)?,
+                    skipped,
+                }),
                 _ => Err(Bad::Value {
                     command: args[0].clone(),
-                    problem: "expected a series and an occurrence, as its original start \
-                              in milliseconds — capture show <series> lists them"
+                    problem: "expected a series and the date of the occurrence, \
+                              like: capture skip gym 2026-10-12"
                         .into(),
                 }),
             }
@@ -1525,10 +1549,12 @@ TIME AND TASKS
   capture redact --release <id>  let a destruction the ceiling held go ahead
   capture recover                copies kept before a redaction
   capture recover <id>           write one back as a new note
-  capture skip <series> <occ>    not this one; the rule is untouched
-                               (unskip puts it back)
-  capture move <series> <occ> <start-ms> [<end-ms>]
+  capture skip <series> <day>    not this one; the rule is untouched
+                               (unskip puts it back; <day> is 2026-10-12)
+  capture move <series> <day> --to "thursday 10am"
                                this one happens at a different time
+  capture move <series> <occ> <start-ms> [<end-ms>]
+                               the same, in milliseconds
   capture amend <series> <occ> --title T [--location L] [--notes N]
                                this one only, with its own details
   capture tick <tag> <item>      tick one off; untick puts it back
@@ -1947,7 +1973,7 @@ mod tests {
             p(&["skip", "standup", "1791208800000"]).unwrap(),
             Command::Skip {
                 name: "standup".into(),
-                occ: 1_791_208_800_000,
+                occ: OccRef::Ms(1_791_208_800_000),
                 skipped: true,
             }
         );
@@ -1955,7 +1981,7 @@ mod tests {
             p(&["unskip", "standup", "1791208800000"]).unwrap(),
             Command::Skip {
                 name: "standup".into(),
-                occ: 1_791_208_800_000,
+                occ: OccRef::Ms(1_791_208_800_000),
                 skipped: false,
             }
         );
@@ -1972,9 +1998,11 @@ mod tests {
             p(&["move", "standup", "1791208800000", "1791216000000"]).unwrap(),
             Command::Move {
                 name: "standup".into(),
-                occ: 1_791_208_800_000,
-                start_ms: 1_791_216_000_000,
-                end_ms: None,
+                occ: OccRef::Ms(1_791_208_800_000),
+                to: MoveTo::Ms {
+                    start_ms: 1_791_216_000_000,
+                    end_ms: None,
+                },
             }
         );
         assert_eq!(
@@ -1988,9 +2016,11 @@ mod tests {
             .unwrap(),
             Command::Move {
                 name: "standup".into(),
-                occ: 1_791_208_800_000,
-                start_ms: 1_791_216_000_000,
-                end_ms: Some(1_791_219_600_000),
+                occ: OccRef::Ms(1_791_208_800_000),
+                to: MoveTo::Ms {
+                    start_ms: 1_791_216_000_000,
+                    end_ms: Some(1_791_219_600_000),
+                },
             }
         );
         assert_eq!(
@@ -2004,7 +2034,7 @@ mod tests {
             .unwrap(),
             Command::Amend {
                 name: "standup".into(),
-                occ: 1_791_208_800_000,
+                occ: OccRef::Ms(1_791_208_800_000),
                 title: Some("in the annexe".into()),
                 location: None,
                 notes: None,
@@ -2024,6 +2054,36 @@ mod tests {
             msg.contains("--title"),
             "the refusal should say what was missing: {msg}"
         );
+    }
+
+    /// "this Monday's gym" is a date, and moving it is a sentence.
+    #[test]
+    fn an_occurrence_is_named_by_its_date_and_moved_by_text() {
+        assert_eq!(
+            p(&["move", "gym", "2026-10-12", "--to", "thursday 10am"]).unwrap(),
+            Command::Move {
+                name: "gym".into(),
+                occ: OccRef::Date("2026-10-12".into()),
+                to: MoveTo::Text("thursday 10am".into()),
+            }
+        );
+        assert_eq!(
+            p(&["skip", "gym", "2026-10-12"]).unwrap(),
+            Command::Skip {
+                name: "gym".into(),
+                occ: OccRef::Date("2026-10-12".into()),
+                skipped: true,
+            }
+        );
+        assert_eq!(
+            p(&["done", "gym", "2026-10-12"]).unwrap(),
+            Command::Occurrence {
+                name: "gym".into(),
+                occ: OccRef::Date("2026-10-12".into()),
+                done: true,
+            }
+        );
+        assert!(p(&["skip", "gym", "monday"]).is_err(), "a date, not a word");
     }
 
     #[test]

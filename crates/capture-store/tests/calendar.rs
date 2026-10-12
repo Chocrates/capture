@@ -81,8 +81,9 @@ fn weekly_gym(paths: &StorePaths, monday: FloatingDate) -> String {
         "gym every monday at 2pm",
         Promoted::Series(SeriesFields {
             when: When::Timed {
-                start_ms: at(plus(monday, -14), 14),
-                end_ms: Some(at(plus(monday, -14), 15)),
+                // Four weeks back, so "last Monday" is always one of its own.
+                start_ms: at(plus(monday, -28), 14),
+                end_ms: Some(at(plus(monday, -28), 15)),
                 tz: ZONE.into(),
             },
             rule: RuleSpec {
@@ -285,4 +286,125 @@ fn a_range_past_the_horizon_is_refused_by_name() {
     let far = plus(capture_time::civil_date(now(), zone()), 400);
     let err = days(&store, far, plus(far, 6), zone(), now()).unwrap_err();
     assert!(err.to_string().contains("year"), "{err}");
+}
+
+// ------------------------------------------------- naming and moving by text
+
+fn store_of(paths: &StorePaths) -> capture_store::projection::Store {
+    let _ = Session::open(paths.clone()).unwrap();
+    capture_store::projection::current(paths).unwrap()
+}
+
+fn tgt_of(paths: &StorePaths, slug: &str) -> capture_core::EventId {
+    Session::open(paths.clone())
+        .unwrap()
+        .state
+        .resolve(slug)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn an_occurrence_is_named_by_its_date() {
+    use capture_store::calendar::occurrence_on;
+    let scratch = Scratch::new("named");
+    let paths = scratch.paths();
+    let monday = a_monday();
+    let gym = weekly_gym(&paths, monday);
+    let store = store_of(&paths);
+    let tgt = tgt_of(&paths, &gym);
+
+    assert_eq!(
+        occurrence_on(&store, &tgt, monday, zone()).unwrap(),
+        at(monday, 14)
+    );
+
+    // A Tuesday is not a day the gym happens on. Refused, naming the Mondays
+    // either side so the next attempt is not another guess.
+    let err = occurrence_on(&store, &tgt, plus(monday, 1), zone())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&monday.to_string()), "{err}");
+    assert!(err.contains(&plus(monday, 7).to_string()), "{err}");
+}
+
+#[test]
+fn moving_by_text_reads_a_day_and_a_time() {
+    use capture_store::calendar::resolve_move;
+    let scratch = Scratch::new("totext");
+    let paths = scratch.paths();
+    let monday = a_monday();
+    let gym = weekly_gym(&paths, monday);
+    let store = store_of(&paths);
+    let tgt = tgt_of(&paths, &gym);
+    let occ = at(monday, 14);
+    // The Thursday of that Monday's week, not this week's: the Monday is
+    // still ahead, so "thursday" counts from it.
+    let thursday = plus(monday, 3);
+
+    // "thursday 10am": that moment, and an hour long as the series is.
+    let (start, end) = resolve_move(&store, &tgt, occ, "thursday 10am", now(), zone()).unwrap();
+    assert_eq!(start, at(thursday, 10));
+    assert_eq!(
+        end,
+        Some(at(thursday, 11)),
+        "the hour-long session stays an hour"
+    );
+
+    // "thursday": the same slot, on Thursday.
+    let (start, _) = resolve_move(&store, &tgt, occ, "thursday", now(), zone()).unwrap();
+    assert_eq!(start, at(thursday, 14));
+
+    // A bare hour is asked about here too, not guessed.
+    let err = resolve_move(&store, &tgt, occ, "thursday at 2", now(), zone())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("2am") && err.contains("2pm"), "{err}");
+
+    // Nothing readable is refused rather than read as now.
+    assert!(resolve_move(&store, &tgt, occ, "whenever", now(), zone()).is_err());
+}
+
+#[test]
+fn moving_by_text_writes_the_move_once() {
+    let scratch = Scratch::new("movetext");
+    let paths = scratch.paths();
+    let monday = a_monday();
+    let gym = weekly_gym(&paths, monday);
+    let thursday = plus(monday, 3);
+
+    let (start, _) =
+        mutate::move_occurrence_to(&paths, &gym, at(monday, 14), "thursday 10am", now(), zone())
+            .unwrap();
+    assert_eq!(start, at(thursday, 10));
+
+    let days = read(&paths, thursday, thursday);
+    let moved = on(&days, thursday)
+        .items
+        .iter()
+        .find(|i| i.slug == gym)
+        .expect("on Thursday");
+    assert_eq!(moved.moved_from, Some(at(monday, 14)));
+}
+
+/// Missed last Monday: "thursday" is the coming Thursday, not one already gone.
+#[test]
+fn a_past_occurrence_moves_forward_from_now() {
+    use capture_store::calendar::resolve_move;
+    let scratch = Scratch::new("pastmove");
+    let paths = scratch.paths();
+    let monday = a_monday();
+    let gym = weekly_gym(&paths, monday);
+    let store = store_of(&paths);
+    let tgt = tgt_of(&paths, &gym);
+
+    let last = capture_time::next_weekday_on_or_after(now() - 7 * 24 * HOUR, zone(), 0).unwrap();
+    let last = if at(last, 14) >= now() {
+        plus(last, -7)
+    } else {
+        last
+    };
+    let coming = capture_time::next_weekday_on_or_after(now(), zone(), 3).unwrap();
+    let (start, _) = resolve_move(&store, &tgt, at(last, 14), "thursday", now(), zone()).unwrap();
+    assert_eq!(start, at(coming, 14));
 }

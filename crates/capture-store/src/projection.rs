@@ -104,7 +104,11 @@ use crate::{Result, db};
 /// re-folding the log produces it exactly (§1.3). Version 3 adds `mentions`,
 /// which needs every existing note re-read for the sigils in its text — a
 /// migration could not have filled it in at all.
-pub const PROJECTION_SCHEMA: u32 = 13;
+///
+/// Version 14 re-derives which occurrences are hidden: a skip made after a
+/// move now hides it, where a move used to outrank every skip. The rows an
+/// older build wrote say "visible" for those, so they are rebuilt, not trusted.
+pub const PROJECTION_SCHEMA: u32 = 14;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;

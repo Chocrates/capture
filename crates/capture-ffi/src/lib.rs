@@ -526,6 +526,13 @@ impl From<capture_store::calendar::Item> for AgendaEntry {
     }
 }
 
+/// Where a moved occurrence lands.
+#[derive(Debug, PartialEq, uniffi::Record)]
+pub struct Landing {
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
+}
+
 /// One day of a calendar: its date and what happens on it.
 #[derive(Debug, uniffi::Record)]
 pub struct CalendarDay {
@@ -1142,6 +1149,83 @@ impl Archive {
                 items: d.items.into_iter().map(AgendaEntry::from).collect(),
             })
             .collect())
+    }
+
+    /// Where "thursday 10am" would put one occurrence, without moving it.
+    ///
+    /// For the line under the field as somebody types: the time is shown
+    /// before it is written, so a misread "thursday" is seen and not lived.
+    pub fn preview_move(&self, name: String, occ: i64, text: String) -> Result<Landing> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let (start_ms, end_ms) = capture_store::calendar::resolve_move(
+            &store,
+            &tgt,
+            occ,
+            &text,
+            now,
+            here(&self.zone_name()),
+        )?;
+        Ok(Landing { start_ms, end_ms })
+    }
+
+    /// Move one occurrence to where some text says. The rule is untouched.
+    pub fn move_occurrence(&self, name: String, occ: i64, text: String) -> Result<Landing> {
+        let _w = self.write_lock()?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let (start_ms, end_ms) = capture_store::mutate::move_occurrence_to(
+            &self.paths,
+            &name,
+            occ,
+            &text,
+            now,
+            here(&self.zone_name()),
+        )?;
+        Ok(Landing { start_ms, end_ms })
+    }
+
+    /// Skip one occurrence. Hidden from the day, not gone: `restore_occurrence`
+    /// brings it back.
+    pub fn skip_occurrence(&self, name: String, occ: i64) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::skip_occurrence(
+            &self.paths,
+            &name,
+            occ,
+        )?)
+    }
+
+    /// Put a skipped occurrence back at its own time.
+    pub fn restore_occurrence(&self, name: String, occ: i64) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::restore_occurrence(
+            &self.paths,
+            &name,
+            occ,
+        )?)
+    }
+
+    /// Tick one occurrence done, or untick it.
+    pub fn set_occurrence_done(&self, name: String, occ: i64, done: bool) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::set_occurrence_done(
+            &self.paths,
+            &name,
+            occ,
+            done,
+        )?)
+    }
+
+    /// Change a series from one day onward: "every tuesday at 9am" from
+    /// 2026-10-19. The days before keep the old rule (§3.5).
+    pub fn split_series(&self, name: String, from: String, rule: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        capture_store::promote::split_at(&self.paths, &name, &from, &rule, now, &self.zone_name())?;
+        Ok(())
     }
 
     /// Every page that has a name, for the wiki.
@@ -3035,6 +3119,15 @@ fn summarise(n: capture_store::projection::NoteRow, now: u64) -> NoteSummary {
         descriptor: String::new(),
         items: Vec::new(),
     }
+}
+
+/// The zone a person is in, by name, falling back to UTC only where the
+/// system names none. Free rather than a method: uniffi exports every method
+/// in the `Archive` impl, and `Zone` is not a type it can carry.
+fn here(name: &str) -> capture_time::Zone {
+    capture_time::Zone::new(name)
+        .or_else(|| capture_time::Zone::new("UTC"))
+        .expect("UTC is always present")
 }
 
 /// A zone by name, or UTC.

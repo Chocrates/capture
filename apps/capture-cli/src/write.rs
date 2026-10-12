@@ -180,27 +180,48 @@ pub fn pin(paths: StorePaths, name: &str, pinned: bool) -> Result<()> {
     Ok(())
 }
 
+/// The instant an occurrence is named by, from how somebody named it.
+///
+/// A date is looked up among the series' occurrences in the reader's zone; a
+/// day it does not happen on is refused with the nearest days it does.
+fn occ_of(paths: &StorePaths, name: &str, occ: &crate::args::OccRef) -> Result<i64> {
+    use crate::args::OccRef;
+    match occ {
+        OccRef::Ms(ms) => Ok(*ms),
+        OccRef::Date(d) => {
+            let date = capture_time::FloatingDate::parse(d)
+                .ok_or_else(|| Error::Usage(format!("'{d}' is not a date; use YYYY-MM-DD")))?;
+            let store = capture_store::projection::current(paths)?;
+            let tgt = store
+                .resolve(name)?
+                .ok_or_else(|| Error::NotFound(name.to_string()))?;
+            Ok(capture_store::calendar::occurrence_on(
+                &store,
+                &tgt,
+                date,
+                local_zone(),
+            )?)
+        }
+    }
+}
+
 /// Mark one occurrence of a recurring series complete, or not.
 ///
-/// Named by its original start, which is what an occurrence *is* (§3.5) — the
-/// instant the rule would have produced, before any move. A moved occurrence
-/// keeps the name, so completing one that somebody rescheduled still finds it.
+/// Named by its date, or by its original start, which is what an occurrence
+/// *is* (§3.5) — the instant the rule would have produced, before any move. A
+/// moved occurrence keeps the name, so completing one that somebody
+/// rescheduled still finds it.
 ///
 /// Un-completing is a separate kind rather than a toggle, because it has to be
 /// possible to undo a mistaken tick and a pure union could not express that.
-pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result<()> {
-    let mut s = crate::read::session(paths)?;
-    let tgt = find(&s, name)?;
-    let kind = if done {
-        Kind::OCC_DONE
-    } else {
-        Kind::OCC_UNDONE
-    };
-
-    s.append(kind, Some(tgt), None, |nonce| {
-        encode(&capture_core::body::OccBody { nonce, occ })
-    })?;
-
+pub fn occurrence(
+    paths: StorePaths,
+    name: &str,
+    occ: &crate::args::OccRef,
+    done: bool,
+) -> Result<()> {
+    let occ = occ_of(&paths, name, occ)?;
+    capture_store::mutate::set_occurrence_done(&paths, name, occ, done)?;
     say!(
         "{name} {} for that occurrence",
         if done {
@@ -216,16 +237,38 @@ pub fn occurrence(paths: StorePaths, name: &str, occ: i64, done: bool) -> Result
 ///
 /// Says what was *not* changed as well as what was, because that is the whole
 /// distinction §3.5 draws between the three edit scopes — and somebody reaching
-/// for this may have meant to change the schedule.
+/// for this may have meant to change the schedule. Moved by text, it names both
+/// times, so a misreading of "thursday" is seen at once.
 pub fn move_occurrence(
     paths: &StorePaths,
     name: &str,
-    occ: i64,
-    start_ms: i64,
-    end_ms: Option<i64>,
+    occ: &crate::args::OccRef,
+    to: &crate::args::MoveTo,
 ) -> Result<()> {
-    capture_store::mutate::move_occurrence(paths, name, occ, start_ms, end_ms)?;
-    say!("{name} moved for that occurrence.");
+    use crate::args::MoveTo;
+    let occ = occ_of(paths, name, occ)?;
+    match to {
+        MoveTo::Ms { start_ms, end_ms } => {
+            capture_store::mutate::move_occurrence(paths, name, occ, *start_ms, *end_ms)?;
+            say!("{name} moved for that occurrence.");
+        }
+        MoveTo::Text(text) => {
+            let zone = local_zone();
+            let (start, _) = capture_store::mutate::move_occurrence_to(
+                paths,
+                name,
+                occ,
+                text,
+                crate::read::now_ms(),
+                zone,
+            )?;
+            let when = |ms: i64| {
+                let (h, m) = capture_time::civil_clock(ms, zone);
+                format!("{} {h:02}:{m:02}", capture_time::civil_date(ms, zone))
+            };
+            say!("{name}: {} moved to {}.", when(occ), when(start));
+        }
+    }
     say!("The rule is unchanged, and every other occurrence stands.");
     Ok(())
 }
@@ -234,11 +277,12 @@ pub fn move_occurrence(
 pub fn amend_occurrence(
     paths: &StorePaths,
     name: &str,
-    occ: i64,
+    occ: &crate::args::OccRef,
     title: Option<String>,
     location: Option<String>,
     notes: Option<String>,
 ) -> Result<()> {
+    let occ = occ_of(paths, name, occ)?;
     capture_store::mutate::amend_occurrence(paths, name, occ, title, location, notes)?;
     say!("{name} amended for that occurrence.");
     say!("The rule is unchanged, and every other occurrence keeps the series' own.");
@@ -249,9 +293,14 @@ pub fn amend_occurrence(
 ///
 /// The store decides both, because §8.4 wants every mutation reachable from the
 /// window as well and a second implementation there is how two surfaces come to
-/// disagree. `occurrence` above still writes its own event and should probably
-/// move too; that is a separate tidy rather than something to do halfway here.
-pub fn skip(paths: &StorePaths, name: &str, occ: i64, skipped: bool) -> Result<()> {
+/// disagree.
+pub fn skip(
+    paths: &StorePaths,
+    name: &str,
+    occ: &crate::args::OccRef,
+    skipped: bool,
+) -> Result<()> {
+    let occ = occ_of(paths, name, occ)?;
     if skipped {
         capture_store::mutate::skip_occurrence(paths, name, occ)?;
         say!("{name} skipped for that occurrence.");

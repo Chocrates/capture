@@ -18,10 +18,13 @@
 
 ## 3. Occurrences named and moved by people
 
-- [ ] 3.1 Tests first: an occurrence resolves from `NAME DATE`; none/several refused with candidates; ms still accepted.
-- [ ] 3.2 Move-to-text resolver: a point from the recognizer; a day alone keeps the time of day; a bare hour is refused with the question; the duration is kept.
-- [ ] 3.3 CLI `move NAME DATE --to TEXT`, `skip`/`unskip`/`done`/`undone NAME DATE`; output names both times.
-- [ ] 3.4 FFI: `move_occurrence`, `preview_move`, `skip_occurrence`, `restore_occurrence`, `set_occurrence_done`, `split_series`.
+- [x] 3.1 Tests first: an occurrence resolves from `NAME DATE`; none/several refused with candidates; ms still accepted.
+- [x] 3.2 Move-to-text resolver: a point from the recognizer; a day alone keeps the time of day; a bare hour is refused with the question; the duration is kept.
+- [x] 3.3 CLI `move NAME DATE --to TEXT`, `skip`/`unskip`/`done`/`undone NAME DATE`; output names both times.
+- [x] 3.4 FFI: `move_occurrence`, `preview_move`, `skip_occurrence`, `restore_occurrence`, `set_occurrence_done`, `split_series`.
+  - Writing its test found D7: a skip after a move, and skip → restore → skip, were silent no-ops in the fold. Fixed (later wins, in the fold's total order), projection schema 14.
+  - "thursday" counts from the occurrence's own day while it is ahead (D5): the first version moved next Monday's gym to this Thursday, four days before it.
+  - `set_occurrence_done` is now the store's; the CLI and the desktop each wrote the event themselves and both now call it.
 
 ## 4. Phone
 
