@@ -648,3 +648,55 @@ fn only_the_chosen_device_speaks() {
          changes nothing and both announce everything"
     );
 }
+
+/// "gym every monday at 2" says nothing until somebody says which 2.
+///
+/// It is untimed because the hour was unclear, and any moment chosen to
+/// announce it would be the guess the recognizer refused to make. Found on the
+/// phone: captured on a Monday afternoon, it announced "was due earlier" at
+/// once — the untimed occurrence sat at midnight, as a timed alert.
+#[test]
+fn an_unclear_hour_says_nothing_until_it_is_answered() {
+    let scratch = Scratch::new("unclear");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "go to the gym every monday at 2");
+    settle(&paths);
+
+    let week = now() + 8 * 24 * HOUR;
+    let ours = |paths: &StorePaths| {
+        let tgt = reading(paths).resolve(&slug).unwrap().unwrap();
+        due(paths, week)
+            .into_iter()
+            .filter(|d| d.tgt == tgt)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        ours(&paths).is_empty(),
+        "spoke before the hour was answered"
+    );
+
+    capture_store::mutate::settle_hour(&paths, &slug, capture_store::mutate::Half::Pm).unwrap();
+    let answered = ours(&paths);
+    assert!(!answered.is_empty(), "silent after the answer");
+    assert!(answered.iter().all(|d| d.timed));
+}
+
+/// A series with no time of day is not a midnight alarm.
+///
+/// Its occurrences are days, like a task's due date, and are delivered as one
+/// is — not time-critical — rather than as a timed alert at 00:00.
+#[test]
+fn an_untimed_occurrence_is_not_time_critical() {
+    let scratch = Scratch::new("untimed");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "water the plants every monday");
+    settle(&paths);
+
+    let tgt = reading(&paths).resolve(&slug).unwrap().unwrap();
+    let mine: Vec<_> = due(&paths, now() + 8 * 24 * HOUR)
+        .into_iter()
+        .filter(|d| d.tgt == tgt)
+        .collect();
+    assert!(!mine.is_empty(), "a weekly series has a day this week");
+    assert!(mine.iter().all(|d| !d.timed), "{mine:?}");
+}

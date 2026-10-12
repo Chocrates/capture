@@ -454,3 +454,150 @@ pub fn resolve_move(
     });
     Ok((start, length.map(|l| start + l)))
 }
+
+// ------------------------------------------------------------- grid shapes
+
+/// The two shapes a calendar is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Month,
+    Week,
+}
+
+/// Which days a calendar draws around a chosen day, and where its arrows go.
+///
+/// Here rather than on each surface: which weekday the 1st falls on and how
+/// many days October has are date arithmetic, and the phone may not do any
+/// (its build refuses `java.time`) — a second answer to "what day is this"
+/// is a calendar that disagrees with itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    /// The first and last days drawn: whole Monday-to-Sunday weeks.
+    pub from: capture_time::FloatingDate,
+    pub to: capture_time::FloatingDate,
+    /// The month's own first and last day, or the week's; days outside are
+    /// drawn dimmed in a month grid.
+    pub first: capture_time::FloatingDate,
+    pub last: capture_time::FloatingDate,
+    /// "October 2026", or "12 – 18 Oct 2026".
+    pub title: String,
+    /// The same day a month or a week either side, clamped to the month's
+    /// length: from the 31st of October, a month on is the 30th of November.
+    pub previous: capture_time::FloatingDate,
+    pub next: capture_time::FloatingDate,
+}
+
+pub const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+pub const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/// Monday is zero, as everywhere else in this archive.
+pub fn weekday(d: capture_time::FloatingDate) -> u32 {
+    // 1970-01-01 was a Thursday. Counted at noon UTC so no offset can carry
+    // the count across midnight.
+    let utc = capture_time::Zone::new("UTC").expect("UTC is always present");
+    let ms = capture_time::at_local(d, 12, 0, utc).unwrap_or(0);
+    ((ms.div_euclid(86_400_000) + 3).rem_euclid(7)) as u32
+}
+
+/// A date some whole number of days away.
+pub fn shift(d: capture_time::FloatingDate, days: i64) -> Option<capture_time::FloatingDate> {
+    let utc = capture_time::Zone::new("UTC")?;
+    capture_time::add_days(capture_time::at_local(d, 12, 0, utc)?, utc, days)
+}
+
+fn month_length(year: i32, month: u8) -> u8 {
+    (28..=31)
+        .rev()
+        .find(|&n| capture_time::FloatingDate::new(year, month, n).is_some())
+        .unwrap_or(28)
+}
+
+/// The same day of the month `n` months away, clamped to that month's length.
+fn months_away(d: capture_time::FloatingDate, n: i32) -> Option<capture_time::FloatingDate> {
+    let index = d.year * 12 + (d.month as i32 - 1) + n;
+    let (year, month) = (index.div_euclid(12), (index.rem_euclid(12) + 1) as u8);
+    capture_time::FloatingDate::new(year, month, d.day.min(month_length(year, month)))
+}
+
+/// "Mon 12 Oct".
+pub fn day_label(d: capture_time::FloatingDate) -> String {
+    format!(
+        "{} {} {}",
+        DAYS[weekday(d) as usize],
+        d.day,
+        &MONTHS[d.month as usize - 1][..3]
+    )
+}
+
+/// The days a calendar of `shape` draws around `day`.
+pub fn span(
+    day: capture_time::FloatingDate,
+    shape: Shape,
+    _zone: capture_time::Zone,
+) -> crate::Result<Span> {
+    let bad = || crate::Error::Usage(format!("{day} has no calendar around it"));
+    match shape {
+        Shape::Month => {
+            let first = capture_time::FloatingDate::new(day.year, day.month, 1).ok_or_else(bad)?;
+            let last = capture_time::FloatingDate::new(
+                day.year,
+                day.month,
+                month_length(day.year, day.month),
+            )
+            .ok_or_else(bad)?;
+            Ok(Span {
+                from: shift(first, -(weekday(first) as i64)).ok_or_else(bad)?,
+                to: shift(last, 6 - weekday(last) as i64).ok_or_else(bad)?,
+                first,
+                last,
+                title: format!("{} {}", MONTHS[day.month as usize - 1], day.year),
+                previous: months_away(day, -1).ok_or_else(bad)?,
+                next: months_away(day, 1).ok_or_else(bad)?,
+            })
+        }
+        Shape::Week => {
+            let monday = shift(day, -(weekday(day) as i64)).ok_or_else(bad)?;
+            let sunday = shift(monday, 6).ok_or_else(bad)?;
+            let title = if monday.month == sunday.month {
+                format!(
+                    "{} – {} {} {}",
+                    monday.day,
+                    sunday.day,
+                    &MONTHS[sunday.month as usize - 1][..3],
+                    sunday.year
+                )
+            } else {
+                format!(
+                    "{} {} – {} {} {}",
+                    monday.day,
+                    &MONTHS[monday.month as usize - 1][..3],
+                    sunday.day,
+                    &MONTHS[sunday.month as usize - 1][..3],
+                    sunday.year
+                )
+            };
+            Ok(Span {
+                from: monday,
+                to: sunday,
+                first: monday,
+                last: sunday,
+                title,
+                previous: shift(day, -7).ok_or_else(bad)?,
+                next: shift(day, 7).ok_or_else(bad)?,
+            })
+        }
+    }
+}

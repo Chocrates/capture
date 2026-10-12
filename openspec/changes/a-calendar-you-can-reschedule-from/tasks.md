@@ -28,11 +28,16 @@
 
 ## 4. Phone
 
-- [ ] 4.1 Agenda: month grid and week strip toggled in place, shared selected day, swipe by unit, Today; marks from `calendar`.
-- [ ] 4.2 Day list: moved occurrences labelled with their origin; skipped ones dimmed with Restore.
-- [ ] 4.3 Occurrence sheet: Done, Move this one (live preview of the resolved time), Skip this one, Change this and later.
-- [ ] 4.4 On the dev app (`dev.capture.dev`): capture the gym and dentist, settle the hour, move Monday's gym to Thursday 10am, skip and restore one, browse a month — screenshots.
-- [ ] 4.5 A moved occurrence alerts at its new time and not its old one, on the dev app.
+- [x] 4.1 Agenda: month grid and week strip toggled in place, shared selected day, swipe by unit, Today; marks from `calendar`.
+- [x] 4.2 Day list: moved occurrences labelled with their origin; skipped ones dimmed with Restore.
+- [x] 4.3 Occurrence sheet: Done, Move this one (live preview of the resolved time), Skip this one, Change this and later.
+- [x] 4.4 On the dev app (`dev.capture.dev`): capture the gym and dentist, settle the hour, move Monday's gym to Thursday 10am, skip and restore one, browse a month — screenshots.
+  - **Pixel 8 Pro, 2026-10-12.** Both shared in; the month grid marked the dentist's Thursday and the gym's Mondays; "2pm" on the gym row made it 14:00 and rewrote the text; Move this one → "thursday 10am" previewed "Thu 15 Oct 10:00" before writing, and Thursday then showed it "moved from Mon 12 Oct 14:00" with Monday's dot gone; Skip on the moved one listed it under Skipped (the D7 fold fix, on hardware); Restore put it back on Monday; a swipe moved to November.
+  - Found and fixed on the device: timed items drawn twice (row and hour block) — the blocks are now tappable and the rows gone; a moved block too short for its "moved from" line; an untimed day's dot drawn as a dark spot when selected.
+  - Found and fixed in the store: an untimed series alerted as a timed alarm at midnight, and one untimed because of an unclear hour alerted "was due earlier" the moment it was captured. Untimed occurrences are now day-level like a due task, and an unclear hour says nothing until answered (alerts tests).
+  - **Not exercised on the device:** the Week chip — another app's picture-in-picture window sat over it and took the taps. Same view code with a different shape; `calendar_view(.., Week)` is tested in the FFI.
+- [~] 4.5 A moved occurrence alerts at its new time and not its old one, on the dev app.
+  - Covered by the store's alerts tests (`due_by` reads an occurrence's current start). Not watched arriving on the phone.
 
 ## 5. Desktop
 

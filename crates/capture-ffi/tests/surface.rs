@@ -1907,3 +1907,40 @@ fn one_occurrence_is_changed_from_the_phone() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The phone's grid arrives drawn: whole weeks, labels, and where the arrows go.
+#[test]
+fn a_month_view_is_ready_to_draw() {
+    let root = scratch("view");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("gym every monday at 2pm".into()).unwrap();
+    a.settle().unwrap();
+
+    let today = a.today();
+    let v = a
+        .calendar_view(today.clone(), capture_ffi::CalendarShape::Month)
+        .unwrap();
+    assert_eq!(v.days.len() % 7, 0, "whole weeks");
+    assert!(v.days.iter().any(|d| d.today && d.date == today));
+    assert!(
+        v.days.iter().any(|d| !d.in_period),
+        "a month rarely starts on a Monday"
+    );
+    let gym = v
+        .days
+        .iter()
+        .filter(|d| d.in_period && d.busy)
+        .flat_map(|d| &d.items)
+        .next()
+        .expect("a Monday this month with the gym");
+    assert_eq!(gym.at, "14:00");
+
+    let w = a
+        .calendar_view(today.clone(), capture_ffi::CalendarShape::Week)
+        .unwrap();
+    assert_eq!(w.days.len(), 7);
+    assert!(w.days[0].label.starts_with("Mon"));
+    assert_ne!(w.previous, w.next);
+
+    std::fs::remove_dir_all(&root).ok();
+}

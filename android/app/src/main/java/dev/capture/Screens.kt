@@ -419,60 +419,6 @@ fun Search(
 }
 
 /**
- * What is on a day.
- *
- * Three bands, and the first is not a subdivision of the second: an all-day
- * entry is a floating date with no position on an hour axis, and a task that is
- * *due* on a day is a third thing again (§4.4, §3.6).
- */
-@Composable
-fun Agenda(day: String, entries: List<AgendaEntry>, onTasks: () -> Unit) {
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(day, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.weight(1f))
-            // The other half of §3.6, one tap away. What occupies time is
-            // here; what is merely owed is there, including everything with no
-            // day at all — which this screen has no way to show.
-            Text(
-                "Outstanding",
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.clickable { onTasks() },
-            )
-        }
-        if (entries.isEmpty()) {
-            Empty("Nothing on this day.")
-            return@Column
-        }
-        // Three bands, and the first is not a subdivision of the second.
-        // An all-day entry is a floating date with no position on an hour
-        // axis, and a task that is *due* on a day is a third thing again
-        // (§4.4, §3.6).
-        val allDay = entries.filter { it.allDay && !it.due }
-        val due = entries.filter { it.due }
-        val timed = entries.filter { !it.allDay && !it.due }
-
-        LazyColumn {
-            if (allDay.isNotEmpty()) {
-                item { Band("All day") }
-                items(allDay) { Line(it) }
-            }
-            if (due.isNotEmpty()) {
-                item { Band("Due") }
-                items(due) { Line(it) }
-            }
-            if (timed.isNotEmpty()) {
-                item { Band("During the day") }
-                item { Hours(timed) }
-            }
-        }
-    }
-}
-
-/**
  * What is outstanding.
  *
  * Three bands, and the third is the one this screen exists for. A task with no
@@ -631,26 +577,12 @@ private fun TaskRow(task: TaskLine, onOpen: (String) -> Unit, onDone: (String, B
  * nothing here that can get a cycle or an orphan wrong.
  */
 @Composable
-private fun Band(what: String) {
+internal fun Band(what: String) {
     Text(
         what,
         Modifier.padding(start = 16.dp, top = 16.dp),
         style = MaterialTheme.typography.titleSmall,
     )
-}
-
-@Composable
-private fun Line(entry: AgendaEntry) {
-    Column(Modifier.fillMaxWidth().padding(16.dp, 6.dp)) {
-        if (entry.due) {
-            Text(
-                if (entry.done) "done" else "not done",
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
-        Text(entry.text ?: entry.slug, style = MaterialTheme.typography.bodyLarge)
-    }
-    HorizontalDivider()
 }
 
 /**
@@ -666,7 +598,7 @@ private fun Line(entry: AgendaEntry) {
  * morning look identical to an empty one.
  */
 @Composable
-private fun Hours(entries: List<AgendaEntry>) {
+internal fun Hours(entries: List<AgendaEntry>, onPick: (AgendaEntry) -> Unit = {}) {
     val first = entries.minOf { it.startMs }
     val last = entries.maxOf { it.endMs ?: (it.startMs + UNWRITTEN_MS) }
     val span = (last - first).coerceAtLeast(UNWRITTEN_MS)
@@ -686,19 +618,26 @@ private fun Hours(entries: List<AgendaEntry>) {
                 Modifier
                     .padding(start = width * entry.column.toInt(), top = startsAt.dp)
                     .width(width)
-                    .height(runsFor.coerceAtLeast(24).dp),
+                    // Room for the "moved from" line where there is one.
+                    .height(runsFor.coerceAtLeast(if (entry.movedLabel != null) 40 else 24).dp),
             ) {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     shape = MaterialTheme.shapes.extraSmall,
-                    modifier = Modifier.fillMaxWidth().fillMaxHeight().padding(end = 2.dp),
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight().padding(end = 2.dp)
+                        .clickable { onPick(entry) },
                 ) {
-                    Text(
-                        entry.text ?: entry.slug,
-                        Modifier.padding(4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 3,
-                    )
+                    Column(Modifier.padding(4.dp)) {
+                        Text(
+                            "${entry.at}  ${entry.title ?: entry.text ?: entry.slug}",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 3,
+                            textDecoration = if (entry.done) TextDecoration.LineThrough else null,
+                        )
+                        entry.movedLabel?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        }
+                    }
                 }
             }
         }

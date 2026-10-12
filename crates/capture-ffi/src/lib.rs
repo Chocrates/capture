@@ -501,12 +501,43 @@ pub struct AgendaEntry {
     pub title: Option<String>,
     /// An hour written without am or pm, which is why this has no time.
     pub unclear_hour: Option<u32>,
+    /// When, as a person reads it: "14:00–15:00", "all day", "due".
+    pub at: String,
+    /// "moved from Mon 12 Oct 14:00", when it was.
+    pub moved_label: Option<String>,
 }
 
-impl From<capture_store::calendar::Item> for AgendaEntry {
-    fn from(i: capture_store::calendar::Item) -> AgendaEntry {
+/// "14:00", in a zone.
+fn clock(ms: i64, zone: capture_time::Zone) -> String {
+    let (h, m) = capture_time::civil_clock(ms, zone);
+    format!("{h:02}:{m:02}")
+}
+
+/// "Mon 12 Oct 14:00", in a zone.
+fn moment(ms: i64, zone: capture_time::Zone) -> String {
+    format!(
+        "{} {}",
+        capture_store::calendar::day_label(capture_time::civil_date(ms, zone)),
+        clock(ms, zone)
+    )
+}
+
+impl AgendaEntry {
+    fn of(i: capture_store::calendar::Item, zone: capture_time::Zone) -> AgendaEntry {
         use capture_store::calendar::ItemKind;
+        let at = match i.kind {
+            ItemKind::AllDay => String::from("all day"),
+            ItemKind::Due => String::from("due"),
+            ItemKind::Timed => match i.end_ms {
+                Some(e) => format!("{}–{}", clock(i.start_ms, zone), clock(e, zone)),
+                None => clock(i.start_ms, zone),
+            },
+        };
         AgendaEntry {
+            at,
+            moved_label: i
+                .moved_from
+                .map(|f| format!("moved from {}", moment(f, zone))),
             slug: i.slug,
             text: i.text,
             start_ms: i.start_ms,
@@ -531,6 +562,60 @@ impl From<capture_store::calendar::Item> for AgendaEntry {
 pub struct Landing {
     pub start_ms: i64,
     pub end_ms: Option<i64>,
+    /// "Thu 15 Oct 10:00–11:00", for the line under the field.
+    pub said: String,
+}
+
+impl Landing {
+    fn at(start_ms: i64, end_ms: Option<i64>, zone: capture_time::Zone) -> Landing {
+        let said = match end_ms {
+            Some(e) => format!("{}–{}", moment(start_ms, zone), clock(e, zone)),
+            None => moment(start_ms, zone),
+        };
+        Landing {
+            start_ms,
+            end_ms,
+            said,
+        }
+    }
+}
+
+/// A calendar's shape.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum CalendarShape {
+    Month,
+    Week,
+}
+
+/// One cell of a calendar grid, and the day's list beneath it when chosen.
+#[derive(Debug, uniffi::Record)]
+pub struct GridDay {
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub day_of_month: u32,
+    /// Inside the month (or week) being shown; a month grid dims the rest.
+    pub in_period: bool,
+    pub today: bool,
+    /// Something on it that has not been skipped.
+    pub busy: bool,
+    /// "Mon 12 Oct".
+    pub label: String,
+    pub items: Vec<AgendaEntry>,
+}
+
+/// A month grid or a week strip, ready to draw.
+///
+/// Everything a phone would otherwise work out with date arithmetic it is not
+/// allowed to do: which weekday the first falls on, how long the month is,
+/// where the arrows go. Days are whole Monday-to-Sunday weeks.
+#[derive(Debug, uniffi::Record)]
+pub struct CalendarView {
+    /// "October 2026", or "12 – 18 Oct 2026".
+    pub title: String,
+    pub previous: String,
+    pub next: String,
+    pub today: String,
+    pub days: Vec<GridDay>,
 }
 
 /// One day of a calendar: its date and what happens on it.
@@ -1146,9 +1231,57 @@ impl Archive {
             .map(|d| CalendarDay {
                 date: d.date.to_string(),
                 busy: d.busy(),
-                items: d.items.into_iter().map(AgendaEntry::from).collect(),
+                items: d
+                    .items
+                    .into_iter()
+                    .map(|i| AgendaEntry::of(i, zone))
+                    .collect(),
             })
             .collect())
+    }
+
+    /// A month grid or a week strip around `day`, ready to draw.
+    pub fn calendar_view(&self, day: String, shape: CalendarShape) -> Result<CalendarView> {
+        use capture_store::calendar::{Shape, day_label, span};
+        let store = self.read()?;
+        let zone = here(&self.zone_name());
+        let chosen =
+            capture_time::FloatingDate::parse(&day).ok_or_else(|| CaptureError::Refused {
+                reason: format!("{day:?} is not a date — write it as 2026-09-15"),
+            })?;
+        let s = span(
+            chosen,
+            match shape {
+                CalendarShape::Month => Shape::Month,
+                CalendarShape::Week => Shape::Week,
+            },
+            zone,
+        )?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let today = capture_time::civil_date(now, zone);
+        let days = capture_store::calendar::days(&store, s.from, s.to, zone, now)?;
+        Ok(CalendarView {
+            title: s.title,
+            previous: s.previous.to_string(),
+            next: s.next.to_string(),
+            today: today.to_string(),
+            days: days
+                .into_iter()
+                .map(|d| GridDay {
+                    date: d.date.to_string(),
+                    day_of_month: d.date.day as u32,
+                    in_period: d.date >= s.first && d.date <= s.last,
+                    today: d.date == today,
+                    busy: d.busy(),
+                    label: day_label(d.date),
+                    items: d
+                        .items
+                        .into_iter()
+                        .map(|i| AgendaEntry::of(i, zone))
+                        .collect(),
+                })
+                .collect(),
+        })
     }
 
     /// Where "thursday 10am" would put one occurrence, without moving it.
@@ -1169,7 +1302,7 @@ impl Archive {
             now,
             here(&self.zone_name()),
         )?;
-        Ok(Landing { start_ms, end_ms })
+        Ok(Landing::at(start_ms, end_ms, here(&self.zone_name())))
     }
 
     /// Move one occurrence to where some text says. The rule is untouched.
@@ -1184,7 +1317,7 @@ impl Archive {
             now,
             here(&self.zone_name()),
         )?;
-        Ok(Landing { start_ms, end_ms })
+        Ok(Landing::at(start_ms, end_ms, here(&self.zone_name())))
     }
 
     /// Skip one occurrence. Hidden from the day, not gone: `restore_occurrence`

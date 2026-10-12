@@ -387,9 +387,12 @@ private fun App(
                     onOpen = { model.go(Screen.Note(it)) },
                     onTick = model::tickAt,
                 )
-                is Screen.Agenda -> Agenda(screen.day, model.agenda) {
-                    model.go(Screen.Tasks)
-                }
+                is Screen.Agenda -> Agenda(
+                    screen.day,
+                    model,
+                    onTasks = { model.go(Screen.Tasks) },
+                    onOpen = { model.go(Screen.Note(it)) },
+                )
                 is Screen.Tasks -> Tasks(
                     tasks = model.tasks,
                     unread = model.unread,

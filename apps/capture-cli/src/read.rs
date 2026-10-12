@@ -2224,42 +2224,33 @@ impl View for List {
 /// draw from, so the three cannot disagree about a day.
 pub fn cal(paths: &StorePaths, span: &crate::args::CalSpan, json: bool) -> Result<()> {
     use crate::args::CalSpan;
+    use capture_store::calendar::Shape;
     let store = open(paths)?;
     let zone = capture_time::Zone::new(&local_zone()).unwrap_or_else(utc);
     let now = now_ms();
     let today = capture_time::civil_date(now, zone);
-    let shift = |d: capture_time::FloatingDate, n: i64| {
-        capture_time::at_local(d, 12, 0, zone)
-            .and_then(|noon| capture_time::add_days(noon, zone, n))
-            .ok_or_else(|| Error::Usage(format!("no day {n} from {d}")))
-    };
 
-    let (from, to, month) = match span {
-        CalSpan::Month(m) => {
-            let first = match m {
-                None => capture_time::FloatingDate::new(today.year, today.month, 1),
-                Some(m) => capture_time::FloatingDate::parse(&format!("{m}-01")),
-            }
-            .ok_or_else(|| Error::Usage(format!("{:?} is not a month; use YYYY-MM", m)))?;
-            let (y, mo) = if first.month == 12 {
-                (first.year + 1, 1)
-            } else {
-                (first.year, first.month + 1)
-            };
-            let next = capture_time::FloatingDate::new(y, mo, 1)
-                .ok_or_else(|| Error::Usage("no month after that one".into()))?;
-            (first, shift(next, -1)?, true)
-        }
-        CalSpan::Week(d) => {
-            let day = match d {
+    let (day, shape) = match span {
+        CalSpan::Month(m) => (
+            match m {
+                None => today,
+                Some(m) => capture_time::FloatingDate::parse(&format!("{m}-01"))
+                    .ok_or_else(|| Error::Usage(format!("{m:?} is not a month; use YYYY-MM")))?,
+            },
+            Shape::Month,
+        ),
+        CalSpan::Week(d) => (
+            match d {
                 None => today,
                 Some(d) => capture_time::FloatingDate::parse(d)
                     .ok_or_else(|| Error::Usage(format!("'{d}' is not a date; use YYYY-MM-DD")))?,
-            };
-            let monday = shift(day, -(weekday(day) as i64))?;
-            (monday, shift(monday, 6)?, false)
-        }
+            },
+            Shape::Week,
+        ),
     };
+    // The month's own days only; the grid pads to whole weeks by itself.
+    let span = capture_store::calendar::span(day, shape, zone)?;
+    let (from, to, month) = (span.first, span.last, shape == Shape::Month);
 
     let days = capture_store::calendar::days(&store, from, to, zone, now)?;
     answer(
@@ -2275,14 +2266,7 @@ pub fn cal(paths: &StorePaths, span: &crate::args::CalSpan, json: bool) -> Resul
     Ok(())
 }
 
-/// Monday is zero, as everywhere else in this archive.
-fn weekday(d: capture_time::FloatingDate) -> u32 {
-    // 1970-01-01 was a Thursday. Days are counted at noon UTC so no offset can
-    // carry the count across midnight.
-    let utc = capture_time::Zone::new("UTC").expect("UTC is always present");
-    let ms = capture_time::at_local(d, 12, 0, utc).unwrap_or(0);
-    ((ms.div_euclid(86_400_000) + 3).rem_euclid(7)) as u32
-}
+use capture_store::calendar::{DAYS, MONTHS, weekday};
 
 struct Cal {
     days: Vec<capture_store::calendar::Day>,
@@ -2292,22 +2276,6 @@ struct Cal {
     zone: capture_time::Zone,
     unread: usize,
 }
-
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 impl Cal {
     /// "Mon 12 Oct 14:00", for saying where a moved occurrence came from.

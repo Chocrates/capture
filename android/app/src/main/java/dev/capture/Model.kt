@@ -13,6 +13,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.capture_ffi.AgendaEntry
+import uniffi.capture_ffi.CalendarShape
+import uniffi.capture_ffi.CalendarView
 import uniffi.capture_ffi.Archive
 import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.ListLine
@@ -139,6 +141,12 @@ class Model(private val archive: Archive) : ViewModel() {
     /** What produced [hits], so the same question can be asked again. */
     private var asked: String = ""
     var agenda by mutableStateOf<List<AgendaEntry>>(emptyList())
+
+    /** The month grid or week strip around the agenda's day. */
+    var calendar by mutableStateOf<CalendarView?>(null)
+
+    /** Which of the two the agenda is drawn as. Kept across days. */
+    var shape by mutableStateOf(CalendarShape.MONTH)
         private set
     var pages by mutableStateOf<List<Named>>(emptyList())
         private set
@@ -321,7 +329,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 // one place a problem is certain to be seen.
                 conditions = archive.health()
             }
-            is Screen.Agenda -> load { agenda = archive.agenda(to.day) }
+            is Screen.Agenda -> load { readCalendar(to.day) }
             is Screen.Wiki -> load {
                 pages = archive.named()
                 people = archive.people()
@@ -641,6 +649,76 @@ class Model(private val archive: Archive) : ViewModel() {
         return runCatching { archive.due(month).isNotEmpty() }.getOrDefault(false)
     }
 
+    /**
+     * The grid and the chosen day's list, from one read.
+     *
+     * The day's list is taken out of the grid rather than asked for again, so
+     * the dot on a cell and the list under it cannot disagree.
+     */
+    private suspend fun readCalendar(day: String) {
+        val view = archive.calendarView(day, shape)
+        calendar = view
+        agenda = view.days.firstOrNull { it.date == day }?.items ?: archive.agenda(day)
+    }
+
+    /** Show a different day, keeping the shape. Not history: a swipe is not a place. */
+    fun showDay(day: String) {
+        val here = screen
+        if (here is Screen.Agenda && here.day == day) return
+        screen = Screen.Agenda(day)
+        load { readCalendar(day) }
+    }
+
+    fun drawAs(to: CalendarShape) {
+        shape = to
+        (screen as? Screen.Agenda)?.let { load { readCalendar(it.day) } }
+    }
+
+    // --- one occurrence ------------------------------------------------------
+    //
+    // Each re-reads the calendar, so what was changed is shown where it now is.
+
+    /** Where text would move an occurrence to, or why it cannot: never writes. */
+    suspend fun previewMove(name: String, occ: Long, text: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                Result.success(archive.previewMove(name, occ, text).said)
+            } catch (e: Exception) {
+                Result.failure(Exception(said(e)))
+            }
+        }
+
+    fun moveOccurrence(name: String, occ: Long, text: String) = load {
+        archive.moveOccurrence(name, occ, text)
+        reread()
+    }
+
+    fun skipOccurrence(name: String, occ: Long) = load {
+        archive.skipOccurrence(name, occ)
+        reread()
+    }
+
+    fun restoreOccurrence(name: String, occ: Long) = load {
+        archive.restoreOccurrence(name, occ)
+        reread()
+    }
+
+    fun setOccurrenceDone(name: String, occ: Long, done: Boolean) = load {
+        archive.setOccurrenceDone(name, occ, done)
+        reread()
+    }
+
+    fun splitSeries(name: String, from: String, rule: String) = load {
+        archive.splitSeries(name, from, rule)
+        reread()
+    }
+
+    /** Answer "2am or 2pm?" from a calendar row, and stay on the calendar. */
+    fun settleHourHere(name: String, pm: Boolean) = load {
+        archive.settleHour(name, pm)
+        reread()
+    }
+
     fun settle() = load {
         archive.settle()
         reread()
@@ -654,7 +732,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 tasks = archive.tasks()
                 unread = archive.unread()
             }
-            is Screen.Agenda -> agenda = archive.agenda(here.day)
+            is Screen.Agenda -> readCalendar(here.day)
             is Screen.ListOf -> list = archive.list(here.tag)
             is Screen.Wiki -> {
                 pages = archive.named()

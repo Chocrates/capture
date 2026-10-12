@@ -1370,7 +1370,9 @@ pub fn tasks() -> std::result::Result<Vec<TaskLine>, String> {
 /// Mark one occurrence complete, or not.
 #[tauri::command]
 pub fn set_occurrence(name: String, occ: i64, done: bool) -> std::result::Result<(), String> {
-    wire((|| capture_store::mutate::set_occurrence_done(&paths()?, &name, occ, done))())
+    wire((|| {
+        capture_store::mutate::set_occurrence_done(&paths()?, &name, occ, done)
+    })())
 }
 
 /// Names beginning with what has been typed, for completing a link.

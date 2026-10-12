@@ -408,3 +408,32 @@ fn a_past_occurrence_moves_forward_from_now() {
     let (start, _) = resolve_move(&store, &tgt, at(last, 14), "thursday", now(), zone()).unwrap();
     assert_eq!(start, at(coming, 14));
 }
+
+// ----------------------------------------------------------- grid shapes
+
+#[test]
+fn a_month_grid_is_whole_weeks_around_the_month() {
+    use capture_store::calendar::{Shape, span};
+    let d = |s: &str| FloatingDate::parse(s).unwrap();
+    // October 2026 starts on a Thursday and ends on a Saturday.
+    let s = span(d("2026-10-12"), Shape::Month, zone()).unwrap();
+    assert_eq!((s.from, s.to), (d("2026-09-28"), d("2026-11-01")));
+    assert_eq!((s.first, s.last), (d("2026-10-01"), d("2026-10-31")));
+    assert_eq!(s.title, "October 2026");
+    assert_eq!((s.previous, s.next), (d("2026-09-12"), d("2026-11-12")));
+
+    // The 31st has no 31st a month on; the day clamps rather than spilling.
+    let s = span(d("2026-10-31"), Shape::Month, zone()).unwrap();
+    assert_eq!(s.next, d("2026-11-30"));
+}
+
+#[test]
+fn a_week_runs_monday_to_sunday() {
+    use capture_store::calendar::{Shape, span, weekday};
+    let d = |s: &str| FloatingDate::parse(s).unwrap();
+    let s = span(d("2026-10-15"), Shape::Week, zone()).unwrap();
+    assert_eq!((s.from, s.to), (d("2026-10-12"), d("2026-10-18")));
+    assert_eq!((s.previous, s.next), (d("2026-10-08"), d("2026-10-22")));
+    assert_eq!(weekday(d("2026-10-12")), 0, "Monday is zero");
+    assert_eq!(weekday(d("2026-10-18")), 6);
+}

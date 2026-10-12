@@ -2354,9 +2354,18 @@ impl Store {
 
         // Occurrences of a series. Each is its own moment; a cancelled or
         // completed one is not.
+        //
+        // An occurrence with no time of day is a day, delivered the way a
+        // task's due date is rather than as a timed alarm at midnight. And one
+        // that has no time only because its hour said neither am nor pm says
+        // nothing until somebody answers: any moment picked to announce it
+        // would be the guess the recognizer refused to make. Found on a phone
+        // where "gym every monday at 2", captured on a Monday afternoon,
+        // announced "was due earlier" at once.
         let mut st = self.conn.prepare(&format!(
-            "SELECT o.tgt, o.occ, o.start_ms, n.text
+            "SELECT o.tgt, o.occ, o.start_ms, n.text, o.all_day, COALESCE(p.pinned, 0)
                FROM occurrences o JOIN notes n ON n.tgt = o.tgt
+               LEFT JOIN promotions p ON p.tgt = o.tgt
               WHERE o.start_ms <= ?1
                 AND o.cancelled = 0 AND o.done = 0
                 AND {ALERTABLE}",
@@ -2367,16 +2376,21 @@ impl Store {
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)? != 0,
+                r.get::<_, i64>(5)? != 0,
             ))
         })? {
-            let (tgt, occ, at, text) = r?;
+            let (tgt, occ, at, text, all_day, pinned) = r?;
+            if !pinned && capture_parse::unclear_hour(&text).is_some() {
+                continue;
+            }
             if let Some(tgt) = id_from(tgt) {
                 out.push(Due {
                     tgt,
                     at,
                     occ: Some(occ),
                     text,
-                    timed: true,
+                    timed: !all_day,
                 });
             }
         }
