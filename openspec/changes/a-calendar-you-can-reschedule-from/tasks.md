@@ -41,8 +41,9 @@
 
 ## 5. Desktop
 
-- [ ] 5.1 Month grid beside the day view, from the same read.
-- [ ] 5.2 Occurrence actions: move (with preview), skip/restore, change this and later; IPC tests.
+- [x] 5.1 Month grid beside the day view, from the same read.
+- [x] 5.2 Occurrence actions: move (with preview), skip/restore, change this and later; IPC tests.
+  - The window's `agenda` now reads through `calendar::days` (it had its own, which hid a skip only when not also moved — the old fold rule). Verified through `tests/ipc.rs`; the window itself cannot be screenshotted on this GNOME/Wayland machine, so the page is checked by `node --check` and by `unreached` (every new command is called from it), not by eye.
 
 ## 6. Close
 

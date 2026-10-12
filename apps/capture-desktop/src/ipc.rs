@@ -277,6 +277,34 @@ pub struct Occurrence {
     pub due: bool,
     /// Where a due task's date has already passed, the day it was due.
     pub was_due: Option<String>,
+    /// An instance of a series, so "this and later" applies.
+    pub series: bool,
+    /// Where the rule put it, when it was moved somewhere else.
+    pub moved_from: Option<i64>,
+    /// Skipped: listed with Restore, never drawn on the grid.
+    pub skipped: bool,
+    /// An hour written without am or pm, which is why this has no time.
+    pub unclear_hour: Option<u32>,
+}
+
+/// One cell of the month beside the day.
+#[derive(Serialize, Debug)]
+pub struct MonthDay {
+    pub date: String,
+    pub day: u8,
+    /// Inside the month; the padding days either side are dimmed.
+    pub in_month: bool,
+    pub today: bool,
+    pub busy: bool,
+}
+
+/// A month, as whole Monday-to-Sunday weeks, and where its arrows go.
+#[derive(Serialize, Debug)]
+pub struct Month {
+    pub title: String,
+    pub previous: String,
+    pub next: String,
+    pub days: Vec<MonthDay>,
 }
 
 /// One note offered in a review session.
@@ -1148,100 +1176,46 @@ pub fn split_series(name: String, from: String, rule: String) -> std::result::Re
 #[tauri::command]
 pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
     wire((|| {
+        use capture_store::calendar::ItemKind;
         let s = read_only()?;
-        // The reading zone, resolved once and used for both the day's window
-        // and the "is this today" comparison below.
-        //
-        // This was UTC, and that made a day on this surface a 24-hour span
-        // lining up with nobody's day but a reader on the meridian's. Turning a
-        // floating date into an instant is the operation §3.6 warns about —
-        // "due Friday is not 00:00 UTC on Friday" — and doing it here in UTC
-        // put every evening appointment on the following day's agenda. A 19:00
-        // dinner in Denver is 01:00 UTC the next morning, an hour past the end
-        // of the window this built, so the window showed an empty evening and
-        // the terminal showed the dinner: two surfaces, one store, different
-        // answers about what day something is on.
-        //
-        // UTC survives as the *fallback*. If the system cannot say where it is,
-        // a day still has to mean something.
-        let zone = capture_time::Zone::new(&capture_store::notifier::local_zone())
-            .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
+        let zone = here();
         let date = capture_time::FloatingDate::parse(&day)
             .ok_or_else(|| Error::Usage(format!("'{day}' is not a date")))?;
-        let from = capture_time::at_local(date, 0, 0, zone)
-            .ok_or_else(|| Error::Usage("that day does not exist".into()))?;
-        let to = from + 24 * 60 * 60 * 1000;
+        let now = now_ms() as i64;
 
-        let mut out = Vec::new();
-
-        // All-day entries first, in their own band. They are floating dates and
-        // have no position on an hour axis (§4.4).
-        for tgt in s.all_day_on(&day)? {
-            out.push(Occurrence {
-                slug: s.slug_of(&tgt)?.unwrap_or_default(),
-                occ: from,
-                start_ms: from,
-                all_day: true,
-                done: false,
-                shift: None,
-                text: s.text_of(&tgt)?,
-                end_ms: None,
-                column: 0,
-                columns: 1,
-                due: false,
+        // The store's calendar read, the one the phone and `capture cal` use.
+        // This window had its own, and it hid a skipped occurrence only when it
+        // had not also been moved — a rule the fold no longer has.
+        let mut out: Vec<Occurrence> = capture_store::calendar::days(&s, date, date, zone, now)?
+            .into_iter()
+            .flat_map(|d| d.items)
+            .map(|i| Occurrence {
+                slug: i.slug,
+                occ: i.occ.unwrap_or(i.start_ms),
+                start_ms: i.start_ms,
+                all_day: i.kind != ItemKind::Timed,
+                done: i.done,
+                shift: i.shift,
+                text: i.title.or(i.text),
+                end_ms: i.end_ms,
+                column: i.column,
+                columns: i.columns,
+                due: i.kind == ItemKind::Due,
                 was_due: None,
-            });
-        }
-
-        for (tgt, o) in s.happening_between(from, to)? {
-            // Hidden, not gone: the cancellation is an ordinary event. One that
-            // was also moved is drawn, because a move outranks a cancel (§6).
-            if o.cancelled && o.start_ms == o.occ {
-                continue;
-            }
-            out.push(Occurrence {
-                slug: s.slug_of(&tgt)?.unwrap_or_default(),
-                occ: o.occ,
-                start_ms: o.start_ms,
-                all_day: o.all_day,
-                done: o.done,
-                shift: o.shift,
-                text: o.title.clone().or(s.text_of(&tgt)?),
-                end_ms: o.end_ms,
-                column: 0,
-                columns: 1,
-                due: false,
-                was_due: None,
-            });
-        }
-
-        // What is due, beside what occurs. Until this existed the window drew
-        // only the second half: a task due today was listed by `capture tasks`
-        // and invisible on the day it mattered, which is the same failure shape
-        // as an intent that is registered and never fires.
-        for (tgt, done) in s.tasks_due_on(&day)? {
-            out.push(Occurrence {
-                slug: s.slug_of(&tgt)?.unwrap_or_default(),
-                occ: from,
-                start_ms: from,
-                all_day: true,
-                done,
-                shift: None,
-                text: s.text_of(&tgt)?,
-                end_ms: None,
-                column: 0,
-                columns: 1,
-                due: true,
-                was_due: None,
-            });
-        }
+                series: i.series,
+                moved_from: i.moved_from,
+                skipped: i.skipped,
+                unclear_hour: i.unclear_hour,
+            })
+            .collect();
 
         // Overdue tasks, on today only. Still open rather than lapsed — §3.6
         // makes a task the one thing here that genuinely carries forward, and
         // saying so once is not a backlog.
-        let today = format!("{}", capture_time::civil_date(now_ms() as i64, zone));
-        if day == today {
-            for tgt in s.tasks_overdue(&today)? {
+        let today = capture_time::civil_date(now, zone);
+        if date == today {
+            let from = capture_time::at_local(date, 0, 0, zone).unwrap_or(now);
+            for tgt in s.tasks_overdue(&today.to_string())? {
                 let was = s.promotion_of(&tgt)?.and_then(|p| match p.as_ {
                     capture_core::body::Promoted::Task(t) => t.due,
                     _ => None,
@@ -1259,34 +1233,117 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                     columns: 1,
                     due: true,
                     was_due: was,
+                    series: false,
+                    moved_from: None,
+                    skipped: false,
+                    unclear_hour: None,
                 });
             }
         }
-
-        capture_store::calendar::pack(&mut out);
         Ok(out)
     })())
 }
 
-impl capture_store::calendar::Timed for Occurrence {
-    fn start_ms(&self) -> i64 {
-        self.start_ms
-    }
+/// The month around a day, for the grid beside it.
+#[tauri::command]
+pub fn month(day: String) -> std::result::Result<Month, String> {
+    wire((|| {
+        use capture_store::calendar::{Shape, span};
+        let s = read_only()?;
+        let zone = here();
+        let date = capture_time::FloatingDate::parse(&day)
+            .ok_or_else(|| Error::Usage(format!("'{day}' is not a date")))?;
+        let now = now_ms() as i64;
+        let today = capture_time::civil_date(now, zone);
+        let m = span(date, Shape::Month, zone)?;
+        let days = capture_store::calendar::days(&s, m.from, m.to, zone, now)?;
+        Ok(Month {
+            title: m.title,
+            previous: m.previous.to_string(),
+            next: m.next.to_string(),
+            days: days
+                .iter()
+                .map(|d| MonthDay {
+                    date: d.date.to_string(),
+                    day: d.date.day,
+                    in_month: d.date >= m.first && d.date <= m.last,
+                    today: d.date == today,
+                    busy: d.busy(),
+                })
+                .collect(),
+        })
+    })())
+}
 
-    fn end_ms(&self) -> Option<i64> {
-        self.end_ms
-    }
+/// Where words would move one occurrence, without moving it: "Thu 15 Oct
+/// 10:00". Shown under the field before anything is written.
+#[tauri::command]
+pub fn preview_move(name: String, occ: i64, text: String) -> std::result::Result<String, String> {
+    wire((|| {
+        let s = read_only()?;
+        let tgt = s
+            .resolve(&name)?
+            .ok_or_else(|| Error::NotFound(name.clone()))?;
+        let zone = here();
+        let (start, end) =
+            capture_store::calendar::resolve_move(&s, &tgt, occ, &text, now_ms() as i64, zone)?;
+        Ok(landing(start, end, zone))
+    })())
+}
 
-    fn on_axis(&self) -> bool {
-        // All-day entries and due tasks have no position on an hour axis,
-        // which is the whole reason §3.2 and §4.4 keep them in bands of their
-        // own.
-        !self.all_day && !self.due
-    }
+/// Move one occurrence to where words say. The rule is untouched.
+#[tauri::command]
+pub fn move_occurrence(
+    name: String,
+    occ: i64,
+    text: String,
+) -> std::result::Result<String, String> {
+    wire((|| {
+        let zone = here();
+        let (start, end) = capture_store::mutate::move_occurrence_to(
+            &paths()?,
+            &name,
+            occ,
+            &text,
+            now_ms() as i64,
+            zone,
+        )?;
+        Ok(landing(start, end, zone))
+    })())
+}
 
-    fn place(&mut self, column: usize, columns: usize) {
-        self.column = column;
-        self.columns = columns;
+/// Skip one occurrence; `restore_occurrence` brings it back.
+#[tauri::command]
+pub fn skip_occurrence(name: String, occ: i64) -> std::result::Result<(), String> {
+    wire((|| {
+        capture_store::mutate::skip_occurrence(&paths()?, &name, occ)
+    })())
+}
+
+/// Put one occurrence back where the rule put it.
+#[tauri::command]
+pub fn restore_occurrence(name: String, occ: i64) -> std::result::Result<(), String> {
+    wire((|| {
+        capture_store::mutate::restore_occurrence(&paths()?, &name, occ)
+    })())
+}
+
+/// The reading zone, falling back to UTC only where the system names none.
+fn here() -> capture_time::Zone {
+    capture_time::Zone::new(&capture_store::notifier::local_zone())
+        .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"))
+}
+
+/// "Thu 15 Oct 10:00–11:00".
+fn landing(start: i64, end: Option<i64>, zone: capture_time::Zone) -> String {
+    let clock = |ms: i64| {
+        let (h, m) = capture_time::civil_clock(ms, zone);
+        format!("{h:02}:{m:02}")
+    };
+    let day = capture_store::calendar::day_label(capture_time::civil_date(start, zone));
+    match end {
+        Some(e) => format!("{day} {}–{}", clock(start), clock(e)),
+        None => format!("{day} {}", clock(start)),
     }
 }
 
@@ -2017,6 +2074,24 @@ mod tests {
 
     const H: i64 = 60 * 60 * 1000;
 
+    // The window's rows are packed by the store's calendar read now; these
+    // pin the packer itself, through a row shape a person can read.
+    impl capture_store::calendar::Timed for Occurrence {
+        fn start_ms(&self) -> i64 {
+            self.start_ms
+        }
+        fn end_ms(&self) -> Option<i64> {
+            self.end_ms
+        }
+        fn on_axis(&self) -> bool {
+            !self.all_day && !self.due
+        }
+        fn place(&mut self, column: usize, columns: usize) {
+            self.column = column;
+            self.columns = columns;
+        }
+    }
+
     /// One timed occurrence, from hour to hour.
     fn at(start: i64, end: Option<i64>) -> Occurrence {
         Occurrence {
@@ -2032,6 +2107,10 @@ mod tests {
             columns: 1,
             due: false,
             was_due: None,
+            series: false,
+            moved_from: None,
+            skipped: false,
+            unclear_hour: None,
         }
     }
 

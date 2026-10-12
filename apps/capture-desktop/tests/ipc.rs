@@ -223,6 +223,65 @@ fn the_window_answers_what_the_store_holds() {
         "the answer did not time the series"
     );
 
+    // ------------------------------------------------------- one occurrence
+    //
+    // Sick on Monday: this one's gym goes to Thursday at 10, from the window.
+    let weekly = capture(&paths, "swim every tuesday at 7pm");
+    capture_store::promote::settle(&paths).unwrap();
+    // The real clock, as the window reads it: "today" and the occurrence
+    // horizon are both measured from it.
+    let today = capture_time::civil_date(
+        jiff::Timestamp::now().as_millisecond(),
+        capture_time::Zone::new("America/Denver").unwrap(),
+    );
+    let month = ipc::month(today.to_string()).expect("the month answers");
+    assert_eq!(month.days.len() % 7, 0, "whole weeks");
+    // This month and the next, so the last days of a month still find one.
+    let following = ipc::month(month.next.clone()).unwrap();
+    let (tuesday, row) = month
+        .days
+        .iter()
+        .chain(following.days.iter())
+        .filter(|d| d.busy && d.date >= today.to_string())
+        .find_map(|d| {
+            ipc::agenda(d.date.clone())
+                .unwrap()
+                .into_iter()
+                .find(|o| o.slug == weekly)
+                .map(|o| (d.date.clone(), o))
+        })
+        .expect("a Tuesday this month with the swim, marked busy");
+    assert!(row.series);
+
+    let said = ipc::preview_move(weekly.clone(), row.occ, "thursday 6pm".into()).unwrap();
+    assert!(said.starts_with("Thu") && said.contains("18:00"), "{said}");
+    assert!(
+        ipc::agenda(tuesday.clone())
+            .unwrap()
+            .iter()
+            .any(|o| o.slug == weekly),
+        "previewing moved it"
+    );
+    assert_eq!(
+        ipc::move_occurrence(weekly.clone(), row.occ, "thursday 6pm".into()).unwrap(),
+        said
+    );
+    assert!(
+        !ipc::agenda(tuesday.clone())
+            .unwrap()
+            .iter()
+            .any(|o| o.slug == weekly)
+    );
+
+    ipc::restore_occurrence(weekly.clone(), row.occ).unwrap();
+    ipc::skip_occurrence(weekly.clone(), row.occ).unwrap();
+    let skipped = ipc::agenda(tuesday.clone())
+        .unwrap()
+        .into_iter()
+        .find(|o| o.slug == weekly)
+        .expect("listed, so Restore has a place");
+    assert!(skipped.skipped);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

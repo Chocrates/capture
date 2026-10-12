@@ -192,12 +192,25 @@ async function showAgenda(day) {
   const next = el("button", "act", "▶");
   next.addEventListener("click", () => showAgenda(shiftDay(agendaDay, 1)));
   bar.append(prev, next);
+  if (agendaDay !== today()) {
+    const back = el("button", "act", "today");
+    back.addEventListener("click", () => showAgenda(today()));
+    bar.append(back);
+  }
   view.append(bar);
+
+  // The month beside the day: which days have something, one click to any of
+  // them. Drawn from the same read as the day, so a dot and the list under it
+  // cannot disagree.
+  const [month, rows] = await Promise.all([
+    call("month", { day: agendaDay }),
+    call("agenda", { day: agendaDay }),
+  ]);
+  if (stale(mine)) return;
+  view.append(monthGrid(month));
 
   view.append(el("h2", null, agendaDay));
 
-  const rows = await call("agenda", { day: agendaDay });
-  if (stale(mine)) return;
   if (!rows.length) {
     view.append(el("p", "empty", "Nothing on this day."));
     return;
@@ -209,8 +222,10 @@ async function showAgenda(day) {
   // something false about every task in the list, and said it most loudly about
   // an overdue one, which is not on this day at all.
   const due = rows.filter((r) => r.due);
-  const allDay = rows.filter((r) => !r.due && r.all_day);
-  const timed = rows.filter((r) => !r.due && !r.all_day);
+  const allDay = rows.filter((r) => !r.due && r.all_day && !r.skipped);
+  const timed = rows.filter((r) => !r.due && !r.all_day && !r.skipped);
+  // Hidden from the day, not gone (§4.4): listed, so Restore has a place.
+  const skipped = rows.filter((r) => r.skipped);
 
   if (due.length) {
     const band = el("div", "all-day");
@@ -225,6 +240,84 @@ async function showAgenda(day) {
     view.append(band);
   }
   view.append(grid(timed));
+  if (timed.length) {
+    // The grid's blocks tick; the rows here carry the rest of what can be
+    // done to one occurrence.
+    const band = el("div", "all-day");
+    band.append(el("div", "band-label", "during the day"));
+    for (const r of timed) band.append(agendaRow(r));
+    view.append(band);
+  }
+  if (skipped.length) {
+    const band = el("div", "all-day");
+    band.append(el("div", "band-label", "skipped"));
+    for (const r of skipped) band.append(agendaRow(r));
+    view.append(band);
+  }
+}
+
+/// A month as whole weeks, busy days dotted, the chosen day ringed.
+function monthGrid(m) {
+  const box = el("div", "month");
+  const head = el("div", "month-head");
+  const prev = el("button", "act", "‹");
+  prev.addEventListener("click", () => showAgenda(m.previous));
+  const next = el("button", "act", "›");
+  next.addEventListener("click", () => showAgenda(m.next));
+  head.append(prev, el("span", "month-title", m.title), next);
+  box.append(head);
+
+  const cells = el("div", "month-cells");
+  for (const d of ["M", "T", "W", "T", "F", "S", "S"]) cells.append(el("span", "month-dow", d));
+  for (const d of m.days) {
+    const cls = ["month-day"];
+    if (!d.in_month) cls.push("out");
+    if (d.today) cls.push("today");
+    if (d.date === agendaDay) cls.push("chosen");
+    if (d.busy) cls.push("busy");
+    const c = el("button", cls.join(" "), String(d.day));
+    c.addEventListener("click", () => showAgenda(d.date));
+    cells.append(c);
+  }
+  box.append(cells);
+  return box;
+}
+
+/// An inline form under a row: words in, where they land shown as you type.
+///
+/// `preview` answers what the words would do without doing it; `commit` does
+/// it. The button is enabled only once the preview has an answer, so a
+/// misread "thursday" is seen before it is written.
+function inlineForm(row, placeholder, preview, commit) {
+  const form = el("div", "inline-form");
+  const input = el("input");
+  input.placeholder = placeholder;
+  const said = el("span", "inline-said", "");
+  const go = el("button", "act", "ok");
+  go.disabled = true;
+  let pending = 0;
+  input.addEventListener("input", async () => {
+    const mine = ++pending;
+    go.disabled = true;
+    said.textContent = "";
+    if (!input.value.trim()) return;
+    try {
+      const answer = await preview(input.value);
+      if (mine !== pending) return;
+      said.textContent = answer ? `→ ${answer}` : "";
+      go.disabled = false;
+    } catch (e) {
+      if (mine !== pending) return;
+      said.textContent = String(e);
+    }
+  });
+  go.addEventListener("click", async () => {
+    await commit(input.value);
+    showAgenda(agendaDay);
+  });
+  form.append(input, go, said);
+  row.after(form);
+  input.focus();
 }
 
 function agendaRow(r) {
@@ -238,6 +331,68 @@ function agendaRow(r) {
 
   const body = el("span", "what", r.text || "(no readable text)");
   row.append(body);
+
+  if (r.moved_from) {
+    row.append(el("span", "shift", `moved from ${dayAndClock(r.moved_from)}`));
+  }
+
+  // Why this has no time. Each button names what it will write, because the
+  // answer goes into the text.
+  if (r.unclear_hour != null) {
+    const h = r.unclear_hour;
+    row.append(el("span", "shift", `"at ${h}" — which?`));
+    for (const [label, pm] of [[`${h}am`, false], [`${h}pm`, true]]) {
+      const b = el("button", "act", label);
+      b.addEventListener("click", async () => {
+        await call("settle_hour", { name: r.slug, pm });
+        showAgenda(agendaDay);
+      });
+      row.append(b);
+    }
+  }
+
+  // One occurrence, changed where it is shown (§3.5): move this one, skip it,
+  // put it back, or change this and every later one.
+  if (!r.due && (r.series || r.moved_from || r.skipped)) {
+    const move = el("button", "act", "move…");
+    move.addEventListener("click", () =>
+      inlineForm(
+        row,
+        "when instead — thursday 10am",
+        (text) => call("preview_move", { name: r.slug, occ: r.occ, text }),
+        (text) => call("move_occurrence", { name: r.slug, occ: r.occ, text }),
+      ),
+    );
+    row.append(move);
+    if (r.skipped || r.moved_from) {
+      const back = el("button", "act", r.skipped ? "restore" : "move back");
+      back.addEventListener("click", async () => {
+        await call("restore_occurrence", { name: r.slug, occ: r.occ });
+        showAgenda(agendaDay);
+      });
+      row.append(back);
+    }
+    if (!r.skipped) {
+      const skip = el("button", "act", "skip");
+      skip.addEventListener("click", async () => {
+        await call("skip_occurrence", { name: r.slug, occ: r.occ });
+        showAgenda(agendaDay);
+      });
+      row.append(skip);
+    }
+    if (r.series) {
+      const later = el("button", "act", "this and later…");
+      later.addEventListener("click", () =>
+        inlineForm(
+          row,
+          `from ${agendaDay} on — every tuesday at 6pm`,
+          async (rule) => (rule.trim() ? `repeats as "${rule}" from ${agendaDay}` : ""),
+          (rule) => call("split_series", { name: r.slug, from: agendaDay, rule }),
+        ),
+      );
+      row.append(later);
+    }
+  }
 
   // A shifted occurrence says why. §4.4: a time that moves on its own with no
   // explanation is what makes somebody distrust the whole system.
@@ -385,6 +540,13 @@ function block(r, firstHour) {
   });
   b.title = r.done ? "click to un-tick" : "click to mark done";
   return b;
+}
+
+/// "Mon 12 Oct 14:00", in the reader's zone.
+function dayAndClock(ms) {
+  const d = new Date(ms);
+  const day = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  return `${day} ${clockOf(ms)}`;
 }
 
 function hourOf(ms) {
