@@ -135,7 +135,7 @@ pub fn shape_as(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
         })),
 
         Shape::Recurring { rule, at_minute } => Some(Promoted::Series(SeriesFields {
-            when: series_start(*at_minute, zone, now)?,
+            when: series_start(*at_minute, r.markers.duration_min, zone, now)?,
             rule: rule.clone(),
             // Never inferred. A series that genuinely accumulates — a missed
             // dose, an unpaid invoice — is indistinguishable by phrasing from
@@ -158,14 +158,25 @@ pub fn shape_as(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
 /// A recurrence with no time of day stays a series of days rather than moments
 /// — "walk the dog daily" has no 00:00 about it, and storing one would put a
 /// midnight on the calendar that nobody wrote.
-fn series_start(at_minute: Option<u32>, zone: Zone, now: i64) -> Option<BodyWhen> {
+///
+/// A written length (`~1h`) gives the first occurrence its end, and every other
+/// occurrence takes the same length from it. Never invented, as for an event.
+fn series_start(
+    at_minute: Option<u32>,
+    length_min: Option<u32>,
+    zone: Zone,
+    now: i64,
+) -> Option<BodyWhen> {
     let today = capture_time::civil_date(now, zone);
     match at_minute {
-        Some(minutes) => Some(BodyWhen::Timed {
-            start_ms: capture_time::at_local(today, minutes / 60, minutes % 60, zone)?,
-            end_ms: None,
-            tz: String::from(zone.name()),
-        }),
+        Some(minutes) => {
+            let start_ms = capture_time::at_local(today, minutes / 60, minutes % 60, zone)?;
+            Some(BodyWhen::Timed {
+                start_ms,
+                end_ms: length_min.map(|m| start_ms + (m as i64) * 60_000),
+                tz: String::from(zone.name()),
+            })
+        }
         None => Some(BodyWhen::AllDay {
             start_date: format!("{today}"),
             end_date: format!("{today}"),

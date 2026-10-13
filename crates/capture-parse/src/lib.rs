@@ -131,7 +131,12 @@ pub use token::{Class, Token, tokenize};
 /// no time, and an [`UnclearHour`] asks. Every capture parsed under 6 that read
 /// "at 2" as 02:00 is read again, which is the only way an archive already
 /// holding a 2 am gym loses it.
-pub const GRAMMAR_VERSION: u32 = 7;
+///
+/// Version 8 keeps a written length on a series. "gym every monday at 2pm ~1h"
+/// read the `~1h` and dropped it, so every session had no end, while the same
+/// marker on a one-off event was kept. Captures parsed under 7 are read again so
+/// a series already written with a length gets it.
+pub const GRAMMAR_VERSION: u32 = 8;
 
 /// The hour a capture gave without am or pm, if it gave one.
 ///

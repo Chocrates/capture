@@ -108,7 +108,10 @@ use crate::{Result, db};
 /// Version 14 re-derives which occurrences are hidden: a skip made after a
 /// move now hides it, where a move used to outrank every skip. The rows an
 /// older build wrote say "visible" for those, so they are rebuilt, not trusted.
-pub const PROJECTION_SCHEMA: u32 = 14;
+///
+/// Version 15 gives each occurrence of a series with a length that length. The
+/// rows an older build wrote have no end, so they are rebuilt.
+pub const PROJECTION_SCHEMA: u32 = 15;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -3535,6 +3538,12 @@ fn expand_occurrences(
         if let (Some(start_ms), Some(zone)) = (start_ms, capture_time::Zone::new(&tz)) {
             let rule = to_rule(&sf.rule);
             let local = capture_time::local_of(start_ms, zone);
+            let length = match &sf.when {
+                When::Timed {
+                    end_ms: Some(end), ..
+                } => Some(end - start_ms),
+                _ => None,
+            };
 
             // Exceptions written against the series this one was split from,
             // for the occurrences this one now covers. §3.5: exceptions survive
@@ -3555,7 +3564,9 @@ fn expand_occurrences(
                     .or_else(|| inherited.and_then(|m| m.get(&o.start)));
                 let (shown, end) = match ex.and_then(|e| e.moved_to) {
                     Some((s, e)) => (s, e),
-                    None => (o.start, None),
+                    // Each occurrence as long as the first: the length was
+                    // written once, for all of them.
+                    None => (o.start, length.map(|l| o.start + l)),
                 };
                 tx.execute(
                     "INSERT OR REPLACE INTO occurrences

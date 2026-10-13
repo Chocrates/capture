@@ -277,6 +277,45 @@ fn an_untimed_series_asks_its_hour_on_the_calendar_too() {
     );
 }
 
+/// "gym every monday at 2pm ~1h" is an hour long every Monday. The `~` was
+/// read and dropped for a series, so every session was a mark with no length,
+/// while "dentist oct 15 at 2pm ~1h" kept its hour.
+#[test]
+fn a_written_length_is_kept_by_every_occurrence() {
+    let scratch = Scratch::new("length");
+    let paths = scratch.paths();
+    let mut s = Session::open_for_capture(paths.clone()).unwrap();
+    let body = capture_store::session::capture_body("gym every monday at 2pm ~1h").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    let monday = a_monday();
+    let weeks = read(&paths, monday, plus(monday, 13));
+    for d in [monday, plus(monday, 7)] {
+        let gym = on(&weeks, d)
+            .items
+            .iter()
+            .find(|i| i.slug == slug)
+            .expect("on each Monday");
+        assert_eq!(gym.kind, ItemKind::Timed);
+        assert_eq!(gym.end_ms, Some(gym.start_ms + HOUR), "on {d}");
+    }
+
+    // And none where none was written: an end nobody chose is harder to
+    // notice than a missing one.
+    let mut s = Session::open_for_capture(paths.clone()).unwrap();
+    let body = capture_store::session::capture_body("swim every tuesday at 7am").unwrap();
+    let swim = s.capture(&body).unwrap().slug;
+    drop(s);
+    let weeks = read(&paths, monday, plus(monday, 6));
+    let swim = on(&weeks, plus(monday, 1))
+        .items
+        .iter()
+        .find(|i| i.slug == swim)
+        .expect("on Tuesday");
+    assert_eq!(swim.end_ms, None);
+}
+
 #[test]
 fn a_range_past_the_horizon_is_refused_by_name() {
     let scratch = Scratch::new("horizon");
