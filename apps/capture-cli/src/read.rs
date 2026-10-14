@@ -1493,8 +1493,14 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let backlinks = store.links_to(&n.tgt)?;
     let unclear_hour = capture_store::promote::asks_hour(n.text.as_deref(), promotion.as_ref());
     let unclear_day = store.unclear_day_of(&n.tgt)?;
+    // A page's checklist lines, numbered as `capture tick-at` takes them.
+    let items = match &promotion {
+        Some(p) if p.kind == "page" => store.items_of(&n.tgt)?,
+        _ => Vec::new(),
+    };
     answer(
         &Page {
+            items,
             note: n,
             promotion,
             unclear_hour,
@@ -1523,6 +1529,8 @@ struct Page {
     unclear_hour: Option<u32>,
     /// Two days the text could mean, which is why nothing was promoted.
     unclear_day: Option<[String; 2]>,
+    /// A page's checklist lines.
+    items: Vec<projection::ListEntry>,
     links: Vec<LinkRow>,
     backlinks: Vec<Backlink>,
     now: u64,
@@ -1535,6 +1543,7 @@ impl View for Page {
             promotion,
             unclear_hour,
             unclear_day,
+            items,
             links,
             backlinks,
             now,
@@ -1567,6 +1576,16 @@ impl View for Page {
                     None => Json::Null,
                 },
             ),
+            (
+                "checklist",
+                arr(items.iter().map(|e| {
+                    obj([
+                        ("ord", e.ord.into()),
+                        ("item", e.text.as_str().into()),
+                        ("done", e.done.into()),
+                    ])
+                })),
+            ),
             ("links", arr(links.iter().map(link_json))),
             ("backlinks", arr(backlinks.iter().map(backlink_json))),
         ])
@@ -1578,6 +1597,7 @@ impl View for Page {
             promotion,
             unclear_hour,
             unclear_day,
+            items,
             links,
             backlinks,
             ..
@@ -1627,7 +1647,12 @@ impl View for Page {
                 .unwrap_or(&p.descriptor);
             // Yours, and how to take it back: a correction outlives every
             // edit, so a mistaken one has to be undone by name (2026-10-13).
-            let authored = if p.pinned {
+            let authored = if p.kind == "page" {
+                format!(
+                    "  (never read for dates; capture unpage {} to undo)",
+                    n.slug
+                )
+            } else if p.pinned {
                 format!("  (yours; capture reread {} to undo)", n.slug)
             } else {
                 String::new()
@@ -1652,6 +1677,17 @@ impl View for Page {
                 labelled_day(b),
                 n.slug
             );
+        }
+
+        // A page's checklist, numbered for `capture tick-at`.
+        if !items.is_empty() {
+            say!();
+            for e in items.iter() {
+                let n_ = e.ord.map(|o| o + 1).unwrap_or(0);
+                say!("  {n_:>2}. [{}] {}", if e.done { "x" } else { " " }, e.text);
+            }
+            say!("  tick one: capture tick-at {} <n>", n.slug);
+            say!();
         }
 
         say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));

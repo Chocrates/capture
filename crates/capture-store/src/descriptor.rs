@@ -27,7 +27,8 @@ use capture_time::Zone;
 /// A short human rendering of a promotion's fields.
 pub fn render(p: &Promoted) -> String {
     match p {
-        Promoted::Note => String::new(),
+        // Nothing to add: a page's content is its text, as a note's is.
+        Promoted::Note | Promoted::Page => String::new(),
 
         Promoted::Task(t) => {
             let mut s = String::from(if t.done { "done" } else { "task" });

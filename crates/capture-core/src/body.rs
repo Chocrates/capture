@@ -575,6 +575,28 @@ pub enum Promoted {
     /// Something that repeats.
     #[n(3)]
     Series(#[n(0)] SeriesFields),
+    /// A page: written to be read and revised, never read for a type.
+    ///
+    /// Only ever written pinned, by a person ("New page", "Make this a page").
+    /// The pin is what keeps every later parse off it, so a page that mentions
+    /// "every monday at 2pm" stays a page and puts nothing on the calendar.
+    /// Added 2026-10-13; a build older than that holds the event as malformed.
+    #[n(4)]
+    Page,
+}
+
+impl Promoted {
+    /// `note`, `task`, `event`, `series` or `page`: the one spelling every
+    /// surface and the projection use for what a note is.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Promoted::Note => "note",
+            Promoted::Task(_) => "task",
+            Promoted::Event(_) => "event",
+            Promoted::Series(_) => "series",
+            Promoted::Page => "page",
+        }
+    }
 }
 
 /// Assign a derived type to a capture, without touching what was captured.

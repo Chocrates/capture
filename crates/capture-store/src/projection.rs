@@ -2860,15 +2860,16 @@ impl Store {
                 .replace('_', "\\_")
         );
         let mut st = self.conn.prepare(
-            "SELECT name FROM (
-               SELECT slug AS name, created_wall FROM notes
-                 WHERE slug LIKE ?1 ESCAPE '\\' AND redacted_at IS NULL
-               UNION
-               SELECT alias AS name, created_wall FROM notes
-                 WHERE alias LIKE ?1 ESCAPE '\\' AND redacted_at IS NULL
-             )
-             ORDER BY created_wall DESC
-             LIMIT ?2",
+            // One offer per note: its chosen name where that matches, its slug
+            // otherwise. Both were offered, so a named page appeared twice —
+            // `packing-list` and `packing-list-p1ge8kq6f2` — and the second is
+            // the name nobody wants to write (pages, 2026-10-13).
+            "SELECT CASE WHEN alias LIKE ?1 ESCAPE '\\' THEN alias ELSE slug END
+               FROM notes
+              WHERE (slug LIKE ?1 ESCAPE '\\' OR alias LIKE ?1 ESCAPE '\\')
+                AND redacted_at IS NULL
+              ORDER BY created_wall DESC
+              LIMIT ?2",
         )?;
         let rows = st.query_map(params![pattern, limit as i64], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
@@ -3493,6 +3494,7 @@ fn write_promotion(
 
     let (kind, start_ms, end_ms, start_date, end_date, due, done) = match &p.as_ {
         Promoted::Note => ("note", None, None, None, None, None, None),
+        Promoted::Page => ("page", None, None, None, None, None, None),
         Promoted::Task(t) => (
             "task",
             None,
@@ -3889,8 +3891,13 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
 /// Rarer than either edit alone, and the alternative is to refuse every
 /// ambiguous case, which would discard ticks for the common edits in order to
 /// avoid being wrong in an uncommon one.
-fn reconcile_ticks(items: &[String], ticks: &[capture_core::fold::ItemTick]) -> Vec<bool> {
-    let mut done = vec![false; items.len()];
+fn reconcile_ticks(
+    written: Vec<bool>,
+    items: &[String],
+    ticks: &[capture_core::fold::ItemTick],
+) -> Vec<bool> {
+    // Where each item starts: unticked, or ticked as written (`[x]`, pages).
+    let mut done = written;
 
     for tick in ticks {
         // 1. Exact.
@@ -4229,19 +4236,21 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 )?;
             }
 
-            // A list's items, expanded. Under the same guard as mentions and
-            // for the same reason.
-            //
-            // The rows are replaced wholesale rather than merged, so an edit
-            // that shortens a list does not leave the items it dropped behind —
-            // which is why the delete is unconditional and sits above this
-            // guard rather than in it.
+            // A page is never read (pages, 2026-10-13): no question about its
+            // day, and its list is its checklist lines rather than the comma
+            // form a capture uses.
+            let page = matches!(
+                n.promotion.as_ref().map(|p| &p.as_),
+                Some(capture_core::body::Promoted::Page)
+            );
+
             // UTC where no zone was recorded, as the sweep reads it.
             let zone =
                 n.tz.as_deref()
                     .and_then(capture_time::Zone::new)
                     .or_else(|| capture_time::Zone::new("UTC"));
-            if let Some(zone) = zone
+            if !page
+                && let Some(zone) = zone
                 && let Some(u) = capture_parse::unclear_day(text, n.created.wall as i64, zone)
             {
                 tx.execute(
@@ -4250,13 +4259,35 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 )?;
             }
 
-            if let Some(list) = capture_parse::list_of(text) {
-                let done = reconcile_ticks(&list.items, &n.item_ticks);
-                for (ord, item) in list.items.iter().enumerate() {
+            // A list's items, expanded. Under the same guard as mentions and
+            // for the same reason.
+            //
+            // The rows are replaced wholesale rather than merged, so an edit
+            // that shortens a list does not leave the items it dropped behind —
+            // which is why the delete is unconditional and sits above this
+            // guard rather than in it.
+            //
+            // A page's checklist lines go in the same rows, untagged, so a tick
+            // on one is the item tick every surface already draws. A line
+            // written `[x]` starts ticked; a tick made on the page overrides it.
+            let list = if page {
+                let lines = capture_parse::checklist_of(text);
+                let written: Vec<bool> = lines.iter().map(|l| l.done).collect();
+                let items: Vec<String> = lines.into_iter().map(|l| l.item).collect();
+                Some((String::new(), items, written))
+            } else {
+                capture_parse::list_of(text).map(|l| {
+                    let none = vec![false; l.items.len()];
+                    (l.tag, l.items, none)
+                })
+            };
+            if let Some((tag, items, written)) = list {
+                let done = reconcile_ticks(written, &items, &n.item_ticks);
+                for (ord, item) in items.iter().enumerate() {
                     tx.execute(
                         "INSERT OR REPLACE INTO list_items (tgt, ord, tag, item, done)
                          VALUES (?1,?2,?3,?4,?5)",
-                        params![t, ord as i64, list.tag, item, done[ord] as i64],
+                        params![t, ord as i64, tag, item, done[ord] as i64],
                     )?;
                 }
             }

@@ -546,7 +546,7 @@ fn completing_a_link_asks_the_store_for_names() {
     // is usually not one of the twenty in the timeline behind you.
     let code = ui_code("app.js");
     assert!(
-        code.contains(r#"call("names""#),
+        code.contains(r#"call("completions""#),
         "completion does not ask the store, so it can only offer what is loaded"
     );
 }

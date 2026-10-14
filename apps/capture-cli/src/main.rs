@@ -106,6 +106,8 @@ fn run(command: Command) -> Result<()> {
         Command::Hour { name, pm } => write::hour(paths()?, &name, pm),
         Command::Day { name, which } => write::day(paths()?, &name, which),
         Command::Reread { name } => write::reread(paths()?, &name),
+        Command::NewPage { title, under } => write::new_page(paths()?, &title, under.as_deref()),
+        Command::MakePage { name } => write::make_page(paths()?, &name),
         Command::Mentions { name, json } => read::mentions(&paths()?, &name, json),
         Command::People { json } => read::entities(&paths()?, "person", json),
         Command::Projects { json } => read::entities(&paths()?, "project", json),

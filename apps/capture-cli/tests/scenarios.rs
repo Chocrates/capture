@@ -1932,6 +1932,38 @@ fn a_day_left_open_is_answered_and_a_correction_taken_back() {
     assert!(!shown.contains("(yours"), "{shown}");
 }
 
+/// A page from the terminal: started by title, written, ticked by line, and
+/// never read for dates until it is made a capture again (pages, 2026-10-13).
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_page_is_started_written_ticked_and_handed_back() {
+    let s = Store::new("page");
+    let said = s.ok(&["page", "new", "Gym", "routine"]);
+    assert!(said.contains("[[gym-routine]]"), "{said}");
+
+    s.ok(&[
+        "edit",
+        "gym-routine",
+        "Gym routine\nevery monday at 2pm\n- squats\n[x] stretch",
+    ]);
+    let shown = s.ok(&["show", "gym-routine"]);
+    assert!(shown.contains("page"), "{shown}");
+    assert!(!shown.contains("series"), "a page was read: {shown}");
+    assert!(shown.contains(" 1. [ ] squats"), "{shown}");
+    assert!(shown.contains(" 2. [x] stretch"), "{shown}");
+
+    s.ok(&["tick-at", "gym-routine", "1"]);
+    let shown = s.ok(&["show", "gym-routine"]);
+    assert!(shown.contains(" 1. [x] squats"), "{shown}");
+
+    s.ok(&["unpage", "gym-routine"]);
+    let shown = s.ok(&["show", "gym-routine"]);
+    assert!(shown.contains("series"), "a capture again is read: {shown}");
+
+    let (code, out) = s.run(&["page", "new"]);
+    assert!(code != 0 && out.contains("title"), "{out}");
+}
+
 /// `capture cal` draws a month from the same read as every other surface.
 #[test]
 #[ignore = "spawns the binary repeatedly; run with --ignored"]

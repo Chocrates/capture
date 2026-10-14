@@ -244,6 +244,60 @@ pub struct NoteSummary {
     pub list_tag: Option<String>,
 }
 
+/// A run of text split at its mentions.
+///
+/// A mention that cannot be found again in the text is left as ordinary
+/// words, which is the safe direction: the reader sees exactly what was
+/// written, and the worst case is a tap that is not offered.
+fn mention_pieces(text: String) -> Vec<TextPiece> {
+    let found = capture_parse::mentions(&text);
+    if found.is_empty() {
+        return vec![TextPiece {
+            text,
+            mention: None,
+            link: None,
+        }];
+    }
+
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    for (sigil, value) in found {
+        let whole = format!("{sigil}{value}");
+        let Some(at) = rest.find(&whole) else {
+            continue;
+        };
+        if at > 0 {
+            out.push(TextPiece {
+                text: rest[..at].to_string(),
+                mention: None,
+                link: None,
+            });
+        }
+        out.push(TextPiece {
+            text: whole.clone(),
+            mention: Some(whole.clone()),
+            link: None,
+        });
+        rest = &rest[at + whole.len()..];
+    }
+    if !rest.is_empty() {
+        out.push(TextPiece {
+            text: rest.to_string(),
+            mention: None,
+            link: None,
+        });
+    }
+    out
+}
+
+/// A page just started.
+#[derive(Debug, uniffi::Record)]
+pub struct PageMade {
+    pub slug: String,
+    /// The name its title gave it, where that was free.
+    pub name: Option<String>,
+}
+
 /// Whether a capture reached the log or the spool.
 ///
 /// Both mean "it is safe". They differ in whether it can be found yet, and a
@@ -707,6 +761,9 @@ pub struct TextPiece {
     pub text: String,
     /// The mention it is, as written — `@sarah`. `None` for ordinary text.
     pub mention: Option<String>,
+    /// A `[[link]]`: the name between the brackets, which is also `text`.
+    /// Opened by name, so an alias moved elsewhere opens where it points now.
+    pub link: Option<String>,
 }
 
 /// What a capture is being said to be.
@@ -1725,6 +1782,38 @@ impl Archive {
         Ok(capture_store::mutate::edit(&self.paths, &name, &text)?)
     }
 
+    /// Start a page with a title, optionally under another page.
+    ///
+    /// A page is never read for dates or types; its title names it where the
+    /// name is free. Answers its slug and, where it got one, its name.
+    pub fn new_page(&self, title: String, under: Option<String>) -> Result<PageMade> {
+        let _w = self.write_lock()?;
+        let made = capture_store::pages::create(&self.paths, &title, under.as_deref())?;
+        Ok(PageMade {
+            slug: made.slug,
+            name: made.name,
+        })
+    }
+
+    /// Make a capture a page. Its words stay; nothing in it is read again.
+    /// `reread` makes it a capture again.
+    pub fn make_page(&self, name: String) -> Result<()> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::pages::make(&self.paths, &name)?)
+    }
+
+    /// What to offer after `[[`, `@`, `^` or `#` in the editor, beginning with
+    /// `prefix`. The desktop's editor reads the same list.
+    pub fn completions(&self, sigil: String, prefix: String) -> Result<Vec<String>> {
+        let store = self.read()?;
+        Ok(
+            capture_store::pages::completions(&store, &sigil, &prefix, 8, self.now_ms())?
+                .into_iter()
+                .map(|c| c.insert)
+                .collect(),
+        )
+    }
+
     pub fn tag(&self, name: String, tag: String) -> Result<()> {
         let _w = self.write_lock()?;
         Ok(capture_store::mutate::tag(&self.paths, &name, &tag)?)
@@ -2078,12 +2167,7 @@ impl Archive {
     pub fn accept(&self, name: String) -> Result<String> {
         let _w = self.write_lock()?;
         let as_ = capture_store::promote::accept(&self.paths, &name)?;
-        Ok(String::from(match as_ {
-            capture_core::body::Promoted::Note => "note",
-            capture_core::body::Promoted::Task(_) => "task",
-            capture_core::body::Promoted::Event(_) => "event",
-            capture_core::body::Promoted::Series(_) => "series",
-        }))
+        Ok(String::from(as_.kind()))
     }
 
     /// Make something a task, with a due date or without one.
@@ -2101,49 +2185,24 @@ impl Archive {
         )?)
     }
 
-    /// A note's text, split into ordinary runs and mentions.
+    /// A note's text, split into ordinary runs, mentions and `[[links]]`.
     ///
     /// Given the text rather than a note name, because the caller already has it
     /// and a second read to fetch it again could disagree with what is on screen.
-    ///
-    /// A mention that cannot be found again in the text is left as ordinary
-    /// words, which is the safe direction: the reader sees exactly what was
-    /// written, and the worst case is a tap that is not offered.
     pub fn pieces(&self, text: String) -> Vec<TextPiece> {
-        let found = capture_parse::mentions(&text);
-        if found.is_empty() {
-            return vec![TextPiece {
-                text,
-                mention: None,
-            }];
-        }
-
-        let mut out = Vec::new();
-        let mut rest = text.as_str();
-        for (sigil, value) in found {
-            let whole = format!("{sigil}{value}");
-            let Some(at) = rest.find(&whole) else {
-                continue;
-            };
-            if at > 0 {
-                out.push(TextPiece {
-                    text: rest[..at].to_string(),
+        // Links first, then the mentions in the runs between them: links are
+        // the fold's syntax and sigils the recognizer's, as on the desktop.
+        capture_core::link::segments(&text)
+            .into_iter()
+            .flat_map(|p| match p {
+                capture_core::link::Piece::Text(t) => mention_pieces(t),
+                capture_core::link::Piece::Link(name) => vec![TextPiece {
+                    text: name.clone(),
                     mention: None,
-                });
-            }
-            out.push(TextPiece {
-                text: whole.clone(),
-                mention: Some(whole.clone()),
-            });
-            rest = &rest[at + whole.len()..];
-        }
-        if !rest.is_empty() {
-            out.push(TextPiece {
-                text: rest.to_string(),
-                mention: None,
-            });
-        }
-        out
+                    link: Some(name),
+                }],
+            })
+            .collect()
     }
 
     /// Everyone the archive knows.

@@ -186,6 +186,15 @@ pub enum Command {
     Reread {
         name: String,
     },
+    /// Start a page with a title, optionally under another.
+    NewPage {
+        title: String,
+        under: Option<String>,
+    },
+    /// Make a capture a page.
+    MakePage {
+        name: String,
+    },
     /// Tick one item of a capture, by its number.
     TickAt {
         name: String,
@@ -792,6 +801,41 @@ where
         // `capture reread <note>`. Takes back a correction — an accepted
         // suggestion, a kind set by hand — so the text decides again.
         "reread" => one_name(&args[1..], "reread", |name, _| Command::Reread { name }),
+        // `capture page new <title> [--under <page>]` starts a page;
+        // `capture page <note>` makes a capture one. A page is never read for
+        // dates or types; `capture unpage` hands it back to the recognizer.
+        "page" => match &args[1..] {
+            [new, rest @ ..] if new == "new" => {
+                let (title, under) = match rest.iter().position(|a| a == "--under") {
+                    Some(i) => match rest.get(i + 1) {
+                        Some(u) if i + 2 == rest.len() => (&rest[..i], Some(u.clone())),
+                        _ => {
+                            return Err(Bad::Value {
+                                command: "page".into(),
+                                problem: "--under takes one page, after the title".into(),
+                            });
+                        }
+                    },
+                    None => (rest, None),
+                };
+                if title.is_empty() {
+                    return Err(Bad::Value {
+                        command: "page".into(),
+                        problem: "give the page a title: capture page new Car maintenance".into(),
+                    });
+                }
+                Ok(Command::NewPage {
+                    title: title.join(" "),
+                    under,
+                })
+            }
+            [name] => Ok(Command::MakePage { name: name.clone() }),
+            _ => Err(Bad::Value {
+                command: "page".into(),
+                problem: "capture page new <title>, or capture page <note>".into(),
+            }),
+        },
+        "unpage" => one_name(&args[1..], "unpage", |name, _| Command::Reread { name }),
         "tick-at" | "untick-at" => {
             let done = args[0] == "tick-at";
             match &args[1..] {
@@ -1586,6 +1630,10 @@ TIME AND TASKS
   capture hour <note> am|pm      say which half of the clock "at 2" meant
   capture day <note> 1|2         say which of two days "next thursday" meant
   capture reread <note>          take back a correction; the text decides again
+  capture page new <title> [--under <page>]
+                                 start a page: never read for dates, named by its title
+  capture page <note>            make a capture a page
+  capture unpage <note>          make a page a capture again
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
                                (untick-at puts it back; use this where two
                                 items read the same)

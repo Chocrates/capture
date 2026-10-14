@@ -1118,12 +1118,7 @@ fn a_kind_corrected_on_one_device_survives_the_other_reparsing_it() {
     let kind_on = |d: &Device| {
         let store = d.read();
         let tgt = store.resolve(&slug).unwrap().unwrap();
-        store.promotion_of(&tgt).unwrap().map(|p| match p.as_ {
-            capture_core::body::Promoted::Note => "note",
-            capture_core::body::Promoted::Task(_) => "task",
-            capture_core::body::Promoted::Event(_) => "event",
-            capture_core::body::Promoted::Series(_) => "series",
-        })
+        store.promotion_of(&tgt).unwrap().map(|p| p.as_.kind())
     };
     assert_eq!(kind_on(&desk), Some("event"), "the recognizer's own answer");
 

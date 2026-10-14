@@ -40,6 +40,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.material3.FilterChip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.ui.text.buildAnnotatedString
@@ -344,7 +347,13 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
             // was a trap on 2026-10-13: a suggestion accepted by mistake held
             // the wrong day through every fix to the text. So the way back is
             // shown wherever a correction is in force.
-            if (model.corrected) {
+            if (note.kind == "page") {
+                Text(
+                    "A page: nothing in it goes on the calendar or the task list.",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                TextButton({ model.readAgain(note.slug) }) { Text("Make it a capture again") }
+            } else if (model.corrected) {
                 Text(
                     "You set what this is, so editing the text will not change it.",
                     style = MaterialTheme.typography.labelMedium,
@@ -686,6 +695,68 @@ fun Wiki(
     projects: List<Entity>,
     onOpen: (String) -> Unit,
     onEntity: (String) -> Unit,
+    onNewPage: (String, String?) -> Unit,
+) {
+    var starting by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        TextButton({ starting = true }, Modifier.padding(start = 8.dp)) { Text("New page") }
+        WikiList(pages, people, projects, onOpen, onEntity)
+    }
+    if (starting) {
+        NewPage(pages, onDone = { starting = false }, onStart = onNewPage)
+    }
+}
+
+/**
+ * A title, and optionally the page to put it under. The title names the page
+ * (`Car maintenance` → `[[car-maintenance]]`) and is its first line.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun NewPage(pages: List<Named>, onDone: () -> Unit, onStart: (String, String?) -> Unit) {
+    var title by remember { mutableStateOf("") }
+    var under by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text("New page") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextField(
+                    title,
+                    { title = it },
+                    Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("Title") },
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                )
+                if (pages.isNotEmpty()) {
+                    Text("Under", style = MaterialTheme.typography.labelSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(under == null, { under = null }, { Text("Nothing") })
+                        for (p in pages) {
+                            val name = p.alias ?: p.slug
+                            FilterChip(under == name, { under = name }, { Text(name) })
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button({ onStart(title.trim(), under); onDone() }, enabled = title.isNotBlank()) {
+                Text("Start writing")
+            }
+        },
+        dismissButton = { TextButton(onDone) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun WikiList(
+    pages: List<Named>,
+    people: List<Entity>,
+    projects: List<Entity>,
+    onOpen: (String) -> Unit,
+    onEntity: (String) -> Unit,
 ) {
     if (pages.isEmpty() && people.isEmpty() && projects.isEmpty()) {
         // Three empty sections rather than one, and it is worth saying which
@@ -693,7 +764,7 @@ fun Wiki(
         // project appears because a note mentioned one (§3.7).
         Empty(
             "Nothing named yet.\n\n" +
-                "A page is a note you gave a name to. People and projects are " +
+                "A page is a note you gave a name to — New page starts one. People and projects are " +
                 "not made at all — write @somebody or ^something in a capture " +
                 "and they appear here on their own."
         )
@@ -744,7 +815,7 @@ fun Wiki(
 @Composable
 private fun MentionedText(text: String, model: Model) {
     val pieces = remember(text) { model.pieces(text) }
-    if (pieces.none { it.mention != null }) {
+    if (pieces.none { it.mention != null || it.link != null }) {
         Text(text, style = MaterialTheme.typography.bodyLarge)
         return
     }
@@ -755,18 +826,22 @@ private fun MentionedText(text: String, model: Model) {
     // Read outside `remember`: the theme is a composable lookup and cannot be
     // done inside one.
     val accent = MaterialTheme.colorScheme.primary
-    val spans = remember(text) { mutableListOf<Triple<Int, Int, String>>() }
+    // Where each tappable run landed, and the screen it opens.
+    val spans = remember(text) { mutableListOf<Triple<Int, Int, Screen>>() }
     val annotated = remember(text) {
         spans.clear()
         buildAnnotatedString {
             for (piece in pieces) {
                 val at = length
-                val mention = piece.mention
-                if (mention != null) {
+                // A `[[link]]` opens the page it names, by name, so a page
+                // renamed since opens where the name points now.
+                val opens = piece.mention?.let { Screen.Entity(it) }
+                    ?: piece.link?.let { Screen.Note(it) }
+                if (opens != null) {
                     withStyle(
                         SpanStyle(color = accent, textDecoration = TextDecoration.Underline)
                     ) { append(piece.text) }
-                    spans.add(Triple(at, length, mention))
+                    spans.add(Triple(at, length, opens))
                 } else {
                     append(piece.text)
                 }
@@ -781,7 +856,7 @@ private fun MentionedText(text: String, model: Model) {
         ),
     ) { offset ->
         spans.firstOrNull { offset >= it.first && offset < it.second }?.let {
-            model.go(Screen.Entity(it.third))
+            model.go(it.third)
         }
     }
 }

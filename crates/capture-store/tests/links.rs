@@ -46,11 +46,14 @@ fn a_prefix_offers_both_slugs_and_aliases() {
 
     let s = Session::open(p.clone()).unwrap();
     let names = s.state.names_like("acme", 10).unwrap();
-    assert!(names.iter().any(|n| n == "acme-plan"), "{names:?}");
-    assert!(
-        names.iter().any(|n| n.starts_with("acme-migration")),
-        "{names:?}"
+    assert_eq!(
+        names,
+        vec!["acme-plan".to_string()],
+        "once, by the chosen name"
     );
+    // Where only the slug matches, the slug is what is offered.
+    let names = s.state.names_like("acme-mig", 10).unwrap();
+    assert!(names[0].starts_with("acme-migration"), "{names:?}");
 }
 
 #[test]

@@ -408,6 +408,7 @@ private fun App(
                     projects = model.projects,
                     onOpen = { model.go(Screen.Note(it)) },
                     onEntity = { model.go(Screen.Entity(it)) },
+                    onNewPage = model::newPage,
                 )
                 is Screen.Entity -> EntityPage(
                     mention = screen.mention,
@@ -475,6 +476,7 @@ private fun App(
                     onJoin = model::joinPairing,
                 )
                 is Screen.Note -> NotePage(model.note, model.pending, model.recording, model)
+                is Screen.Editor -> Editor(model.note, model)
                 is Screen.ListOf -> ListScreen(
                     tag = screen.tag,
                     lines = model.list,
@@ -569,7 +571,7 @@ private val TABS = listOf(
         Icons.AutoMirrored.Filled.List,
         // A note opened from the timeline is still the timeline. The bar
         // should not appear to have moved because a row was tapped.
-        { it is Screen.Timeline || it is Screen.Note },
+        { it is Screen.Timeline || it is Screen.Note || it is Screen.Editor },
         { Screen.Timeline },
     ),
     // Pages holds people and projects too, so an entity page keeps this tab

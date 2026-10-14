@@ -39,6 +39,9 @@ sealed interface Screen {
     data object Wiki : Screen
     data object Health : Screen
     data class Note(val name: String) : Screen
+
+    /** A note's text, being written: full screen, with completion. */
+    data class Editor(val name: String) : Screen
     data object Pairing : Screen
     data object Review : Screen
     data object Plans : Screen
@@ -352,6 +355,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 defaultNotifier = archive.defaultNotifier()
                 costs = archive.costs()
             }
+            is Screen.Editor -> load { note = archive.note(to.name) }
             is Screen.Note -> load {
                 note = archive.note(to.name)
                 pending = archive.pendingRedaction(to.name)
@@ -454,6 +458,50 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /** Answer "2am or 2pm?"; the note re-reads with its time. */
     fun settleHour(name: String, pm: Boolean) = after(name) { archive.settleHour(name, pm) }
+
+    /**
+     * Start a page and open it for writing. The page's name comes from its
+     * title where that is free; the toast says when it was not.
+     */
+    fun newPage(title: String, under: String?) = load {
+        val made = archive.newPage(title, under)
+        if (made.name == null) {
+            trouble = "That name was taken, so this page is called ${made.slug}."
+        }
+        withContext(Dispatchers.Main) { go(Screen.Editor(made.name ?: made.slug)) }
+    }
+
+    /** Make a capture a page, and open it for writing. */
+    fun makePage(name: String) = load {
+        archive.makePage(name)
+        withContext(Dispatchers.Main) { go(Screen.Editor(name)) }
+    }
+
+    /**
+     * Save what the editor holds and show the page in the editor's place: back
+     * to it where the editor was opened from it, otherwise onto it (a new page
+     * was started from the Pages tab), so back from there goes where it did.
+     */
+    fun saveText(name: String, text: String) = load {
+        archive.edit(name, text)
+        withContext(Dispatchers.Main) { leaveEditor(name) }
+    }
+
+    /** Leave the editor without saving, onto the page it was writing. */
+    fun leaveEditor(name: String) {
+        val page = Screen.Note(name)
+        if (history.lastOrNull() == page) back() else show(page)
+    }
+
+    /** What to offer after a sigil in the editor; empty when it cannot say. */
+    suspend fun complete(sigil: String, prefix: String): List<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                archive.completions(sigil, prefix)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
 
     /** Answer which of two days; the note re-reads on the day chosen. */
     fun settleDay(name: String, which: UInt) = after(name) { archive.settleDay(name, which) }

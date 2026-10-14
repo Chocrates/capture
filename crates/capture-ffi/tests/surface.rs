@@ -1898,6 +1898,74 @@ fn a_day_left_open_is_asked_on_the_phone_and_a_correction_taken_back() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A page from the phone: started by title, written, never read for dates,
+/// ticked by line, and completed after `[[` and `@` (pages, 2026-10-13).
+#[test]
+fn a_page_is_written_and_ticked_from_the_phone() {
+    let root = scratch("page");
+    let a = Archive::open(root.clone()).unwrap();
+    let made = a.new_page("Packing list".into(), None).unwrap();
+    assert_eq!(made.name.as_deref(), Some("packing-list"));
+    a.edit(
+        made.slug.clone(),
+        "Packing list\nflight friday 9am\n- passport\n[x] charger\nwith @sarah".into(),
+    )
+    .unwrap();
+    a.settle().unwrap();
+
+    let page = a.note(made.slug.clone()).unwrap();
+    assert_eq!(page.kind, "page", "an edit re-read it");
+    let lines: Vec<(String, bool)> = page
+        .items
+        .iter()
+        .map(|l| (l.text.clone(), l.done))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![("passport".into(), false), ("charger".into(), true)]
+    );
+    a.tick_at(made.slug.clone(), 0, true).unwrap();
+    assert!(a.note(made.slug.clone()).unwrap().items[0].done);
+
+    assert_eq!(
+        a.completions("[[".into(), "pack".into()).unwrap(),
+        vec!["packing-list".to_string()]
+    );
+    assert_eq!(
+        a.completions("@".into(), "sa".into()).unwrap(),
+        vec!["sarah".to_string()]
+    );
+    assert!(a.completions("%".into(), "x".into()).is_err());
+
+    // A link is tappable on the phone, as a mention is.
+    let pieces = a.pieces("see [[packing-list]] with @sarah".into());
+    let link = pieces
+        .iter()
+        .find(|p| p.link.is_some())
+        .expect("a link piece");
+    assert_eq!(link.text, "packing-list");
+    assert!(
+        pieces
+            .iter()
+            .any(|p| p.mention.as_deref() == Some("@sarah"))
+    );
+
+    let note = a.capture("dentist thursday 2pm".into()).unwrap();
+    let Captured::Stored { slug } = note else {
+        panic!("spooled")
+    };
+    a.settle().unwrap();
+    a.make_page(slug.clone()).unwrap();
+    assert_eq!(a.note(slug.clone()).unwrap().kind, "page");
+    assert_eq!(
+        a.reread(slug.clone()).unwrap(),
+        "event",
+        "a page made a capture again"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// Two weeks from the phone: a weekly series lands once a week, and only those
 /// days are marked.
 #[test]

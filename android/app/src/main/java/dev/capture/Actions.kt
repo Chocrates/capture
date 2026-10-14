@@ -54,8 +54,12 @@ fun Actions(note: NoteSummary, pending: Pending?, model: Model) {
         Modifier.fillMaxWidth().padding(16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        TextButton({ asking = Ask("Edit", "The new text", note.text ?: "") { model.edit(note.slug, it) } }) {
-            Text("Edit")
+        // Full screen, not a dialog: a one-line box could not hold a page.
+        TextButton({ model.go(Screen.Editor(note.slug)) }) { Text("Edit") }
+        // A capture grown into a page stops being read for dates; the note
+        // page offers the way back while it is one.
+        if (note.kind != "page") {
+            TextButton({ model.makePage(note.slug) }) { Text("Make this a page") }
         }
         TextButton({ asking = Ask("Tag", "A tag", "") { model.tag(note.slug, it) } }) { Text("Tag") }
         TextButton({

@@ -27,10 +27,7 @@ fn zone() -> Zone {
 }
 
 fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
+    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as i64
 }
 
 struct Scratch(std::path::PathBuf);

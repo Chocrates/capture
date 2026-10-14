@@ -223,6 +223,52 @@ fn the_window_answers_what_the_store_holds() {
         "the answer did not time the series"
     );
 
+    // ---------------------------------------------------------------- pages
+    //
+    // Started by title, written, never read for dates, ticked by line, and
+    // completed after each sigil (pages, 2026-10-13).
+    let made = ipc::new_page("Trip packing".into(), None).expect("a page starts");
+    assert_eq!(made.name.as_deref(), Some("trip-packing"));
+    ipc::edit(
+        "trip-packing".into(),
+        "Trip packing\nflight friday 9am with @sam\n- passport\n[x] charger".into(),
+    )
+    .unwrap();
+    capture_store::promote::settle(&paths).unwrap();
+    let page = ipc::note("trip-packing".into()).unwrap();
+    assert!(
+        page.promotion.as_ref().is_some_and(|p| p.kind == "page"),
+        "an edit re-read it"
+    );
+    let lines: Vec<(String, bool)> = page
+        .note
+        .items
+        .iter()
+        .map(|l| (l.text.clone(), l.done))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![("passport".into(), false), ("charger".into(), true)]
+    );
+    assert_eq!(
+        ipc::completions("[[".into(), "trip".into()).unwrap(),
+        vec!["trip-packing"]
+    );
+    assert_eq!(
+        ipc::completions("@".into(), "sa".into()).unwrap(),
+        vec!["sam"]
+    );
+    let dentist = capture(&paths, "dentist thursday 2pm");
+    capture_store::promote::settle(&paths).unwrap();
+    ipc::make_page(dentist.clone()).unwrap();
+    assert!(
+        ipc::note(dentist.clone())
+            .unwrap()
+            .promotion
+            .is_some_and(|p| p.kind == "page")
+    );
+    assert_eq!(ipc::reread(dentist).unwrap(), "event");
+
     // ------------------------------------------------------- a day left open
     //
     // A Thursday beside a Friday's date: asked on both days, answered from the

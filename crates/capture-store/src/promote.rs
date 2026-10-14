@@ -384,12 +384,7 @@ pub fn reread(paths: &StorePaths, name: &str) -> Result<&'static str> {
         })
     })?;
     s.state.mark_read(&tgt, grammar, row.updated)?;
-    Ok(match as_ {
-        Promoted::Note => "note",
-        Promoted::Task(_) => "task",
-        Promoted::Event(_) => "event",
-        Promoted::Series(_) => "series",
-    })
+    Ok(as_.kind())
 }
 
 /// Read whatever has not been read, on a store nothing currently holds open.

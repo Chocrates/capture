@@ -822,12 +822,7 @@ pub fn as_task(name: String, due: Option<String>) -> std::result::Result<(), Str
 pub fn accept_suggestion(name: String) -> std::result::Result<String, String> {
     wire((|| {
         let as_ = capture_store::promote::accept(&paths()?, &name)?;
-        Ok(String::from(match as_ {
-            capture_core::body::Promoted::Note => "note",
-            capture_core::body::Promoted::Task(_) => "task",
-            capture_core::body::Promoted::Event(_) => "event",
-            capture_core::body::Promoted::Series(_) => "series",
-        }))
+        Ok(String::from(as_.kind()))
     })())
 }
 
@@ -853,6 +848,48 @@ pub fn settle_hour(name: String, pm: bool) -> std::result::Result<String, String
         use capture_store::mutate::Half;
         let half = if pm { Half::Pm } else { Half::Am };
         capture_store::mutate::settle_hour(&paths()?, &name, half)
+    })())
+}
+
+/// A page just started.
+#[derive(Serialize, Debug)]
+pub struct PageMade {
+    pub slug: String,
+    /// The name its title gave it, where that was free.
+    pub name: Option<String>,
+}
+
+/// Start a page with a title, optionally under another page. A page is never
+/// read for dates or types (pages, 2026-10-13).
+#[tauri::command]
+pub fn new_page(title: String, under: Option<String>) -> std::result::Result<PageMade, String> {
+    wire((|| {
+        let made = capture_store::pages::create(&paths()?, &title, under.as_deref())?;
+        Ok(PageMade {
+            slug: made.slug,
+            name: made.name,
+        })
+    })())
+}
+
+/// Make a capture a page. `reread` makes it a capture again.
+#[tauri::command]
+pub fn make_page(name: String) -> std::result::Result<(), String> {
+    wire((|| capture_store::pages::make(&paths()?, &name))())
+}
+
+/// What to offer after `[[`, `@`, `^` or `#` in the editor — the same read the
+/// phone's editor uses.
+#[tauri::command]
+pub fn completions(sigil: String, prefix: String) -> std::result::Result<Vec<String>, String> {
+    wire((|| {
+        let store = read_only()?;
+        Ok(
+            capture_store::pages::completions(&store, &sigil, &prefix, 8, now_ms())?
+                .into_iter()
+                .map(|c| c.insert)
+                .collect(),
+        )
     })())
 }
 
@@ -1470,17 +1507,6 @@ pub fn set_occurrence(name: String, occ: i64, done: bool) -> std::result::Result
     wire((|| {
         capture_store::mutate::set_occurrence_done(&paths()?, &name, occ, done)
     })())
-}
-
-/// Names beginning with what has been typed, for completing a link.
-///
-/// §4.3 specifies `[[` autocomplete, and the reason is that the alternative is
-/// worse than no linking at all: a slug ends in ten base32 characters nobody
-/// will retype, so writing a link by hand means going and finding the note to
-/// copy its name — which is the filing ritual §3.7 exists to avoid.
-#[tauri::command]
-pub fn names(prefix: String) -> std::result::Result<Vec<String>, String> {
-    wire((|| read_only()?.names_like(&prefix, 8))())
 }
 
 #[tauri::command]

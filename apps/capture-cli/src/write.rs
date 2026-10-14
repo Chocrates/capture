@@ -1032,6 +1032,29 @@ pub fn day(paths: StorePaths, name: &str, which: usize) -> Result<()> {
     Ok(())
 }
 
+/// Start a page.
+pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<()> {
+    let made = capture_store::pages::create(&paths, title, under)?;
+    match &made.name {
+        Some(name) => say!("Page [[{name}]] started. Write it with: capture edit {name}"),
+        None => say!(
+            "Page {} started; its title's name was already in use. Write it with: capture edit {}",
+            made.slug,
+            made.slug
+        ),
+    }
+    Ok(())
+}
+
+/// Make a capture a page: never read for dates or types again.
+pub fn make_page(paths: StorePaths, name: &str) -> Result<()> {
+    capture_store::pages::make(&paths, name)?;
+    say!(
+        "{name} is a page now. Nothing in it goes on the calendar; capture unpage {name} undoes it."
+    );
+    Ok(())
+}
+
 /// Take back a correction and let the text decide again.
 pub fn reread(paths: StorePaths, name: &str) -> Result<()> {
     let became = capture_store::promote::reread(&paths, name)?;

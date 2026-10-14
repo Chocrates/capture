@@ -1203,6 +1203,13 @@ function linkList(heading, items, render) {
 ///
 /// The editor replaces the text block rather than opening over it, so the note
 /// stays where it was on the page and Escape puts it back untouched.
+/** Show a page and open its editor, for one just started or just made. */
+async function openPageForWriting(name) {
+  await showNote(name);
+  const page = await call("note", { name });
+  editNote(page.note);
+}
+
 function editNote(n) {
   const box = document.querySelector(".text");
   if (!box) return;
@@ -1213,7 +1220,11 @@ function editNote(n) {
   // long one does not get a peephole.
   area.rows = Math.min(20, Math.max(3, area.value.split("\n").length + 1));
 
-  const hint = el("p", "hint", "⌘/Ctrl+Enter saves · Escape cancels · [[ links");
+  const hint = el(
+    "p",
+    "hint",
+    "⌘/Ctrl+Enter saves · Escape cancels · [[ page · @ person · ^ project · # tag · \"- \" checklist line",
+  );
   const suggestions = el("div", "completions");
   suggestions.hidden = true;
 
@@ -1231,13 +1242,27 @@ function editNote(n) {
   // Deliberately narrow. It gives up at a newline or a closing bracket, so a
   // note that merely contains brackets somewhere earlier does not put the
   // editor into a completion it cannot leave.
+  // `[[` runs to the caret; `@`, `^` and `#` run back to the start of the
+  // word (pages, 2026-10-13). The phone's editor keeps the same rule.
   const openLink = () => {
+    if (area.selectionStart !== area.selectionEnd) return null;
     const upto = area.value.slice(0, area.selectionStart);
     const at = upto.lastIndexOf("[[");
-    if (at < 0) return null;
-    const after = upto.slice(at + 2);
-    if (after.includes("]]") || after.includes("\n")) return null;
-    return { at, prefix: after };
+    if (at >= 0) {
+      const after = upto.slice(at + 2);
+      if (!after.includes("]]") && !after.includes("\n")) {
+        return { sigil: "[[", at, prefix: after };
+      }
+    }
+    let start = upto.length;
+    while (start > 0 && !/\s/.test(upto.charAt(start - 1))) start -= 1;
+    const word = upto.slice(start);
+    const sigil = word.charAt(0);
+    if (!["@", "^", "#"].includes(sigil)) return null;
+    const prefix = word.slice(1);
+    // A tag's list form is finished once its colon is typed.
+    if (prefix.includes(":")) return null;
+    return { sigil, at: upto.length - word.length, prefix };
   };
 
   let offers = [];
@@ -1258,8 +1283,9 @@ function editNote(n) {
     if (!open) return;
     const before = area.value.slice(0, open.at);
     const after = area.value.slice(area.selectionStart);
-    area.value = `${before}[[${name}]]${after}`;
-    const caret = before.length + name.length + 4;
+    const inserted = open.sigil === "[[" ? `[[${name}]]` : `${open.sigil}${name} `;
+    area.value = `${before}${inserted}${after}`;
+    const caret = before.length + inserted.length;
     area.setSelectionRange(caret, caret);
     offers = [];
     draw();
@@ -1273,7 +1299,7 @@ function editNote(n) {
       draw();
       return;
     }
-    offers = await call("names", { prefix: open.prefix });
+    offers = await call("completions", { sigil: open.sigil, prefix: open.prefix });
     chosen = 0;
     draw();
   };
@@ -1348,6 +1374,21 @@ function actions(n, into = view, promotion = null) {
   };
 
   add("Edit", () => editNote(n));
+
+  // A capture grown into a page stops being read for dates; while it is one,
+  // the way back is offered instead.
+  if (promotion && promotion.kind === "page") {
+    add("Make it a capture again", async () => {
+      const became = await call("reread", { name: n.slug });
+      toast(`A capture again: now ${became}.`);
+      showNote(n.slug);
+    });
+  } else {
+    add("Make this a page", async () => {
+      await call("make_page", { name: n.slug });
+      await openPageForWriting(n.slug);
+    });
+  }
 
   add("Tag", async () => {
     const tag = prompt("Tag:");
@@ -1918,6 +1959,18 @@ async function showWiki(at) {
       side.append(b);
     }
   };
+
+  // Start a page: a title names it and is its first line, and it opens for
+  // writing. A page is never read for dates or types (pages, 2026-10-13).
+  const start = el("button", "side-item new-page", "+ New page");
+  start.addEventListener("click", async () => {
+    const title = prompt("Title of the new page:");
+    if (!title || !title.trim()) return;
+    const made = await call("new_page", { title: title.trim(), under: null });
+    if (!made.name) toast(`That name was taken, so this page is called ${made.slug}.`);
+    await openPageForWriting(made.name || made.slug);
+  });
+  side.append(start);
 
   // Pages nest; the other three do not. A person is not under a project, and
   // arranging them as though they were would invent a relationship nobody

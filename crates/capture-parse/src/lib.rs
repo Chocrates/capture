@@ -622,6 +622,60 @@ pub struct List {
     pub items: alloc::vec::Vec<alloc::string::String>,
 }
 
+/// One checklist line of a page.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ChecklistLine {
+    /// The words after the marker.
+    pub item: alloc::string::String,
+    /// Written ticked: `[x]`.
+    pub done: bool,
+}
+
+/// The checklist lines of a page, in order (pages, 2026-10-13).
+///
+/// A line whose first non-space characters are `- `, `* `, `[ ]` or `[x]` —
+/// or markdown's `- [ ]` / `- [x]` — is an item. One item per line, which is
+/// how a list is written when it is a page rather than a capture, and the
+/// shape markdown's task lists have, so markdown later is a superset.
+///
+/// The marker needs its space: `-5 degrees`, `--verbose` and `*emphasis*` are
+/// prose. A marker with nothing after it is not an item.
+///
+/// Read only from pages. A capture is read by the recognizer and its lists are
+/// the comma form, [`list_of`].
+pub fn checklist_of(text: &str) -> alloc::vec::Vec<ChecklistLine> {
+    use alloc::string::ToString;
+    let mut out = alloc::vec::Vec::new();
+    for line in text.lines() {
+        let l = line.trim_start();
+        let (rest, bulleted) = match l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")) {
+            Some(r) => (r.trim_start(), true),
+            None => (l, false),
+        };
+        let (rest, done) = if let Some(r) = rest.strip_prefix("[ ]") {
+            (r, false)
+        } else if let Some(r) = rest
+            .strip_prefix("[x]")
+            .or_else(|| rest.strip_prefix("[X]"))
+        {
+            (r, true)
+        } else if bulleted {
+            (rest, false)
+        } else {
+            continue;
+        };
+        let item = rest.trim();
+        if item.is_empty() {
+            continue;
+        }
+        out.push(ChecklistLine {
+            item: item.to_string(),
+            done,
+        });
+    }
+    out
+}
+
 /// The separator between items.
 ///
 /// A comma, and only a comma. The tokenizer already treats one as a phrase
