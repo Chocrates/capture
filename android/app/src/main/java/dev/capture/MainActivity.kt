@@ -366,7 +366,9 @@ private fun App(
     // the gesture traps the person on the first screen.
     BackHandler(enabled = model.canGoBack) { model.back() }
 
-    Scaffold(bottomBar = { Bar(model) }) { padding ->
+    // No tabs while writing: on a phone held sideways with the keyboard up,
+    // the bar left the editor a sliver of a line (seen 2026-10-13).
+    Scaffold(bottomBar = { if (model.screen !is Screen.Editor) Bar(model) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             // Said out loud rather than left as a blank list. A screen that is
             // empty because something failed is indistinguishable from a

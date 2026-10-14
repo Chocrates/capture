@@ -81,17 +81,8 @@ fun Editor(note: NoteSummary?, model: Model) {
             Button({ model.saveText(note.slug, value.text) }, enabled = dirty) { Text("Save") }
         }
         HorizontalDivider()
-        OutlinedTextField(
-            value,
-            { value = it },
-            Modifier.fillMaxWidth().weight(1f).padding(8.dp),
-            textStyle = MaterialTheme.typography.bodyLarge,
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            placeholder = {
-                Text("Write. [[ links a page, @ a person, ^ a project, # a tag; \"- \" starts a checklist line.")
-            },
-        )
-        // Above the keyboard, where the thumb already is.
+        // Above the text, not below it: below, a phone held sideways with the
+        // keyboard up pushed them off screen (seen 2026-10-13).
         if (open != null && offers.isNotEmpty()) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp),
@@ -105,6 +96,16 @@ fun Editor(note: NoteSummary?, model: Model) {
                 }
             }
         }
+        OutlinedTextField(
+            value,
+            { value = it },
+            Modifier.fillMaxWidth().weight(1f).padding(8.dp),
+            textStyle = MaterialTheme.typography.bodyLarge,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            placeholder = {
+                Text("Write. [[ links a page, @ a person, ^ a project, # a tag; \"- \" starts a checklist line.")
+            },
+        )
     }
 
     if (leaving) {
