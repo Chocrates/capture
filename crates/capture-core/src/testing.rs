@@ -513,6 +513,7 @@ pub fn typed(seed: u64) -> Scenario {
                 pinned,
                 grammar: if pinned { None } else { Some(1) },
                 confidence: if pinned { None } else { Some(85) },
+                released: None,
             });
             events.push(devs[d].author(Kind::PROMOTE, Some(root), None, body, now));
         }

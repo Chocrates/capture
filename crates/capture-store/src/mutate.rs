@@ -468,15 +468,7 @@ impl Half {
 /// person wrote moves. Refused where there is no unclear hour, so a surface
 /// offering it on the wrong capture fails loudly instead of rewriting text.
 pub fn settle_hour(paths: &StorePaths, name: &str, half: Half) -> Result<String> {
-    let text = {
-        let store = crate::projection::current(paths)?;
-        let tgt = store
-            .resolve(name)?
-            .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
-        store
-            .text_of(&tgt)?
-            .ok_or_else(|| crate::Error::Usage(String::from("that capture has no readable text")))?
-    };
+    let (text, _) = written(paths, name)?;
 
     let Some(unclear) = capture_parse::unclear_hour(&text) else {
         return Err(crate::Error::Usage(String::from(
@@ -493,6 +485,50 @@ pub fn settle_hour(paths: &StorePaths, name: &str, half: Half) -> Result<String>
     // Read again now rather than at the next sweep. The point of answering is
     // the time it gives, and a surface that showed "every Mon" straight after
     // the answer "pm" would read as the answer not having taken.
+    crate::promote::settle(paths)?;
+    Ok(settled)
+}
+
+/// A capture's text, and where and when it was written, which is what every
+/// reading of it is made against.
+fn written(paths: &StorePaths, name: &str) -> Result<(String, crate::projection::NoteRow)> {
+    let store = crate::projection::current(paths)?;
+    let tgt = store
+        .resolve(name)?
+        .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+    let row = store
+        .note(&tgt)?
+        .ok_or_else(|| crate::Error::NotFound(name.to_string()))?;
+    let text = row
+        .text
+        .clone()
+        .ok_or_else(|| crate::Error::Usage(String::from("that capture has no readable text")))?;
+    Ok((text, row))
+}
+
+/// Answer "which of two days?" for a capture that left it open (grammar 9).
+///
+/// The same shape as [`settle_hour`]: the answer goes into the words. "next
+/// thursday" becomes "thursday oct 22", which reads back as that day, and the
+/// capture re-promotes from it. `which` is 0 for the earlier day, 1 for the
+/// later. Refused where nothing is asked — including where a person has pinned
+/// a promotion, which is an answer already.
+pub fn settle_day(paths: &StorePaths, name: &str, which: usize) -> Result<String> {
+    let (text, row) = written(paths, name)?;
+    let asked = crate::projection::current(paths)?.unclear_day_of(&row.tgt)?;
+    let zone = row
+        .tz
+        .as_deref()
+        .and_then(capture_time::Zone::new)
+        .unwrap_or_else(|| capture_time::Zone::new("UTC").expect("UTC is always present"));
+    let settled = asked
+        .and_then(|_| capture_parse::answer_day(&text, row.created.0 as i64, zone, which))
+        .ok_or_else(|| {
+            crate::Error::Usage(String::from(
+                "that capture is not asking which day it means",
+            ))
+        })?;
+    edit(paths, name, &settled)?;
     crate::promote::settle(paths)?;
     Ok(settled)
 }

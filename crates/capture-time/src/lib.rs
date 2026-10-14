@@ -120,6 +120,19 @@ impl FloatingDate {
         NaiveDate::from_ymd_opt(self.year, self.month as u32, self.day as u32)
     }
 
+    /// The day of the week, Monday zero, as [`next_weekday_on_or_after`] takes.
+    pub fn weekday(&self) -> Option<u8> {
+        Some(self.naive()?.weekday().num_days_from_monday() as u8)
+    }
+
+    /// The date some whole number of days away. Calendar days, so no zone.
+    pub fn plus_days(&self, days: i64) -> Option<FloatingDate> {
+        let moved = self
+            .naive()?
+            .checked_add_signed(chrono::Duration::days(days))?;
+        FloatingDate::new(moved.year(), moved.month() as u8, moved.day() as u8)
+    }
+
     /// `YYYY-MM-DD`, which is how it is stored.
     pub fn parse(s: &str) -> Option<FloatingDate> {
         let b = s.as_bytes();

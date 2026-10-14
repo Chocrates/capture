@@ -111,7 +111,11 @@ use crate::{Result, db};
 ///
 /// Version 15 gives each occurrence of a series with a length that length. The
 /// rows an older build wrote have no end, so they are rebuilt.
-pub const PROJECTION_SCHEMA: u32 = 15;
+///
+/// Version 16 adds `unclear_days`, derived from text on apply like mentions,
+/// and grammar 9 decides it — so a store built by an older grammar is rebuilt
+/// rather than asked the wrong questions.
+pub const PROJECTION_SCHEMA: u32 = 16;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -229,6 +233,20 @@ CREATE INDEX IF NOT EXISTS ambient_branch ON ambient(branch);
 -- part of what the note says and changes only when the text does. A redacted
 -- note has no text and so names nobody, which is what keeps a destroyed note's
 -- mentions off every entity page.
+-- A day the text leaves open between two (grammar 9, `capture_parse::UnclearDay`).
+--
+-- Derived from the words on apply, as mentions are, because the calendar has to
+-- ask on the two days the question concerns and the note has no promotion to
+-- put it on either. Read against the capture's own moment and zone, so every
+-- device derives the same row. `start`/`end` are the bytes to replace.
+CREATE TABLE IF NOT EXISTS unclear_days (
+  tgt    BLOB PRIMARY KEY,
+  first  TEXT NOT NULL,
+  second TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS unclear_days_first  ON unclear_days(first);
+CREATE INDEX IF NOT EXISTS unclear_days_second ON unclear_days(second);
+
 CREATE TABLE IF NOT EXISTS mentions (
   tgt   BLOB NOT NULL,
   sigil TEXT NOT NULL,
@@ -1849,6 +1867,47 @@ impl Store {
     /// promotes to nothing** — that is the whole purpose. Writing only on a
     /// promotion is what left ordinary captures queued for ever; see `read_by`
     /// in the schema for what that cost and why this is not in the log.
+    /// Notes asking which of two days they mean, where one of the two is
+    /// `date`. Not where a person pinned a promotion: they already answered.
+    pub fn unclear_days_on(&self, date: &str) -> Result<Vec<(EventId, [String; 2])>> {
+        let mut st = self.conn.prepare(
+            "SELECT u.tgt, u.first, u.second FROM unclear_days u
+               LEFT JOIN promotions p ON p.tgt = u.tgt
+              WHERE (u.first = ?1 OR u.second = ?1)
+                AND (p.tgt IS NULL OR p.pinned = 0)
+              ORDER BY u.tgt",
+        )?;
+        let rows = st.query_map(params![date], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                [r.get::<_, String>(1)?, r.get::<_, String>(2)?],
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (t, days) = row?;
+            if let Some(id) = id_from(t) {
+                out.push((id, days));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The two days one note asks between, if it asks. The same condition as
+    /// [`Store::unclear_days_on`].
+    pub fn unclear_day_of(&self, tgt: &EventId) -> Result<Option<[String; 2]>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT u.first, u.second FROM unclear_days u
+                   LEFT JOIN promotions p ON p.tgt = u.tgt
+                  WHERE u.tgt = ?1 AND (p.tgt IS NULL OR p.pinned = 0)",
+                params![tgt.0.to_vec()],
+                |r| Ok([r.get::<_, String>(0)?, r.get::<_, String>(1)?]),
+            )
+            .optional()?)
+    }
+
     pub fn mark_read(&self, tgt: &EventId, grammar: u32, at: (u64, u32)) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO read_by (tgt, grammar, wall, counter)
@@ -2932,6 +2991,8 @@ impl Store {
         // the capture they came from was destroyed.
         tx.execute("DELETE FROM mentions WHERE tgt = ?1", params![t])?;
         tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+        // Two days the text named. Not words, but derived from them.
+        tx.execute("DELETE FROM unclear_days WHERE tgt = ?1", params![t])?;
         // The expanded schedule, and what was written about single occurrences
         // of it. `title`, `location` and `notes` come from `OCC_EDIT` bodies the
         // purge has just destroyed, so leaving the rows is the same failure as
@@ -4147,6 +4208,7 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
         // the guard this skipped the delete too, so the withholding worked on a
         // note captured and queued in one breath and leaked on every real one.
         tx.execute("DELETE FROM list_items WHERE tgt = ?1", params![t])?;
+        tx.execute("DELETE FROM unclear_days WHERE tgt = ?1", params![t])?;
 
         // Everything derived from the words, under one condition.
         //
@@ -4174,6 +4236,20 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
             // that shortens a list does not leave the items it dropped behind —
             // which is why the delete is unconditional and sits above this
             // guard rather than in it.
+            // UTC where no zone was recorded, as the sweep reads it.
+            let zone =
+                n.tz.as_deref()
+                    .and_then(capture_time::Zone::new)
+                    .or_else(|| capture_time::Zone::new("UTC"));
+            if let Some(zone) = zone
+                && let Some(u) = capture_parse::unclear_day(text, n.created.wall as i64, zone)
+            {
+                tx.execute(
+                    "INSERT OR REPLACE INTO unclear_days (tgt, first, second) VALUES (?1,?2,?3)",
+                    params![t, u.choices[0].to_string(), u.choices[1].to_string()],
+                )?;
+            }
+
             if let Some(list) = capture_parse::list_of(text) {
                 let done = reconcile_ticks(&list.items, &n.item_ticks);
                 for (ord, item) in list.items.iter().enumerate() {

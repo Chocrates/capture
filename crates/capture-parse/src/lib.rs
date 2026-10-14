@@ -69,7 +69,10 @@ extern crate alloc;
 mod recognize;
 mod token;
 
-pub use recognize::{Markers, Recognition, Shape, UnclearHour, When, recognize};
+pub use recognize::{
+    Markers, Recognition, Shape, UnclearDay, UnclearHour, When, answer_day, day_in_words,
+    recognize, unclear_day,
+};
 pub use token::{Class, Token, tokenize};
 
 /// The version of the vocabulary, the grammar and the bands, together.
@@ -136,7 +139,14 @@ pub use token::{Class, Token, tokenize};
 /// read the `~1h` and dropped it, so every session had no end, while the same
 /// marker on a one-off event was kept. Captures parsed under 7 are read again so
 /// a series already written with a length gets it.
-pub const GRAMMAR_VERSION: u32 = 8;
+///
+/// Version 9 reads a weekday beside a date as that date, and asks rather than
+/// guesses which day is meant where the words leave two: "next thursday" said
+/// while this week's is still ahead, and a weekday beside a date that is a
+/// different day. "therapy Thursday 2026-10-22 at 4pm" was the coming
+/// Thursday, all day, with the date and the 4pm dropped. "last thursday" read
+/// as the coming one. See [`UnclearDay`].
+pub const GRAMMAR_VERSION: u32 = 9;
 
 /// The hour a capture gave without am or pm, if it gave one.
 ///

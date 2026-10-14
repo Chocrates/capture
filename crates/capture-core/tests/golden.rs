@@ -210,6 +210,7 @@ fn promote_task() -> PromoteBody {
         pinned: true,
         grammar: None,
         confidence: None,
+        released: None,
     }
 }
 
@@ -236,6 +237,7 @@ fn promote_series() -> PromoteBody {
         pinned: false,
         grammar: Some(1),
         confidence: Some(80),
+        released: None,
     }
 }
 
@@ -253,6 +255,7 @@ fn promote_all_day() -> PromoteBody {
         pinned: false,
         grammar: Some(1),
         confidence: Some(85),
+        released: None,
     }
 }
 
@@ -429,6 +432,7 @@ fn every_m2_body_round_trips() {
             pinned: true,
             grammar: None,
             confidence: None,
+            released: None,
         },
         PromoteBody
     );

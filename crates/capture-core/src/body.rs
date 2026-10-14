@@ -611,6 +611,19 @@ pub struct PromoteBody {
     /// captures later.
     #[n(4)]
     pub confidence: Option<u32>,
+    /// `Some(true)` where a person is giving up their correction.
+    ///
+    /// Found in use on 2026-10-13: a suggestion accepted by mistake pinned the
+    /// wrong day, and a pin outranks every parser promotion for ever, so the
+    /// text was corrected and nothing moved. A pin is a person's word, and only
+    /// a person's word can withdraw it — so this is written by a person, carries
+    /// a parser's reading of the text, and is not itself a pin: later parses
+    /// displace it as they would any parser promotion. See `apply_promote`.
+    ///
+    /// Added after the golden vectors; a trailing `None` is not encoded, so every
+    /// body that omits it is the bytes it always was.
+    #[n(5)]
+    pub released: Option<bool>,
 }
 
 /// What has to be true for an intent to fire.

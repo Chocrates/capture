@@ -5,7 +5,7 @@
 //! interesting question — did the store do the right thing — is then two
 //! layers and a language away from where it is answered.
 
-use capture_ffi::{Archive, Captured, Watching};
+use capture_ffi::{Archive, Captured, NoteKind, Watching};
 
 use capture_store::pairing::PORT as PAIRING_PORT;
 
@@ -1802,6 +1802,98 @@ fn a_bare_hour_is_asked_and_answered_from_the_phone() {
         a.settle_hour(slug.clone(), true).is_err(),
         "answering twice rewrote the text again"
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Days since 1970-01-01 for a `YYYY-MM-DD`, and back (Hinnant's algorithm),
+/// so a test can name a day relative to the archive's today.
+fn days_of(d: &str) -> i64 {
+    let (y, m, dd): (i64, i64, i64) = (
+        d[0..4].parse().unwrap(),
+        d[5..7].parse().unwrap(),
+        d[8..10].parse().unwrap(),
+    );
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dd - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn date_of(z: i64) -> String {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// "therapy thursday <a friday>" asks on both days from the phone, is
+/// answered by index, and a correction is taken back. Found in use on
+/// 2026-10-13, where the corrected therapy note could never move again.
+#[test]
+fn a_day_left_open_is_asked_on_the_phone_and_a_correction_taken_back() {
+    let root = scratch("day");
+    let a = Archive::open(root.clone()).unwrap();
+    // A Friday at least a week out. 1970-01-01 was a Thursday.
+    let today = days_of(&a.today());
+    let friday = (today + 7..).find(|d| (d + 3).rem_euclid(7) == 4).unwrap();
+    let thursday = date_of(friday - 1);
+    let friday = date_of(friday);
+    let Captured::Stored { slug } = a
+        .capture(format!("therapy thursday {friday} at 4pm"))
+        .unwrap()
+    else {
+        panic!("spooled with a writable store")
+    };
+    a.settle().unwrap();
+
+    let asked = a.unclear_day(slug.clone()).unwrap();
+    assert_eq!(asked.len(), 2);
+    assert!(
+        asked[0].starts_with("Thu ") && asked[1].starts_with("Fri "),
+        "{asked:?}"
+    );
+    for day in [&thursday, &friday] {
+        let entry = a
+            .agenda(day.clone())
+            .unwrap()
+            .into_iter()
+            .find(|e| e.slug == slug)
+            .unwrap_or_else(|| panic!("on {day}, asking"));
+        assert_eq!(entry.unclear_day, asked);
+        assert_eq!(entry.at, "which day?");
+    }
+
+    let text = a.settle_day(slug.clone(), 0).unwrap();
+    assert!(text.starts_with("therapy thursday "), "{text}");
+    assert!(a.unclear_day(slug.clone()).unwrap().is_empty());
+    let on_thursday = a.agenda(thursday.clone()).unwrap();
+    let entry = on_thursday
+        .iter()
+        .find(|e| e.slug == slug)
+        .expect("answered");
+    assert_eq!(entry.at, "16:00");
+    assert!(
+        a.agenda(friday.clone())
+            .unwrap()
+            .iter()
+            .all(|e| e.slug != slug)
+    );
+
+    assert!(!a.corrected(slug.clone()).unwrap());
+    assert!(a.reread(slug.clone()).is_err(), "nothing to take back");
+    a.set_kind(slug.clone(), NoteKind::Note).unwrap();
+    assert!(a.corrected(slug.clone()).unwrap());
+    assert_eq!(a.reread(slug.clone()).unwrap(), "event");
+    assert!(!a.corrected(slug.clone()).unwrap());
 
     std::fs::remove_dir_all(&root).ok();
 }

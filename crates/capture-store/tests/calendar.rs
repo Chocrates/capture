@@ -400,6 +400,15 @@ fn moving_by_text_reads_a_day_and_a_time() {
         .to_string();
     assert!(err.contains("2am") && err.contains("2pm"), "{err}");
 
+    // So is a day that could be either of two (grammar 9). From a Monday,
+    // "next thursday" is that week's or the one after.
+    let err = resolve_move(&store, &tgt, occ, "next thursday 10am", now(), zone())
+        .unwrap_err()
+        .to_string();
+    let label = capture_store::calendar::day_label;
+    assert!(err.contains(&label(thursday)), "{err}");
+    assert!(err.contains(&label(plus(thursday, 7))), "{err}");
+
     // Nothing readable is refused rather than read as now.
     assert!(resolve_move(&store, &tgt, occ, "whenever", now(), zone()).is_err());
 }
@@ -475,4 +484,25 @@ fn a_week_runs_monday_to_sunday() {
     assert_eq!((s.previous, s.next), (d("2026-10-08"), d("2026-10-22")));
     assert_eq!(weekday(d("2026-10-12")), 0, "Monday is zero");
     assert_eq!(weekday(d("2026-10-18")), 6);
+}
+
+/// "gym every monday at 2pm" written on a Monday evening. Found on the phone
+/// on 2026-10-13: the Monday it was written on had no mark.
+#[test]
+fn a_series_written_on_its_own_day_has_that_day() {
+    let scratch = Scratch::new("ownday");
+    let paths = scratch.paths();
+    let monday = a_monday();
+    let evening = capture_time::at_local(monday, 19, 45, zone()).unwrap();
+    let mut s = Session::open_at(paths.clone(), evening as u64).unwrap();
+    let body = capture_store::session::capture_body("gym every monday at 2pm").unwrap();
+    let slug = s.capture(&body).unwrap().slug;
+    drop(s);
+
+    let week = read(&paths, monday, plus(monday, 6));
+    assert!(
+        on(&week, monday).items.iter().any(|i| i.slug == slug),
+        "{:#?}",
+        on(&week, monday)
+    );
 }

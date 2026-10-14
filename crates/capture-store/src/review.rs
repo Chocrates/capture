@@ -238,6 +238,18 @@ pub struct Suggested {
     pub suggestion: Option<String>,
 }
 
+/// "This could be Thu 15 Oct or Thu 22 Oct", for a capture that left its day
+/// open (grammar 9).
+fn day_asked(s: &Session, tgt: &capture_core::EventId) -> Option<String> {
+    let [a, b] = s.state.unclear_day_of(tgt).ok().flatten()?;
+    let label = |d: &str| capture_time::FloatingDate::parse(d).map(crate::calendar::day_label);
+    Some(format!(
+        "This could be {} or {}, so it is on neither yet. Which did you mean?",
+        label(&a)?,
+        label(&b)?
+    ))
+}
+
 /// Open a review session: choose, read, and record that it was offered.
 pub fn open(paths: &StorePaths, now: i64) -> Result<Offered> {
     let mut s = Session::open(paths.clone())?;
@@ -245,11 +257,14 @@ pub fn open(paths: &StorePaths, now: i64) -> Result<Offered> {
 
     let items: Vec<Suggested> = chosen
         .iter()
-        .map(|i| Suggested {
+        .map(|i| {
+            Suggested {
             slug: i.note.slug.clone(),
+            // A day left open comes first: it is why nothing was promoted.
+            //
             // Only where nothing was promoted: once a note has a type, a
             // competing reading is noise rather than an offer.
-            suggestion: match (
+            suggestion: day_asked(&s, &i.note.tgt).or(match (
                 s.state.promotion_of(&i.note.tgt).ok().flatten(),
                 i.note.text.as_deref(),
             ) {
@@ -263,9 +278,10 @@ pub fn open(paths: &StorePaths, now: i64) -> Result<Offered> {
                     )
                 }),
                 _ => None,
-            },
+            }),
             text: i.note.text.clone(),
             because: i.because,
+        }
         })
         .collect();
 
@@ -315,24 +331,51 @@ pub fn suggestion_for(text: &str, tz: Option<&str>, now: i64) -> Option<String> 
         return None;
     }
 
+    let day = crate::calendar::day_label;
     let what = match &r.shape {
         capture_parse::Shape::Task { due: None } => String::from("a task"),
-        capture_parse::Shape::Task { due: Some(d) } => format!("a task due {d}"),
-        capture_parse::Shape::Point(capture_parse::When::Date(d)) => format!("something on {d}"),
+        capture_parse::Shape::Task { due: Some(d) } => format!("a task due {}", day(*d)),
+        // "All day" said, because that is what accepting writes: "something on
+        // 2026-10-15" read as agreeing with a text that said 4pm (2026-10-13).
+        capture_parse::Shape::Point(capture_parse::When::Date(d)) => {
+            format!("something all day on {}", day(*d))
+        }
         capture_parse::Shape::Point(capture_parse::When::Moment(ms)) => {
             let (h, m) = capture_time::civil_clock(*ms, zone);
             format!(
                 "something on {} at {h:02}:{m:02}",
-                capture_time::civil_date(*ms, zone)
+                day(capture_time::civil_date(*ms, zone))
             )
         }
-        capture_parse::Shape::Range { from, to } => format!("something from {from} to {to}"),
+        capture_parse::Shape::Range { from, to } => {
+            format!("something from {} to {}", day(*from), day(*to))
+        }
         capture_parse::Shape::Recurring { .. } => String::from("something recurring"),
         capture_parse::Shape::Nothing => return None,
     };
 
+    // A time in the text that this reading does not use. Accepting would drop
+    // it, and the person should know that before saying yes.
+    let timed = matches!(
+        r.shape,
+        capture_parse::Shape::Point(capture_parse::When::Moment(_))
+            | capture_parse::Shape::Recurring {
+                at_minute: Some(_),
+                ..
+            }
+    );
+    let unread = (!timed)
+        .then(|| {
+            capture_parse::tokenize(text)
+                .into_iter()
+                .find(|t| matches!(t.class, capture_parse::Class::Clock { .. }))
+                .map(|t| format!(" It did not read \"{}\".", t.text))
+        })
+        .flatten()
+        .unwrap_or_default();
+
     Some(format!(
-        "This might be {what} — {}% sure, which is under the bar for deciding on its own.",
+        "This might be {what} — {}% sure, which is under the bar for deciding on its own.{unread}",
         r.confidence
     ))
 }

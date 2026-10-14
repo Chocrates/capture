@@ -119,6 +119,8 @@ pub struct Recognition {
     pub grammar: u32,
     /// A bare hour that could have been either half of the clock.
     pub unclear_hour: Option<UnclearHour>,
+    /// A day the words leave two answers for.
+    pub unclear_day: Option<UnclearDay>,
 }
 
 /// An hour written without am or pm, which the recognizer will not guess.
@@ -134,6 +136,79 @@ pub struct UnclearHour {
     pub hour: u32,
     /// Byte offset just past the number, where `am` or `pm` would go.
     pub at: usize,
+}
+
+/// A day the words leave two answers for, which the recognizer will not pick.
+///
+/// Found in use on 2026-10-13. "therapy next thursday at 4pm", written on a
+/// Tuesday, was put on the 15th when the 22nd was meant; corrected to "therapy
+/// Thursday 2026-10-22 at 4pm", it was put on the 15th again, because a weekday
+/// in front of a date was read alone. Two readings arise:
+///
+/// - "next X" while this week's X is still ahead: this week's, or next week's.
+/// - A weekday beside a date it is not: the X nearest the date, or the date.
+///
+/// Neither is guessed, for the reason the bare hour is not (grammar 7): a guess
+/// right most of the time is noticed only on the day it is wrong. Nothing is
+/// promoted, and this records the two days and the words to replace.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnclearDay {
+    /// The two days, earlier first.
+    pub choices: [FloatingDate; 2],
+    /// Byte offset of the words that named the day.
+    pub start: usize,
+    /// Byte offset just past them.
+    pub end: usize,
+}
+
+/// The day a capture leaves open between two, read as the recognizer reads it.
+///
+/// Depends on the moment and zone it was written in, unlike [`crate::unclear_hour`]:
+/// whether "next thursday" is this week's depends on which day it was said.
+pub fn unclear_day(text: &str, now: i64, zone: Zone) -> Option<UnclearDay> {
+    recognize(text, now, zone).unclear_day
+}
+
+/// The text with its unclear day answered: the words that named the day
+/// replaced by ones that read back as choice `which` (0 or 1).
+///
+/// "therapy next thursday at 4pm" becomes "therapy thursday oct 22 at 4pm".
+/// The weekday is kept so the text still reads as written, and a weekday beside
+/// a date that agrees with it is one day (grammar 9).
+pub fn answer_day(text: &str, now: i64, zone: Zone, which: usize) -> Option<alloc::string::String> {
+    let u = unclear_day(text, now, zone)?;
+    use alloc::format;
+    let day = *u.choices.get(which)?;
+    Some(format!(
+        "{}{}{}",
+        &text[..u.start],
+        day_in_words(day, now, zone)?,
+        &text[u.end..]
+    ))
+}
+
+/// `thursday oct 22`, or `thursday 2026-10-22` where the shorter form would
+/// be read as another year from `now`.
+pub fn day_in_words(day: FloatingDate, now: i64, zone: Zone) -> Option<alloc::string::String> {
+    use alloc::format;
+    const DAYS: [&str; 7] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let weekday = DAYS[day.weekday()? as usize];
+    Some(if year_for(now, zone, day.month, day.day) == day.year {
+        format!("{weekday} {} {}", MONTHS[day.month as usize - 1], day.day)
+    } else {
+        format!("{weekday} {day}")
+    })
 }
 
 /// What kind of anchor a match found, which is what its band depends on.
@@ -248,6 +323,7 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
             markers,
             grammar: crate::GRAMMAR_VERSION,
             unclear_hour: None,
+            unclear_day: None,
         };
     }
 
@@ -267,9 +343,16 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
     // simply carries no date, and a task verb still reads as a task with none —
     // below the floor, so it offers rather than asserts.
     let mut unclear_hour = None;
+    let mut unclear_day = None;
     if markers.date.is_none()
-        && let Some((shape, confidence)) =
-            temporal(&tokens, now, zone, head_is_verb, &mut unclear_hour)
+        && let Some((shape, confidence)) = temporal(
+            &tokens,
+            now,
+            zone,
+            head_is_verb,
+            &mut unclear_hour,
+            &mut unclear_day,
+        )
     {
         return Recognition {
             shape,
@@ -277,6 +360,20 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
             markers,
             grammar: crate::GRAMMAR_VERSION,
             unclear_hour,
+            unclear_day: None,
+        };
+    }
+
+    // A day that could be either of two. Nothing about it is promoted, the
+    // verb included: a task due on one of two days is a guess too.
+    if unclear_day.is_some() {
+        return Recognition {
+            shape: Shape::Nothing,
+            confidence: 0,
+            markers,
+            grammar: crate::GRAMMAR_VERSION,
+            unclear_hour,
+            unclear_day,
         };
     }
 
@@ -293,6 +390,7 @@ pub fn recognize(text: &str, now: i64, zone: Zone) -> Recognition {
         markers,
         grammar: crate::GRAMMAR_VERSION,
         unclear_hour: None,
+        unclear_day: None,
     }
 }
 
@@ -369,6 +467,7 @@ fn temporal(
     zone: Zone,
     head_is_verb: bool,
     unclear: &mut Option<UnclearHour>,
+    day: &mut Option<UnclearDay>,
 ) -> Option<(Shape, u32)> {
     // Recurrence first: `every weekday at 7` also contains a weekday, and the
     // longer reading is the one meant.
@@ -382,7 +481,7 @@ fn temporal(
     // reading: a day into a due date. A range is a span of days and a
     // recurrence is a rule, and neither becomes a task by being introduced by a
     // verb — "review the docs every friday" is still a recurring obligation.
-    point(tokens, now, zone, head_is_verb, unclear)
+    point(tokens, now, zone, head_is_verb, unclear, day)
 }
 
 /// `every weekday at 7`, `each tuesday`, `daily`.
@@ -587,6 +686,7 @@ fn point(
     zone: Zone,
     head_is_verb: bool,
     unclear: &mut Option<UnclearHour>,
+    unclear_day: &mut Option<UnclearDay>,
 ) -> Option<(Shape, u32)> {
     for (i, t) in tokens.iter().enumerate() {
         if !guarded(tokens, t) {
@@ -618,40 +718,25 @@ fn point(
         // for a time of day starts after it. Without that the count in "in 3
         // weeks" is read as 03:00 — it follows a marker, which is exactly the
         // condition that makes a bare number a time.
-        let (anchor, consumed, kind) = match t.class {
-            Class::Weekday => (next_weekday(now, zone, t.text)?, 1, Anchor::Day),
+        let (anchor, mut consumed, kind) = match t.class {
+            // A weekday with a date beside it is that date, if they agree. The
+            // date is the more precise of the two, and reading the weekday
+            // alone dropped it — and the time after it — on the floor.
+            Class::Weekday => match paired(tokens, i, i, now, zone) {
+                Paired::Agrees(d, used) => (d, used, Anchor::CompleteDate),
+                Paired::Disagrees(u) => {
+                    *unclear_day = Some(u);
+                    return None;
+                }
+                Paired::Alone => (next_weekday(now, zone, t.text)?, 1, Anchor::Day),
+            },
             Class::DayWord => (day_word(now, zone, t.text)?, 1, Anchor::Day),
-            // A date written in full, as one token. Exactly as unambiguous as
-            // `sep 20` and read at the same band — it should not count as more
-            // certain just for being written in digits.
-            Class::IsoDate { year, month, day } => (
-                FloatingDate::new(year, month, day)?,
-                1,
-                Anchor::CompleteDate,
-            ),
-            Class::Month => {
-                let day = day_number(tokens.get(i + 1)?)?;
-                let month = month_number(t.text)?;
-                (
-                    FloatingDate::new(year_for(now, zone, month, day), month, day)?,
-                    2,
-                    Anchor::CompleteDate,
-                )
-            }
-            // The same date the other way round. Day-first is how most of the
-            // world writes one, and reading only `sep 20` means the form works
-            // silently for some people and not others.
-            //
-            // A month name has to follow, which is what keeps `in 3 weeks` out:
-            // no unit is a month.
-            Class::Number(n) => {
-                let month = month_number(tokens.get(i + 1)?.text)?;
-                let day = u8::try_from(n).ok()?;
-                (
-                    FloatingDate::new(year_for(now, zone, month, day), month, day)?,
-                    2,
-                    Anchor::CompleteDate,
-                )
+            // A date written in full, as one token, `sep 20`, or `20 sep`. A
+            // full date is exactly as unambiguous as `sep 20` and read at the
+            // same band; day-first is how most of the world writes one.
+            Class::IsoDate { .. } | Class::Month | Class::Number(_) => {
+                let (d, used) = complete_date(tokens, i, now, zone)?;
+                (d, used, Anchor::CompleteDate)
             }
             Class::Quarter(q) => {
                 // The coming one, by the same rule a bare "aug 14" follows.
@@ -687,13 +772,46 @@ fn point(
             Class::Determiner => {
                 let next = tokens.get(i + 1)?;
                 match next.class {
-                    Class::Weekday => (next_weekday(now, zone, next.text)?, 2, Anchor::Day),
+                    Class::Weekday => match paired(tokens, i, i + 1, now, zone) {
+                        // "next thursday oct 22": the date says which.
+                        Paired::Agrees(d, used) => (d, used, Anchor::CompleteDate),
+                        Paired::Disagrees(u) => {
+                            *unclear_day = Some(u);
+                            return None;
+                        }
+                        Paired::Alone => match relative(now, zone, t.text, next.text)? {
+                            Relative::Day(d) => (d, 2, Anchor::Day),
+                            Relative::Either(a, b) => {
+                                *unclear_day = Some(UnclearDay {
+                                    choices: [a, b],
+                                    start: t.start,
+                                    end: next.end,
+                                });
+                                return None;
+                            }
+                        },
+                    },
                     Class::Unit => (add_units(now, zone, 1, next.text)?, 2, Anchor::Offset),
                     _ => continue,
                 }
             }
             _ => continue,
         };
+
+        // "oct 22 thursday": the weekday after a date, which agrees or asks.
+        if t.class != Class::Weekday
+            && t.class != Class::Determiner
+            && kind == Anchor::CompleteDate
+            && let Some(w) = weekday_after(tokens, i + consumed)
+        {
+            let named = weekday_bit(tokens[w].text)?.trailing_zeros() as u8;
+            if anchor.weekday()? == named {
+                consumed = w + 1 - i;
+            } else {
+                *unclear_day = Some(disagreement(named, anchor, t.start, tokens[w].end)?);
+                return None;
+            }
+        }
 
         // A clock immediately after, or after a marker.
         let after = tokens.get(i + consumed);
@@ -761,6 +879,138 @@ fn point(
         return Some((Shape::Point(when), confidence));
     }
     None
+}
+
+/// A complete date starting at `i`: `2026-10-22`, `oct 22`, `22 oct`, and how
+/// many tokens it took.
+fn complete_date(
+    tokens: &[Token<'_>],
+    i: usize,
+    now: i64,
+    zone: Zone,
+) -> Option<(FloatingDate, usize)> {
+    let t = tokens.get(i)?;
+    match t.class {
+        Class::IsoDate { year, month, day } => Some((FloatingDate::new(year, month, day)?, 1)),
+        Class::Month => {
+            let day = day_number(tokens.get(i + 1)?)?;
+            let month = month_number(t.text)?;
+            Some((
+                FloatingDate::new(year_for(now, zone, month, day), month, day)?,
+                2,
+            ))
+        }
+        // A month name has to follow, which is what keeps `in 3 weeks` out: no
+        // unit is a month.
+        Class::Number(n) => {
+            let month = month_number(tokens.get(i + 1)?.text)?;
+            let day = u8::try_from(n).ok()?;
+            Some((
+                FloatingDate::new(year_for(now, zone, month, day), month, day)?,
+                2,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// What a weekday at `w` makes of a date directly after it.
+enum Paired {
+    /// The date is that weekday: the date, and the tokens used from `from`.
+    Agrees(FloatingDate, usize),
+    /// It is not.
+    Disagrees(UnclearDay),
+    /// No date follows.
+    Alone,
+}
+
+/// A weekday at `w`, the match having begun at `from`.
+fn paired(tokens: &[Token<'_>], from: usize, w: usize, now: i64, zone: Zone) -> Paired {
+    let mut j = w + 1;
+    if tokens.get(j).is_some_and(|t| t.class == Class::Break) {
+        j += 1;
+    }
+    let Some((date, used)) = complete_date(tokens, j, now, zone) else {
+        return Paired::Alone;
+    };
+    let Some(named) = weekday_bit(tokens[w].text).map(|b| b.trailing_zeros() as u8) else {
+        return Paired::Alone;
+    };
+    if date.weekday() == Some(named) {
+        return Paired::Agrees(date, j + used - from);
+    }
+    match disagreement(named, date, tokens[from].start, tokens[j + used - 1].end) {
+        Some(u) => Paired::Disagrees(u),
+        None => Paired::Alone,
+    }
+}
+
+/// A weekday directly after position `j`, or after one comma.
+fn weekday_after(tokens: &[Token<'_>], mut j: usize) -> Option<usize> {
+    if tokens.get(j)?.class == Class::Break {
+        j += 1;
+    }
+    (tokens.get(j)?.class == Class::Weekday).then_some(j)
+}
+
+/// The question for a weekday and a date that are different days: the named
+/// weekday nearest the date, or the date. Earlier first.
+fn disagreement(named: u8, date: FloatingDate, start: usize, end: usize) -> Option<UnclearDay> {
+    let delta = (named as i64 - date.weekday()? as i64).rem_euclid(7);
+    let delta = if delta > 3 { delta - 7 } else { delta };
+    let other = date.plus_days(delta)?;
+    let choices = if other < date {
+        [other, date]
+    } else {
+        [date, other]
+    };
+    Some(UnclearDay {
+        choices,
+        start,
+        end,
+    })
+}
+
+/// What a determiner makes of a weekday.
+enum Relative {
+    Day(FloatingDate),
+    Either(FloatingDate, FloatingDate),
+}
+
+/// "next thursday", "last thursday", "this thursday".
+///
+/// "next" is asked only while this week's is still ahead (weeks from Monday, as
+/// the calendar draws them): on a Tuesday, "next thursday" is this week's to
+/// some people and next week's to others. Once this week's has passed both
+/// readings are the coming one, and on the day itself both are a week away.
+/// "last" is the most recent before today. Every other determiner keeps the
+/// bare weekday's on-or-after, so "this thursday" said on a Thursday is today.
+fn relative(now: i64, zone: Zone, det: &str, word: &str) -> Option<Relative> {
+    let named = weekday_bit(word)?.trailing_zeros() as i64;
+    let today = today(now, zone).1;
+    let current = today.weekday()? as i64;
+    match det.to_ascii_lowercase().as_str() {
+        "next" => {
+            let days = match (named - current).rem_euclid(7) {
+                0 => 7,
+                n => n,
+            };
+            let coming = today.plus_days(days)?;
+            if current + days <= 6 {
+                Some(Relative::Either(coming, coming.plus_days(7)?))
+            } else {
+                Some(Relative::Day(coming))
+            }
+        }
+        "last" => {
+            let days = match (current - named).rem_euclid(7) {
+                0 => 7,
+                n => n,
+            };
+            Some(Relative::Day(today.plus_days(-days)?))
+        }
+        _ => Some(Relative::Day(next_weekday(now, zone, word)?)),
+    }
 }
 
 // ---------------------------------------------------------------- guards ----

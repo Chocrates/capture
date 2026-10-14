@@ -230,6 +230,13 @@ pub struct Note {
     /// searchable and surfaced.
     #[n(20)]
     pub promotion: Option<Promotion>,
+    /// The latest promotion a person wrote: a correction, or the giving up of
+    /// one. With [`Note::by_parser`], what decides [`Note::promotion`].
+    #[n(28)]
+    pub by_person: Option<Promotion>,
+    /// The latest promotion a parser wrote.
+    #[n(29)]
+    pub by_parser: Option<Promotion>,
     /// What review has done with this note.
     ///
     /// Counts of engagement, and nothing about memory. §2.7 withdrew the graded
@@ -963,6 +970,8 @@ fn apply_capture(
             tag_adds: Vec::new(),
             pinned: false,
             promotion: None,
+            by_person: None,
+            by_parser: None,
             review: ReviewState::default(),
             occurrences: BTreeMap::new(),
             item_ticks: Vec::new(),
@@ -1244,6 +1253,21 @@ fn apply_unflag(proj: &mut Projection, e: &Envelope) {
 ///
 /// So: a pinned promotion is never displaced by an unpinned one. Among
 /// promotions of equal authority, the later by HLC wins as everywhere else.
+///
+/// # And a person can take their word back
+///
+/// Found in use on 2026-10-13: a suggestion accepted by mistake pinned the
+/// wrong day, the text was then corrected, and nothing moved — nor could
+/// anything, since nothing outranks a pin. A *release* is a person's promotion
+/// that is not a pin (`PromoteBody::released`): it carries a parser's reading
+/// of the text, and it is the person's latest word, so it displaces their
+/// earlier correction. After it, parser promotions compete with it by plain
+/// recency, so the next edit re-promotes as if no correction had been made.
+///
+/// Kept as two last-write-wins registers — the person's latest and the
+/// parser's latest — with the promotion derived from both, so the answer is
+/// the same in every arrival order: a pin wins outright; a release competes
+/// with the parser by HLC; with neither, the parser's stands.
 fn apply_promote(proj: &mut Projection, e: &Envelope) {
     let Some(tgt) = e.header.tgt else { return };
     let Some(body) = e.body.as_ref() else { return };
@@ -1264,21 +1288,24 @@ fn apply_promote(proj: &mut Projection, e: &Envelope) {
         event: e.header.id(),
     };
 
-    let wins = match &n.promotion {
-        None => true,
-        Some(current) => match (current.pinned, incoming.pinned) {
-            // A human correction stands, however late the machine is.
-            (true, false) => false,
-            // A person overrules the parser whenever they say so.
-            (false, true) => true,
-            // Equal authority: ordinary last-write-wins.
-            _ => incoming.at > current.at,
-        },
+    let person = p.pinned || p.released == Some(true);
+    let register = if person {
+        &mut n.by_person
+    } else {
+        &mut n.by_parser
     };
-
-    if wins {
-        n.promotion = Some(incoming);
+    if register.as_ref().is_none_or(|c| incoming.at > c.at) {
+        *register = Some(incoming);
     }
+
+    n.promotion = match (&n.by_person, &n.by_parser) {
+        // A human correction stands, however late the machine is.
+        (Some(pin), _) if pin.pinned => Some(pin.clone()),
+        // A release, then: the person's last word, until the parser's is later.
+        (Some(released), Some(parsed)) if parsed.at > released.at => Some(parsed.clone()),
+        (Some(released), _) => Some(released.clone()),
+        (None, parsed) => parsed.clone(),
+    };
 }
 
 /// Record an if-then plan.
@@ -2425,6 +2452,7 @@ mod tests {
             pinned,
             grammar,
             confidence: None,
+            released: None,
         })
     }
 
@@ -2492,6 +2520,106 @@ mod tests {
             ),
             "the human's fields were replaced"
         );
+    }
+
+    /// Which promotion won, by the `order` each test body carries as a label.
+    fn label_of(set: &[Envelope], tgt: EventId) -> Option<u32> {
+        match &fold(set).notes[&tgt].promotion.as_ref()?.as_ {
+            crate::body::Promoted::Task(t) => t.order.map(|o| o as u32),
+            _ => None,
+        }
+    }
+
+    /// A promotion labelled `label`: a parser's, a pin, or a release.
+    fn labelled(pinned: bool, released: bool, label: u32) -> alloc::vec::Vec<u8> {
+        testing::encode(&crate::body::PromoteBody {
+            nonce: [label as u8; 16],
+            as_: crate::body::Promoted::Task(crate::body::TaskFields {
+                done: false,
+                due: None,
+                order: Some(label as _),
+            }),
+            pinned,
+            grammar: (!pinned).then_some(9),
+            confidence: None,
+            released: released.then_some(true),
+        })
+    }
+
+    #[test]
+    fn a_person_can_take_a_correction_back_in_any_arrival_order() {
+        // Found in use on 2026-10-13: a suggestion accepted by mistake pinned
+        // the wrong day and nothing could move it. A release is the person's
+        // later word; after it, the parser competes by recency again.
+        let s = testing::mixed(63, 1, 1, 0);
+        let tgt = s.notes[0];
+        let mut d = testing::Origin::new(9);
+        let at = |n: u64| 1_700_000_100_000 + n * 1000;
+        let parsed = d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            labelled(false, false, 1),
+            at(1),
+        );
+        let pin = d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            labelled(true, false, 2),
+            at(2),
+        );
+        let release = d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            labelled(false, true, 3),
+            at(3),
+        );
+        let edited = d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            labelled(false, false, 4),
+            at(4),
+        );
+
+        let orders: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let three = [parsed.clone(), pin.clone(), release.clone()];
+        for o in orders {
+            let mut set = s.events.clone();
+            set.extend(o.iter().map(|&i| three[i].clone()));
+            assert_eq!(
+                label_of(&set, tgt),
+                Some(3),
+                "the release stands, order {o:?}"
+            );
+
+            // A parse after the release — the next edit — is what shows.
+            set.push(edited.clone());
+            assert_eq!(label_of(&set, tgt), Some(4), "order {o:?}");
+            let p = fold(&set).notes[&tgt].promotion.clone().unwrap();
+            assert!(!p.pinned);
+        }
+
+        // And a correction made after the release is a pin again.
+        let again = d.author(
+            Kind::PROMOTE,
+            Some(tgt),
+            None,
+            labelled(true, false, 5),
+            at(5),
+        );
+        let mut set = s.events.clone();
+        set.extend([again, edited, release, pin, parsed]);
+        assert_eq!(label_of(&set, tgt), Some(5));
     }
 
     #[test]

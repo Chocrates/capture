@@ -338,6 +338,13 @@ fn a_destroyed_note_leaves_nothing_but_the_fact_of_itself() {
     reached.extend(before);
     survived.extend(after);
 
+    // A day left open between two (grammar 9). 2030-01-04 is a Friday, so a
+    // Thursday beside it is asked about whenever this runs.
+    let (before, after) =
+        destroy_and_measure("unclear", "dinner thursday 2030-01-04", |_, _, _| {});
+    reached.extend(before);
+    survived.extend(after);
+
     // A note that links to another, destroyed from the linking end, because
     // `links` is keyed by `src`.
     let (before, after) = destroy_and_measure(

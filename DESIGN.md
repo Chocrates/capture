@@ -1904,6 +1904,16 @@ day or the rule without a time and asks "7am or 7pm?", and the answer is an ordi
 inserts the meridiem. The guess this replaced read `at 7` as 07:00, which is right for a dog
 walk and put "gym every monday at 2" at 2 am.
 
+A day is treated the same way (grammar 9, 2026-10-13). A weekday beside a complete date —
+`thursday oct 22`, `Thursday 2026-10-22`, `oct 22, thursday` — is that date when the two agree,
+and asked when they do not ("Thu 22 Oct or Fri 23 Oct?"). `next thursday` is asked while this
+week's Thursday is still ahead, since it is this week's to some people and next week's to others;
+once it has passed, both readings are the coming one, and said on a Thursday it is a week away.
+`last thursday` is the most recent before today. An unclear day promotes nothing and is shown on
+both candidate days of the calendar; the answer rewrites the day in the text. And a correction —
+an accepted suggestion, a kind set by hand — can be taken back ("read it again"), because a pin
+outlives every edit and an accepted misreading otherwise could never move again.
+
 #### The guards, which matter more than the grammar
 
 A context-free grammar over this vocabulary would fire constantly on ordinary prose, and §3.1.3

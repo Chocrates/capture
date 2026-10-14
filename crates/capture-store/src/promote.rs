@@ -250,15 +250,7 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
         let Some(text) = note.text.as_deref() else {
             continue;
         };
-        let zone = note
-            .tz
-            .as_deref()
-            .and_then(Zone::new)
-            // A capture with no zone recorded is read in UTC rather than in
-            // whatever this machine happens to be set to. Reading it locally
-            // would make the same note parse differently on two devices, which
-            // is the property the whole parse path is arranged to avoid.
-            .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"));
+        let zone = zone_of(note.tz.as_deref());
 
         // Read against the moment it was captured, never against now.
         //
@@ -318,6 +310,7 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
                 pinned: false,
                 grammar: Some(grammar),
                 confidence: Some(r.confidence),
+                released: None,
             })
         })?;
         written += 1;
@@ -331,6 +324,72 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
     // "read 1 capture" and neither statement explains the other.
     s.read_at_open = read;
     Ok(written)
+}
+
+/// The zone a capture was written in.
+///
+/// A capture with no zone recorded is read in UTC rather than in whatever this
+/// machine happens to be set to. Reading it locally would make the same note
+/// parse differently on two devices, which is the property the whole parse
+/// path is arranged to avoid.
+fn zone_of(tz: Option<&str>) -> Zone {
+    tz.and_then(Zone::new)
+        .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"))
+}
+
+/// Undo a person's correction: read the text again, as the sweep would have.
+///
+/// Found in use on 2026-10-13. A suggestion accepted by mistake pinned an
+/// all-day entry on the wrong day; the text was then corrected and nothing
+/// moved, because a pin outlives every edit (§6), and no surface offered a way
+/// back. This is the way back. It writes what the current grammar reads from
+/// the text against its capture moment, or `note` where nothing temporal is
+/// read, as a *release*: a person's word that is not a pin, so it displaces the
+/// correction and later edits re-promote again (see the fold's
+/// `apply_promote`). The correction stays in the log; it is no longer the
+/// latest word.
+///
+/// Refused where the promotion is not a person's: there is nothing to undo, and
+/// a surface offering it there has asked the wrong question.
+///
+/// Answers what it became: `note`, `task`, `event` or `series`.
+pub fn reread(paths: &StorePaths, name: &str) -> Result<&'static str> {
+    let mut s = Session::open(paths.clone())?;
+    let tgt = crate::mutate::find(&s, name)?;
+    if !s.state.promotion_of(&tgt)?.is_some_and(|p| p.pinned) {
+        return Err(Error::Usage(String::from(
+            "that capture's reading is not a correction, so there is nothing to undo",
+        )));
+    }
+    let row = s
+        .state
+        .note(&tgt)?
+        .ok_or_else(|| Error::NotFound(name.to_string()))?;
+    let text = row
+        .text
+        .ok_or_else(|| Error::Usage(String::from("that note has no readable text")))?;
+    let zone = zone_of(row.tz.as_deref());
+    let captured = row.created.0 as i64;
+    let grammar = capture_parse::GRAMMAR_VERSION;
+    let r = capture_parse::recognize(&text, captured, zone);
+    let as_ = promoted_from(&r, zone, captured).unwrap_or(Promoted::Note);
+    s.append(Kind::PROMOTE, Some(tgt), None, |nonce| {
+        encode(&PromoteBody {
+            nonce,
+            as_: as_.clone(),
+            pinned: false,
+            grammar: Some(grammar),
+            confidence: Some(r.confidence),
+            released: Some(true),
+        })
+    })?;
+    s.state.mark_read(&tgt, grammar, row.updated)?;
+    Ok(match as_ {
+        Promoted::Note => "note",
+        Promoted::Task(_) => "task",
+        Promoted::Event(_) => "event",
+        Promoted::Series(_) => "series",
+    })
 }
 
 /// Read whatever has not been read, on a store nothing currently holds open.
@@ -392,6 +451,7 @@ pub fn correct(paths: &StorePaths, name: &str, as_: Promoted) -> Result<()> {
             // version here would make the sweep think a parser had.
             grammar: None,
             confidence: None,
+            released: None,
         })
     })?;
     Ok(())
@@ -467,11 +527,7 @@ pub fn accept(paths: &StorePaths, name: &str) -> Result<Promoted> {
     // UTC where no zone was recorded, for the reason the sweep gives: reading
     // it in this machine's zone would make one note parse differently on two
     // devices.
-    let zone = row
-        .tz
-        .as_deref()
-        .and_then(Zone::new)
-        .unwrap_or_else(|| Zone::new("UTC").expect("UTC is always present"));
+    let zone = zone_of(row.tz.as_deref());
     let captured = row.created.0 as i64;
 
     let r = capture_parse::recognize(&text, captured, zone);
@@ -499,6 +555,7 @@ pub fn accept(paths: &StorePaths, name: &str) -> Result<Promoted> {
             // work and reparse over it.
             grammar: None,
             confidence: None,
+            released: None,
         })
     })?;
 
@@ -744,6 +801,7 @@ pub fn split_series(paths: &StorePaths, name: &str, at_occ: i64, new_rule: RuleS
             pinned: true,
             grammar: None,
             confidence: None,
+            released: None,
         })
     })?;
 

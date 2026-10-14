@@ -149,6 +149,9 @@ pub struct Item {
     pub shift: Option<String>,
     /// An hour written without am or pm, which is why this has no time.
     pub unclear_hour: Option<u32>,
+    /// The two days the text could mean, of which this is one. Shown on both,
+    /// since it is on neither until somebody says (grammar 9).
+    pub unclear_day: Option<[capture_time::FloatingDate; 2]>,
     pub column: usize,
     pub columns: usize,
 }
@@ -272,6 +275,7 @@ fn day(
             tgt,
             slug: store.slug_of(&tgt)?.unwrap_or_default(),
             unclear_hour: crate::promote::asks_hour(text.as_deref(), promotion.as_ref()),
+            unclear_day: None,
             series: promotion.as_ref().is_some_and(|p| p.kind == "series"),
             text,
             kind,
@@ -312,6 +316,16 @@ fn day(
     for (tgt, done) in store.tasks_due_on(&iso)? {
         let mut i = item(tgt, ItemKind::Due, start)?;
         i.done = done;
+        items.push(i);
+    }
+
+    // Asked on both days, with the all-day things: it has no time until it has
+    // a day, and it cannot be found if it is on neither.
+    for (tgt, [first, second]) in store.unclear_days_on(&iso)? {
+        let mut i = item(tgt, ItemKind::AllDay, start)?;
+        i.unclear_day = capture_time::FloatingDate::parse(&first)
+            .zip(capture_time::FloatingDate::parse(&second))
+            .map(|(a, b)| [a, b]);
         items.push(i);
     }
 
@@ -417,6 +431,14 @@ pub fn resolve_move(
         let h = u.hour;
         return Err(Error::Usage(format!(
             "\"{h}\" could be {h}am or {h}pm — say which"
+        )));
+    }
+    if let Some(u) = r.unclear_day {
+        return Err(Error::Usage(format!(
+            "\"{}\" could be {} or {} — say which",
+            &text[u.start..u.end],
+            day_label(u.choices[0]),
+            day_label(u.choices[1])
         )));
     }
     let start = match r.shape {

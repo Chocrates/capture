@@ -501,6 +501,10 @@ pub struct AgendaEntry {
     pub title: Option<String>,
     /// An hour written without am or pm, which is why this has no time.
     pub unclear_hour: Option<u32>,
+    /// The two days the text could mean, as "Thu 15 Oct", where it left that
+    /// open; this entry is on both. Empty otherwise. Answered by index with
+    /// `settle_day`.
+    pub unclear_day: Vec<String>,
     /// When, as a person reads it: "14:00–15:00", "all day", "due".
     pub at: String,
     /// "moved from Mon 12 Oct 14:00", when it was.
@@ -526,6 +530,7 @@ impl AgendaEntry {
     fn of(i: capture_store::calendar::Item, zone: capture_time::Zone) -> AgendaEntry {
         use capture_store::calendar::ItemKind;
         let at = match i.kind {
+            ItemKind::AllDay if i.unclear_day.is_some() => String::from("which day?"),
             ItemKind::AllDay => String::from("all day"),
             ItemKind::Due => String::from("due"),
             ItemKind::Timed => match i.end_ms {
@@ -553,6 +558,10 @@ impl AgendaEntry {
             skipped: i.skipped,
             title: i.title,
             unclear_hour: i.unclear_hour,
+            unclear_day: i
+                .unclear_day
+                .map(|days| days.map(capture_store::calendar::day_label).to_vec())
+                .unwrap_or_default(),
         }
     }
 }
@@ -2000,6 +2009,58 @@ impl Archive {
             &name,
             half,
         )?)
+    }
+
+    /// The two days this note leaves open, as "Thu 15 Oct", or empty.
+    ///
+    /// Nothing is promoted while it asks, so this is the note page's whole
+    /// account of why it is on no single day (grammar 9).
+    pub fn unclear_day(&self, name: String) -> Result<Vec<String>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        Ok(store
+            .unclear_day_of(&tgt)?
+            .map(|days| {
+                days.iter()
+                    .map(|d| {
+                        capture_time::FloatingDate::parse(d)
+                            .map(capture_store::calendar::day_label)
+                            .unwrap_or_else(|| d.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Answer which day: `which` is 0 for the first of `unclear_day`, 1 for
+    /// the second. An ordinary edit; the note re-promotes before this returns.
+    pub fn settle_day(&self, name: String, which: u32) -> Result<String> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::mutate::settle_day(
+            &self.paths,
+            &name,
+            which as usize,
+        )?)
+    }
+
+    /// Whether what this note is was said by a person — accepted, or set by
+    /// hand — and so outlives every edit until taken back with `reread`.
+    pub fn corrected(&self, name: String) -> Result<bool> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
+        Ok(store.promotion_of(&tgt)?.is_some_and(|p| p.pinned))
+    }
+
+    /// Take back a correction: the text decides again, and edits move it.
+    ///
+    /// Answers what it became: `note`, `task`, `event` or `series`.
+    pub fn reread(&self, name: String) -> Result<String> {
+        let _w = self.write_lock()?;
+        Ok(capture_store::promote::reread(&self.paths, &name)?.to_string())
     }
 
     /// Take the reading the archive offered but would not act on.
