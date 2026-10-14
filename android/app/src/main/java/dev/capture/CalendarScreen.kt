@@ -9,13 +9,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
@@ -25,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,12 +69,7 @@ fun Agenda(day: String, model: Model, onTasks: () -> Unit, onOpen: (String) -> U
     // the list being re-read underneath it.
     var picked by remember { mutableStateOf<AgendaEntry?>(null) }
 
-    Column(Modifier.fillMaxSize()) {
-        Header(view, model.shape, day, onTasks, model)
-        if (view != null) {
-            Grid(view, model.shape, day, model::showDay)
-        }
-        HorizontalDivider()
+    val list = @Composable {
         DayList(
             label = view?.days?.firstOrNull { it.date == day }?.label ?: day,
             entries = model.agenda,
@@ -79,6 +77,28 @@ fun Agenda(day: String, model: Model, onTasks: () -> Unit, onOpen: (String) -> U
             onHour = model::settleHourHere,
             onDay = model::settleDayHere,
         )
+    }
+    // Held sideways, the grid beside the day rather than above it. Stacked, a
+    // landscape phone gave the grid the whole height and the day's list none:
+    // seen on 2026-10-13, the chosen day's entries were not on screen at all.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        if (maxWidth > maxHeight) {
+            Row(Modifier.fillMaxSize()) {
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    Header(view, model.shape, day, onTasks, model)
+                    if (view != null) Grid(view, model.shape, day, model::showDay)
+                }
+                VerticalDivider()
+                Column(Modifier.weight(1f)) { list() }
+            }
+        } else {
+            Column(Modifier.fillMaxSize()) {
+                Header(view, model.shape, day, onTasks, model)
+                if (view != null) Grid(view, model.shape, day, model::showDay)
+                HorizontalDivider()
+                list()
+            }
+        }
     }
 
     picked?.let { entry ->
@@ -186,7 +206,9 @@ private fun Cell(
     val colors = MaterialTheme.colorScheme
     Box(
         modifier
-            .aspectRatio(if (shape == CalendarShape.WEEK) 0.9f else 1.1f)
+            // A height, not an aspect ratio: a ratio grows with the width, and
+            // a phone held sideways drew cells a third of the screen tall.
+            .height(if (shape == CalendarShape.WEEK) 64.dp else 48.dp)
             .padding(2.dp)
             .then(
                 if (chosen) {
@@ -309,8 +331,8 @@ private fun EntryRow(
         // thursday" said on a Tuesday is this week's to some people and next
         // week's to others. Each button names the day it will write.
         if (entry.unclearDay.size == 2) {
+            // The row's time column already says "which day?".
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Which day?", style = MaterialTheme.typography.labelSmall)
                 entry.unclearDay.forEachIndexed { i, label ->
                     TextButton({ onDay(entry.slug, i.toUInt()) }) { Text(label) }
                 }
