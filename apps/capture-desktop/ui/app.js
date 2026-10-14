@@ -351,6 +351,20 @@ function agendaRow(r) {
     }
   }
 
+  // On both days it could mean, and on neither until answered. Each button
+  // names the day it will write into the text.
+  if (r.unclear_day && r.unclear_day.length === 2) {
+    row.append(el("span", "shift", "which day?"));
+    r.unclear_day.forEach((label, which) => {
+      const b = el("button", "act", label);
+      b.addEventListener("click", async () => {
+        await call("settle_day", { name: r.slug, which });
+        showAgenda(agendaDay);
+      });
+      row.append(b);
+    });
+  }
+
   // One occurrence, changed where it is shown (§3.5): move this one, skip it,
   // put it back, or change this and every later one.
   if (!r.due && (r.series || r.moved_from || r.skipped)) {
@@ -1049,7 +1063,7 @@ async function showNote(name, into = view) {
         toast(`Now a list: ${text}`);
       } else {
         const became = await call("accept_suggestion", { name: n.slug });
-        toast(`Taken as ${became}. No later reparse will change it.`);
+        toast(`Taken as ${became}. "Read it again" on this page undoes it.`);
       }
       showNote(n.slug);
     });
@@ -1073,6 +1087,38 @@ async function showNote(name, into = view) {
       });
       box.append(b);
     }
+    into.append(box);
+  }
+
+  // A day left open between two: on neither until answered.
+  if (page.unclear_day && page.unclear_day.length === 2) {
+    const box = el("div", "suggestion");
+    box.append(el("p", null, "Not on the calendar yet — this could be either day. Which?"));
+    page.unclear_day.forEach((label, which) => {
+      const b = el("button", "act", label);
+      b.addEventListener("click", async () => {
+        const text = await call("settle_day", { name: n.slug, which });
+        toast(`Now reads: ${text}`);
+        showNote(n.slug);
+      });
+      box.append(b);
+    });
+    into.append(box);
+  }
+
+  // A correction outlives every edit. That is the point of one, and it was a
+  // trap on 2026-10-13: an accepted suggestion held the wrong day through every
+  // fix to the text. So the way back is shown wherever one is in force.
+  if (page.promotion && page.promotion.pinned) {
+    const box = el("div", "suggestion");
+    box.append(el("p", null, "You set what this is, so editing the text will not change it."));
+    const b = el("button", "act", "Read it again from the text");
+    b.addEventListener("click", async () => {
+      const became = await call("reread", { name: n.slug });
+      toast(`Read again: now ${became}.`);
+      showNote(n.slug);
+    });
+    box.append(b);
     into.append(box);
   }
 

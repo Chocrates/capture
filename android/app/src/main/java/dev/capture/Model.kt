@@ -135,6 +135,14 @@ class Model(private val archive: Archive) : ViewModel() {
     /** An hour this note wrote without am or pm, to ask about. */
     var unclearHour by mutableStateOf<UInt?>(null)
         private set
+
+    /** The two days this note leaves open, as "Thu 15 Oct", or empty. */
+    var unclearDay by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /** What this note is was said by a person, so edits do not move it. */
+    var corrected by mutableStateOf(false)
+        private set
     var hits by mutableStateOf<List<NoteSummary>>(emptyList())
         private set
 
@@ -350,6 +358,8 @@ class Model(private val archive: Archive) : ViewModel() {
                 recording = archive.recordingOf(to.name)
                 suggestion = archive.suggestion(to.name)
                 unclearHour = archive.unclearHour(to.name)
+                unclearDay = archive.unclearDay(to.name)
+                corrected = archive.corrected(to.name)
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
@@ -445,6 +455,12 @@ class Model(private val archive: Archive) : ViewModel() {
     /** Answer "2am or 2pm?"; the note re-reads with its time. */
     fun settleHour(name: String, pm: Boolean) = after(name) { archive.settleHour(name, pm) }
 
+    /** Answer which of two days; the note re-reads on the day chosen. */
+    fun settleDay(name: String, which: UInt) = after(name) { archive.settleDay(name, which) }
+
+    /** Take back a correction, so the text decides again and edits move it. */
+    fun readAgain(name: String) = after(name) { archive.reread(name) }
+
     // --- entities ------------------------------------------------------------
     //
     // Re-read the page rather than patching it. A merge changes which notes the
@@ -491,6 +507,8 @@ class Model(private val archive: Archive) : ViewModel() {
         // suggesting, so the offer has to be re-asked rather than left up.
         suggestion = archive.suggestion(name)
         unclearHour = archive.unclearHour(name)
+        unclearDay = archive.unclearDay(name)
+        corrected = archive.corrected(name)
         // The lists behind this note are now stale in a way that is visible
         // the moment the back gesture happens.
         timeline = archive.timeline(100u)
@@ -710,6 +728,12 @@ class Model(private val archive: Archive) : ViewModel() {
 
     fun splitSeries(name: String, from: String, rule: String) = load {
         archive.splitSeries(name, from, rule)
+        reread()
+    }
+
+    /** Answer which day from a calendar row, and stay on the calendar. */
+    fun settleDayHere(name: String, which: UInt) = load {
+        archive.settleDay(name, which)
         reread()
     }
 

@@ -177,6 +177,15 @@ pub enum Command {
         name: String,
         pm: bool,
     },
+    /// Say which of two days a capture meant: 0 the earlier, 1 the later.
+    Day {
+        name: String,
+        which: usize,
+    },
+    /// Undo a correction: read the text again.
+    Reread {
+        name: String,
+    },
     /// Tick one item of a capture, by its number.
     TickAt {
         name: String,
@@ -768,6 +777,21 @@ where
                 problem: "give the note and am or pm: capture hour <note> pm".into(),
             }),
         },
+        // `capture day <note> 1|2`. Answers which of two days was meant, as
+        // `capture show` numbers them, by writing the day into the text.
+        "day" => match &args[1..] {
+            [name, n] if n == "1" || n == "2" => Ok(Command::Day {
+                name: name.clone(),
+                which: if n == "1" { 0 } else { 1 },
+            }),
+            _ => Err(Bad::Value {
+                command: "day".into(),
+                problem: "give the note and 1 or 2, as capture show numbers the days: capture day <note> 2".into(),
+            }),
+        },
+        // `capture reread <note>`. Takes back a correction — an accepted
+        // suggestion, a kind set by hand — so the text decides again.
+        "reread" => one_name(&args[1..], "reread", |name, _| Command::Reread { name }),
         "tick-at" | "untick-at" => {
             let done = args[0] == "tick-at";
             match &args[1..] {
@@ -1560,6 +1584,8 @@ TIME AND TASKS
   capture tick <tag> <item>      tick one off; untick puts it back
   capture fix-list <note>        insert the colon a list was missing
   capture hour <note> am|pm      say which half of the clock "at 2" meant
+  capture day <note> 1|2         say which of two days "next thursday" meant
+  capture reread <note>          take back a correction; the text decides again
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
                                (untick-at puts it back; use this where two
                                 items read the same)

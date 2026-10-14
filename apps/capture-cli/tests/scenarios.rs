@@ -1160,7 +1160,7 @@ fn a_page_says_what_the_note_was_recognised_as() {
         "a finished task did not say so: {after}"
     );
     assert!(
-        after.contains("(yours)"),
+        after.contains("(yours;"),
         "a human answer was not marked as one: {after}"
     );
 }
@@ -1876,6 +1876,60 @@ fn a_bare_hour_is_asked_and_answered() {
     let shown = s.ok(&["show", &slug]);
     assert!(shown.contains("14:00"), "{shown}");
     assert!(!shown.contains("2am or 2pm?"), "still asking: {shown}");
+}
+
+/// A day the words leave open is asked by `show` and answered by `capture
+/// day`; a correction is taken back by `capture reread`.
+///
+/// Found in use on 2026-10-13: "therapy Thursday 2026-10-22 at 4pm" read as
+/// the coming Thursday, all day, and accepting that pinned it there for good.
+/// 2030-01-04 is a Friday, so a Thursday beside it is asked about whenever
+/// this runs.
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_day_left_open_is_answered_and_a_correction_taken_back() {
+    let s = Store::new("day");
+    let slug = s.capture("therapy thursday 2030-01-04 at 4pm");
+
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("1) Thu 3 Jan"), "{shown}");
+    assert!(shown.contains("2) Fri 4 Jan"), "{shown}");
+    assert!(
+        shown.contains(&format!("capture day {slug} 1|2")),
+        "{shown}"
+    );
+    let json = s.ok(&["show", &slug, "--json"]);
+    assert!(
+        json.contains("\"unclear_day\":[\"2030-01-03\",\"2030-01-04\"]"),
+        "{json}"
+    );
+
+    let said = s.ok(&["day", &slug, "2"]);
+    assert!(said.contains("therapy friday 2030-01-04 at 4pm"), "{said}");
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("2030-01-04 16:00"), "{shown}");
+    assert!(!shown.contains("capture day"), "still asking: {shown}");
+
+    // Nothing to take back yet.
+    let (code, refused) = s.run(&["reread", &slug]);
+    assert!(
+        code != 0 && refused.contains("nothing to undo"),
+        "{refused}"
+    );
+
+    // A correction by hand, then taken back.
+    s.ok(&["task", &slug]);
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("(yours"), "{shown}");
+    assert!(
+        shown.contains(&format!("capture reread {slug}")),
+        "the way back is named: {shown}"
+    );
+    let said = s.ok(&["reread", &slug]);
+    assert!(said.contains("event"), "{said}");
+    let shown = s.ok(&["show", &slug]);
+    assert!(shown.contains("2030-01-04 16:00"), "{shown}");
+    assert!(!shown.contains("(yours"), "{shown}");
 }
 
 /// `capture cal` draws a month from the same read as every other surface.

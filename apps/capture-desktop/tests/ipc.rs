@@ -223,6 +223,45 @@ fn the_window_answers_what_the_store_holds() {
         "the answer did not time the series"
     );
 
+    // ------------------------------------------------------- a day left open
+    //
+    // A Thursday beside a Friday's date: asked on both days, answered from the
+    // window, and a correction taken back (found in use on 2026-10-13).
+    let zone = capture_time::Zone::new("America/Denver").unwrap();
+    let now = jiff::Timestamp::now().as_millisecond();
+    let friday = capture_time::next_weekday_on_or_after(now + 7 * 86_400_000, zone, 4).unwrap();
+    let thursday = friday.plus_days(-1).unwrap();
+    let therapy = capture(&paths, &format!("therapy thursday {friday} at 4pm"));
+    capture_store::promote::settle(&paths).unwrap();
+    let page = ipc::note(therapy.clone()).unwrap();
+    assert_eq!(page.unclear_day.len(), 2, "asked on the note page");
+    for day in [thursday, friday] {
+        let rows = ipc::agenda(day.to_string()).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.slug == therapy)
+            .unwrap_or_else(|| panic!("on {day}, asking"));
+        assert_eq!(row.unclear_day, page.unclear_day);
+    }
+    let text = ipc::settle_day(therapy.clone(), 1).expect("answering answers");
+    assert!(text.starts_with("therapy friday "), "{text}");
+    assert!(ipc::note(therapy.clone()).unwrap().unclear_day.is_empty());
+
+    capture_store::promote::correct(&paths, &therapy, capture_core::body::Promoted::Note).unwrap();
+    assert!(
+        ipc::note(therapy.clone())
+            .unwrap()
+            .promotion
+            .is_some_and(|p| p.pinned)
+    );
+    assert_eq!(ipc::reread(therapy.clone()).unwrap(), "event");
+    assert!(
+        ipc::note(therapy)
+            .unwrap()
+            .promotion
+            .is_some_and(|p| !p.pinned)
+    );
+
     // ------------------------------------------------------- one occurrence
     //
     // Sick on Monday: this one's gym goes to Thursday at 10, from the window.

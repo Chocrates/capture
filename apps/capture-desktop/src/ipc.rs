@@ -222,6 +222,8 @@ pub struct Page {
     pub suggestion: Option<String>,
     /// An hour written without am or pm, to ask about.
     pub unclear_hour: Option<u32>,
+    /// The two days the text leaves open, as "Thu 15 Oct", or empty.
+    pub unclear_day: Vec<String>,
 }
 
 /// What a note currently is, beside what was captured.
@@ -285,6 +287,23 @@ pub struct Occurrence {
     pub skipped: bool,
     /// An hour written without am or pm, which is why this has no time.
     pub unclear_hour: Option<u32>,
+    /// The two days the text could mean, as "Thu 15 Oct"; this row is on
+    /// both. Empty otherwise.
+    pub unclear_day: Vec<String>,
+}
+
+/// "Thu 15 Oct" for each of the two days a note leaves open.
+fn day_labels<D: AsRef<str>>(days: Option<[D; 2]>) -> Vec<String> {
+    days.map(|d| {
+        d.iter()
+            .map(|x| {
+                capture_time::FloatingDate::parse(x.as_ref())
+                    .map(capture_store::calendar::day_label)
+                    .unwrap_or_else(|| x.as_ref().to_string())
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// One cell of the month beside the day.
@@ -535,6 +554,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             promotion,
             suggestion,
             unclear_hour,
+            unclear_day: day_labels(s.unclear_day_of(&tgt)?),
         })
     })())
 }
@@ -833,6 +853,24 @@ pub fn settle_hour(name: String, pm: bool) -> std::result::Result<String, String
         use capture_store::mutate::Half;
         let half = if pm { Half::Pm } else { Half::Am };
         capture_store::mutate::settle_hour(&paths()?, &name, half)
+    })())
+}
+
+/// Answer which of two days, by writing it into the text. `which` is 0 for
+/// the first of `unclear_day`, 1 for the second.
+#[tauri::command]
+pub fn settle_day(name: String, which: usize) -> std::result::Result<String, String> {
+    wire((|| {
+        capture_store::mutate::settle_day(&paths()?, &name, which)
+    })())
+}
+
+/// Take back a correction: the text decides again, and edits move it.
+/// Answers what it became.
+#[tauri::command]
+pub fn reread(name: String) -> std::result::Result<String, String> {
+    wire((|| {
+        capture_store::promote::reread(&paths()?, &name).map(String::from)
     })())
 }
 
@@ -1206,6 +1244,7 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 moved_from: i.moved_from,
                 skipped: i.skipped,
                 unclear_hour: i.unclear_hour,
+                unclear_day: day_labels(i.unclear_day.map(|d| d.map(|x| x.to_string()))),
             })
             .collect();
 
@@ -1237,6 +1276,7 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                     moved_from: None,
                     skipped: false,
                     unclear_hour: None,
+                    unclear_day: Vec::new(),
                 });
             }
         }
@@ -2111,6 +2151,7 @@ mod tests {
             moved_from: None,
             skipped: false,
             unclear_hour: None,
+            unclear_day: Vec::new(),
         }
     }
 

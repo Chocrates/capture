@@ -1023,6 +1023,22 @@ pub fn hour(paths: StorePaths, name: &str, pm: bool) -> Result<()> {
     Ok(())
 }
 
+/// Say which of two days a capture meant, by writing it into the text.
+pub fn day(paths: StorePaths, name: &str, which: usize) -> Result<()> {
+    let settled = capture_store::mutate::settle_day(&paths, name, which)?;
+    say!("Now reads:");
+    say!();
+    say!("  {settled}");
+    Ok(())
+}
+
+/// Take back a correction and let the text decide again.
+pub fn reread(paths: StorePaths, name: &str) -> Result<()> {
+    let became = capture_store::promote::reread(&paths, name)?;
+    say!("{name}: read again from its text; it is now {became}, and an edit will move it.");
+    Ok(())
+}
+
 /// Insert the character a capture was missing to be a list.
 ///
 /// Says what it did, because it changed what somebody wrote. Accepting a type

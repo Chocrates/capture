@@ -43,6 +43,8 @@ fn main() {
             ipc::as_task,
             ipc::fix_list,
             ipc::settle_hour,
+            ipc::settle_day,
+            ipc::reread,
             ipc::month,
             ipc::preview_move,
             ipc::move_occurrence,

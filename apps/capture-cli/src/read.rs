@@ -1492,11 +1492,13 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     let links = store.links_from(&n.tgt)?;
     let backlinks = store.links_to(&n.tgt)?;
     let unclear_hour = capture_store::promote::asks_hour(n.text.as_deref(), promotion.as_ref());
+    let unclear_day = store.unclear_day_of(&n.tgt)?;
     answer(
         &Page {
             note: n,
             promotion,
             unclear_hour,
+            unclear_day,
             links,
             backlinks,
             now: now_ms() as u64,
@@ -1506,12 +1508,21 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// "Thu 15 Oct" for a stored date, or the date as stored if it is not one.
+fn labelled_day(d: &str) -> String {
+    capture_time::FloatingDate::parse(d)
+        .map(capture_store::calendar::day_label)
+        .unwrap_or_else(|| d.to_string())
+}
+
 /// One note in full: its fields, what it was recognised as, and its links.
 struct Page {
     note: NoteRow,
     promotion: Option<projection::PromotionRow>,
     /// An hour written without am or pm, which the promotion left untimed.
     unclear_hour: Option<u32>,
+    /// Two days the text could mean, which is why nothing was promoted.
+    unclear_day: Option<[String; 2]>,
     links: Vec<LinkRow>,
     backlinks: Vec<Backlink>,
     now: u64,
@@ -1523,6 +1534,7 @@ impl View for Page {
             note: n,
             promotion,
             unclear_hour,
+            unclear_day,
             links,
             backlinks,
             now,
@@ -1548,6 +1560,13 @@ impl View for Page {
         note(n, *now).and([
             ("promotion", promotion),
             ("unclear_hour", (*unclear_hour).into()),
+            (
+                "unclear_day",
+                match unclear_day {
+                    Some(days) => arr(days.iter().map(|d| Json::from(d.as_str()))),
+                    None => Json::Null,
+                },
+            ),
             ("links", arr(links.iter().map(link_json))),
             ("backlinks", arr(backlinks.iter().map(backlink_json))),
         ])
@@ -1558,6 +1577,7 @@ impl View for Page {
             note: n,
             promotion,
             unclear_hour,
+            unclear_day,
             links,
             backlinks,
             ..
@@ -1605,7 +1625,13 @@ impl View for Page {
                 .strip_prefix(&p.kind)
                 .map(|r| r.strip_prefix(" · ").unwrap_or(r))
                 .unwrap_or(&p.descriptor);
-            let authored = if p.pinned { "  (yours)" } else { "" };
+            // Yours, and how to take it back: a correction outlives every
+            // edit, so a mistaken one has to be undone by name (2026-10-13).
+            let authored = if p.pinned {
+                format!("  (yours; capture reread {} to undo)", n.slug)
+            } else {
+                String::new()
+            };
             if rest.is_empty() {
                 say!("{}{}", p.kind, authored);
             } else {
@@ -1617,6 +1643,15 @@ impl View for Page {
         // missing its time and this is why.
         if let Some(h) = unclear_hour {
             say!("time      {h}am or {h}pm?  capture hour {} am|pm", n.slug);
+        }
+        // Where the promotion would be, because this is why there is none.
+        if let Some([a, b]) = unclear_day {
+            say!(
+                "day       1) {}  or  2) {}?  capture day {} 1|2",
+                labelled_day(a),
+                labelled_day(b),
+                n.slug
+            );
         }
 
         say!("captured  {}", stamp(n.created.0, n.tz.as_deref()));
@@ -2322,6 +2357,7 @@ impl View for Cal {
                 title,
                 shift,
                 unclear_hour,
+                unclear_day,
                 column: _, // layout for an hour axis; nothing here draws one
                 columns: _,
             } = i;
@@ -2347,6 +2383,13 @@ impl View for Cal {
                 ("title", title.into()),
                 ("shift", shift.into()),
                 ("unclear_hour", (*unclear_hour).into()),
+                (
+                    "unclear_day",
+                    match unclear_day {
+                        Some(days) => arr(days.iter().map(|d| Json::from(d.to_string()))),
+                        None => Json::Null,
+                    },
+                ),
             ])
         };
         obj([
@@ -2438,6 +2481,15 @@ impl View for Cal {
                 }
                 if let Some(h) = i.unclear_hour {
                     notes.push(format!("{h}am or {h}pm? capture hour {} am|pm", i.slug));
+                }
+                if let Some([a, b]) = i.unclear_day {
+                    let label = capture_store::calendar::day_label;
+                    notes.push(format!(
+                        "{} or {}? capture day {} 1|2",
+                        label(a),
+                        label(b),
+                        i.slug
+                    ));
                 }
                 let notes = if notes.is_empty() {
                     String::new()

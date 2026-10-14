@@ -77,6 +77,7 @@ fun Agenda(day: String, model: Model, onTasks: () -> Unit, onOpen: (String) -> U
             entries = model.agenda,
             onPick = { picked = it },
             onHour = model::settleHourHere,
+            onDay = model::settleDayHere,
         )
     }
 
@@ -226,6 +227,7 @@ private fun DayList(
     entries: List<AgendaEntry>,
     onPick: (AgendaEntry) -> Unit,
     onHour: (String, Boolean) -> Unit,
+    onDay: (String, UInt) -> Unit,
 ) {
     val allDay = entries.filter { it.allDay && !it.due && !it.skipped }
     val due = entries.filter { it.due }
@@ -245,11 +247,11 @@ private fun DayList(
         }
         if (allDay.isNotEmpty()) {
             item { Band("All day") }
-            items(allDay) { EntryRow(it, onPick, onHour) }
+            items(allDay) { EntryRow(it, onPick, onHour, onDay) }
         }
         if (due.isNotEmpty()) {
             item { Band("Due") }
-            items(due) { EntryRow(it, onPick, onHour) }
+            items(due) { EntryRow(it, onPick, onHour, onDay) }
         }
         if (timed.isNotEmpty()) {
             item { Band("During the day") }
@@ -259,13 +261,18 @@ private fun DayList(
         }
         if (skipped.isNotEmpty()) {
             item { Band("Skipped") }
-            items(skipped) { EntryRow(it, onPick, onHour) }
+            items(skipped) { EntryRow(it, onPick, onHour, onDay) }
         }
     }
 }
 
 @Composable
-private fun EntryRow(entry: AgendaEntry, onPick: (AgendaEntry) -> Unit, onHour: (String, Boolean) -> Unit) {
+private fun EntryRow(
+    entry: AgendaEntry,
+    onPick: (AgendaEntry) -> Unit,
+    onHour: (String, Boolean) -> Unit,
+    onDay: (String, UInt) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -296,6 +303,17 @@ private fun EntryRow(entry: AgendaEntry, onPick: (AgendaEntry) -> Unit, onHour: 
                 )
                 TextButton({ onHour(entry.slug, false) }) { Text("${h}am") }
                 TextButton({ onHour(entry.slug, true) }) { Text("${h}pm") }
+            }
+        }
+        // On both days it could mean, and on neither until answered: "next
+        // thursday" said on a Tuesday is this week's to some people and next
+        // week's to others. Each button names the day it will write.
+        if (entry.unclearDay.size == 2) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Which day?", style = MaterialTheme.typography.labelSmall)
+                entry.unclearDay.forEachIndexed { i, label ->
+                    TextButton({ onDay(entry.slug, i.toUInt()) }) { Text(label) }
+                }
             }
         }
     }

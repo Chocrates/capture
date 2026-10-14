@@ -327,6 +327,30 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                     TextButton({ model.settleHour(note.slug, true) }) { Text("${h}pm") }
                 }
             }
+            // A day left open between two. On neither until answered, so this
+            // says so; each button names the day it will write into the text.
+            if (model.unclearDay.size == 2) {
+                Text(
+                    "Not on the calendar yet — this could be either day. Which?",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Row {
+                    model.unclearDay.forEachIndexed { i, label ->
+                        TextButton({ model.settleDay(note.slug, i.toUInt()) }) { Text(label) }
+                    }
+                }
+            }
+            // A correction outlives every edit, which is the point of one and
+            // was a trap on 2026-10-13: a suggestion accepted by mistake held
+            // the wrong day through every fix to the text. So the way back is
+            // shown wherever a correction is in force.
+            if (model.corrected) {
+                Text(
+                    "You set what this is, so editing the text will not change it.",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                TextButton({ model.readAgain(note.slug) }) { Text("Read it again from the text") }
+            }
             recording?.let { Listen(it, model) }
         }
         HorizontalDivider()
