@@ -3298,7 +3298,8 @@ fn read_as(
             })
             .collect();
     }
-    s.list_tag = tag;
+    // A page's checklist sits under no tag, and has no tag-wide view to offer.
+    s.list_tag = tag.filter(|t| !t.is_empty());
     Ok(s)
 }
 

@@ -1915,6 +1915,7 @@ fn a_page_is_written_and_ticked_from_the_phone() {
 
     let page = a.note(made.slug.clone()).unwrap();
     assert_eq!(page.kind, "page", "an edit re-read it");
+    assert_eq!(page.list_tag, None, "a page offered everything on #");
     let lines: Vec<(String, bool)> = page
         .items
         .iter()
