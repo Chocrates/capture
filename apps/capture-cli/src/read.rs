@@ -2030,9 +2030,10 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     // only the overdue would answer the question with silence, which is what
     // they were already looking at.
     const AHEAD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-    let found = store.due_by(now + AHEAD_MS, now, &zone)?;
-
     let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
+    let lead = capture_store::notifier::lead_ms(&ops)?;
+    let found = store.announce_by(now + AHEAD_MS, now, &zone, lead)?;
+
     let hour = hour_of(now, &zone);
 
     let mut rows = Vec::new();
@@ -2117,6 +2118,7 @@ impl View for DueList {
                 occ,
                 text,
                 timed,
+                ahead,
             } = d;
             let (state, held_to) = match state {
                 Will::Delivered => ("delivered", None),
@@ -2130,6 +2132,8 @@ impl View for DueList {
                 ("at", at.into()),
                 ("occ", (*occ).into()),
                 ("timed", (*timed).into()),
+                // A warning that far ahead of the moment; zero for the moment.
+                ("ahead_ms", (*ahead).into()),
                 ("text", text.into()),
                 // What it will do. The whole of what this command is for, and
                 // the JSON listed the moments without it.
@@ -2176,7 +2180,12 @@ impl View for DueList {
                 Will::Stale => "too late to say".to_string(),
             };
             let when = capture_time::local_of(d.at, *zone).format("%a %H:%M");
-            say!("  {:<13} {:<10} {}", state, when.to_string(), d.text);
+            let text = if d.ahead > 0 {
+                capture_store::notifier::warning(&d.text, d.ahead)
+            } else {
+                d.text.clone()
+            };
+            say!("  {:<13} {:<10} {}", state, when.to_string(), text);
         }
 
         let overdue = rows.iter().filter(|r| r.d.at <= *now).count();

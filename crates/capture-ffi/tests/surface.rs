@@ -2105,3 +2105,41 @@ fn a_month_view_is_ready_to_draw() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A timed moment is warned of before it comes, by the lead this phone keeps
+/// (alerts you cannot miss, 2026-10-14).
+#[test]
+fn the_phone_is_warned_ahead_by_its_own_lead() {
+    let root = scratch("lead");
+    let a = Archive::open(root.clone()).unwrap();
+    assert_eq!(a.alert_lead_minutes().unwrap(), 15, "the default");
+    a.set_alert_lead_minutes(60).unwrap();
+    assert_eq!(a.alert_lead_minutes().unwrap(), 60);
+
+    let slug = match a.capture("dentist tomorrow at 3pm".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled with a writable store"),
+    };
+    let mine: Vec<(i64, u32)> = a
+        .due(3 * 24 * 60 * 60 * 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.slug == slug)
+        .map(|d| (d.at_ms, d.ahead_min))
+        .collect();
+    assert_eq!(mine.len(), 2, "{mine:?}");
+    assert_eq!(mine[0].1, 60, "the warning comes first");
+    assert_eq!(mine[1].1, 0);
+    assert_eq!(mine[1].0 - mine[0].0, 60 * 60 * 1000);
+
+    a.set_alert_lead_minutes(0).unwrap();
+    let after = a
+        .due(3 * 24 * 60 * 60 * 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.slug == slug)
+        .count();
+    assert_eq!(after, 1, "a lead of nothing still warned");
+
+    std::fs::remove_dir_all(&root).ok();
+}

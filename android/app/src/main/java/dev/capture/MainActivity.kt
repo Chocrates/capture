@@ -431,6 +431,8 @@ private fun App(
                     onPair = { model.go(Screen.Pairing) },
                     permits = permits,
                     onPermit = onPermit,
+                    leadMin = model.leadMin,
+                    onLead = { model.setLead(context, it) },
                 )
                 is Screen.Review -> ReviewSession(
                     model.offered,

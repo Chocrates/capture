@@ -1,12 +1,15 @@
 package dev.capture
 
 import android.app.AlarmManager
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import uniffi.capture_ffi.Alert
@@ -33,6 +36,54 @@ import uniffi.capture_ffi.Alert
 object Alarms {
 
     const val CHANNEL = "alerts"
+
+    /**
+     * Where a moment with a time of day is said: loudly, and until answered.
+     *
+     * Asked for on 2026-10-13 — "louder and more obnoxious". The `alerts`
+     * channel played one default notification sound with vibration off, so a
+     * phone on vibrate said nothing at all about a 2pm appointment.
+     *
+     * A new id rather than changing `alerts`, because a channel's sound and
+     * vibration are fixed once it exists. The alarm stream follows the alarm
+     * volume, which is up when the ringer is not, and plays through vibrate.
+     * A day-only moment stays on [CHANNEL]: a task due today announcing itself
+     * like an alarm at every batch is pressure, not a reminder.
+     */
+    const val LOUD = "alarms"
+
+    private fun channels(manager: NotificationManager) {
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL, "Alerts", NotificationManager.IMPORTANCE_HIGH),
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(LOUD, "Timed alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Something with a time: before it, and when it starts."
+                setSound(
+                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                        ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                )
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 600, 300, 600, 300, 600)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            },
+        )
+    }
+
+    /**
+     * Repeat the sound until somebody dismisses or opens it.
+     *
+     * One ring is what was missed. `FLAG_INSISTENT` is the platform's own
+     * "until answered", and it stops on swipe, tap or a newer post with the
+     * same id — so the moment itself, posted under its warning's id, replaces
+     * a warning nobody answered rather than ringing over it.
+     */
+    private fun insistent(n: Notification): Notification =
+        n.apply { flags = flags or Notification.FLAG_INSISTENT }
 
     /**
      * How many can arrive separately before they arrive together.
@@ -287,9 +338,9 @@ object Alarms {
     private fun summarise(context: Context, alerts: List<Alert>): Boolean {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return false
         if (!manager.areNotificationsEnabled()) return false
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Alerts", NotificationManager.IMPORTANCE_HIGH),
-        )
+        channels(manager)
+        // Loud if any of them named a time: one of them is happening.
+        val channel = if (alerts.any { it.timed }) LOUD else CHANNEL
 
         val open = PendingIntent.getActivity(
             context,
@@ -304,16 +355,17 @@ object Alarms {
         for (a in alerts.take(5)) style.addLine(a.text)
         if (alerts.size > 5) style.setSummaryText("and ${alerts.size - 5} more")
 
+        val built = NotificationCompat.Builder(context, channel)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("${alerts.size} things were due")
+            .setContentText(alerts.first().text)
+            .setStyle(style)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
         manager.notify(
             "summary".hashCode(),
-            NotificationCompat.Builder(context, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("${alerts.size} things were due")
-                .setContentText(alerts.first().text)
-                .setStyle(style)
-                .setContentIntent(open)
-                .setAutoCancel(true)
-                .build(),
+            if (channel == LOUD) insistent(built) else built,
         )
 
         // The same check `say` ends with, and it was missing here — which is
@@ -321,7 +373,7 @@ object Alarms {
         // in the batch delivered on the strength of this return, so a muted
         // channel would have spent nine moments on one notification nobody
         // could see. Delivery happens once.
-        return manager.getNotificationChannel(CHANNEL)?.importance !=
+        return manager.getNotificationChannel(channel)?.importance !=
             NotificationManager.IMPORTANCE_NONE
     }
 
@@ -336,9 +388,8 @@ object Alarms {
     private fun say(context: Context, alert: Alert): Boolean {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return false
         if (!manager.areNotificationsEnabled()) return false
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Alerts", NotificationManager.IMPORTANCE_HIGH),
-        )
+        channels(manager)
+        val channel = if (alert.timed) LOUD else CHANNEL
 
         // Late is said, not hidden. A phone that was off through an afternoon
         // should say the afternoon happened rather than presenting a moment
@@ -353,21 +404,35 @@ object Alarms {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        val built = NotificationCompat.Builder(context, channel)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(alert.text)
+            .apply {
+                when {
+                    // A warning says how far ahead. Not "late": a warning
+                    // whose moment has begun is never handed over.
+                    alert.aheadMin > 0u -> setContentText("in ${alert.aheadMin} min")
+                    late -> setContentText("was due earlier")
+                    alert.timed -> setContentText("now")
+                }
+            }
+            .setCategory(if (alert.timed) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+
+        // One id for a moment and its warning, so the moment replaces the
+        // warning (and stops it ringing) rather than stacking under it.
         manager.notify(
             (alert.slug + alert.occ).hashCode(),
-            NotificationCompat.Builder(context, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(alert.text)
-                .apply { if (late) setContentText("was due earlier") }
-                .setContentIntent(open)
-                .setAutoCancel(true)
-                .build(),
+            if (channel == LOUD) insistent(built) else built,
         )
 
         // The channel itself can be turned off independently of the
         // application, and that is a decision rather than a fault — but it
         // means this was not said, and the moment stays due.
-        return manager.getNotificationChannel(CHANNEL)?.importance != NotificationManager.IMPORTANCE_NONE
+        return manager.getNotificationChannel(channel)?.importance != NotificationManager.IMPORTANCE_NONE
     }
 }
 

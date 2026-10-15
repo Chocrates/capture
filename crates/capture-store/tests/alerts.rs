@@ -700,3 +700,126 @@ fn an_untimed_occurrence_is_not_time_critical() {
     assert!(!mine.is_empty(), "a weekly series has a day this week");
     assert!(mine.iter().all(|d| !d.timed), "{mine:?}");
 }
+
+// Warnings: a timed moment also comes due a lead time before it.
+//
+// Asked for on 2026-10-13 — "alerts need to fire before the event and on the
+// event". At the moment is too late to leave for anything not in the room.
+
+const LEAD: i64 = 15 * 60 * 1000;
+
+fn announced(paths: &StorePaths, horizon: i64, now: i64) -> Vec<capture_store::projection::Due> {
+    reading(paths)
+        .announce_by(horizon, now, "UTC", LEAD)
+        .unwrap()
+}
+
+#[test]
+fn a_timed_moment_is_warned_of_then_told() {
+    let scratch = Scratch::new("warned");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "the dentist");
+    let start = now() + 20 * 60 * 1000;
+    at(&paths, &slug, start);
+    settle(&paths);
+
+    // Asked the way the ring asks: what has come due by now.
+    assert!(
+        announced(&paths, start - LEAD - 1, start - LEAD - 1).is_empty(),
+        "warned early"
+    );
+    let warned = announced(&paths, start - LEAD, start - LEAD);
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert_eq!(warned[0].at, start - LEAD);
+    assert_eq!(warned[0].ahead, LEAD, "a warning says how far ahead it is");
+    assert!(warned[0].timed);
+
+    // And at the moment, the moment — not a warning that it is coming, which
+    // a phone asleep through 13:45 would otherwise say at 14:00 as well.
+    let told = announced(&paths, start, start);
+    assert_eq!(
+        told.iter().map(|d| (d.at, d.ahead)).collect::<Vec<_>>(),
+        vec![(start, 0)],
+        "the moment itself was not said, or its warning outlived it"
+    );
+}
+
+#[test]
+fn a_moment_already_underway_is_not_warned_of() {
+    let scratch = Scratch::new("underway");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "standup");
+    let start = now() - 60_000;
+    at(&paths, &slug, start);
+    settle(&paths);
+
+    let due = announced(&paths, now(), now());
+    assert_eq!(
+        due.iter().map(|d| d.ahead).collect::<Vec<_>>(),
+        vec![0],
+        "warned of something already begun: {due:?}"
+    );
+}
+
+#[test]
+fn a_day_is_not_warned_of() {
+    let scratch = Scratch::new("day-warning");
+    let paths = scratch.paths();
+    capture(&paths, "water the plants every monday");
+    capture(&paths, "call the plumber tomorrow");
+    settle(&paths);
+
+    let due = announced(&paths, now() + 8 * 24 * HOUR, now());
+    assert!(!due.is_empty(), "nothing due at all");
+    assert!(
+        due.iter().all(|d| d.ahead == 0),
+        "a day has no before: {due:?}"
+    );
+}
+
+#[test]
+fn no_lead_is_no_warning() {
+    let scratch = Scratch::new("no-lead");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "the dentist");
+    let start = now() + 20 * 60 * 1000;
+    at(&paths, &slug, start);
+    settle(&paths);
+
+    let due = reading(&paths).announce_by(start, start, "UTC", 0).unwrap();
+    assert_eq!(due.iter().map(|d| d.ahead).collect::<Vec<_>>(), vec![0]);
+}
+
+#[test]
+fn a_warning_is_delivered_on_its_own() {
+    let scratch = Scratch::new("warning-delivery");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "the dentist");
+    let start = now() + 20 * 60 * 1000;
+    at(&paths, &slug, start);
+    settle(&paths);
+
+    let warned = announced(&paths, start - LEAD, start - LEAD).remove(0);
+    let ops = capture_store::ops::Ops::open(&paths.ops).unwrap();
+    ops.mark_alerted(&warned.tgt.0, warned.occ, warned.at, 0)
+        .unwrap();
+    assert!(
+        !ops.alerted(&warned.tgt.0, warned.occ, start).unwrap(),
+        "saying the warning spent the moment itself"
+    );
+}
+
+#[test]
+fn the_lead_is_fifteen_minutes_until_it_is_set() {
+    let scratch = Scratch::new("lead-setting");
+    let paths = scratch.paths();
+    let ops = capture_store::ops::Ops::open(&paths.ops).unwrap();
+    assert_eq!(capture_store::notifier::lead_ms(&ops).unwrap(), LEAD);
+    capture_store::notifier::set_lead_min(&ops, 5).unwrap();
+    assert_eq!(
+        capture_store::notifier::lead_ms(&ops).unwrap(),
+        5 * 60 * 1000
+    );
+    capture_store::notifier::set_lead_min(&ops, 0).unwrap();
+    assert_eq!(capture_store::notifier::lead_ms(&ops).unwrap(), 0);
+}

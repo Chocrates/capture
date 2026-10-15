@@ -107,7 +107,8 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
 
     let ops = capture_store::ops::Ops::open(&paths.ops)?;
 
-    for d in state.due_by(now, now, &zone_name)? {
+    let lead = notifier::lead_ms(&ops)?;
+    for d in state.announce_by(now, now, &zone_name, lead)? {
         if ops.alerted(&d.tgt.0, d.occ, d.at)? {
             continue;
         }
@@ -121,7 +122,9 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
         // Late is said rather than hidden. A machine that was off through an
         // afternoon should say the afternoon happened.
         let late = late_by > 5 * 60 * 1000;
-        let said = if late {
+        let said = if d.ahead > 0 {
+            notifier::warning(&d.text, d.ahead)
+        } else if late {
             format!("{} (was due earlier)", d.text)
         } else {
             d.text.clone()

@@ -1119,6 +1119,7 @@ fun ListScreen(
  * surface is ambiguous between "nothing is wrong" and "nothing was checked",
  * and that ambiguity is a cost the system would be manufacturing for free.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun Health(
     conditions: List<Condition>,
@@ -1133,6 +1134,8 @@ fun Health(
     onPair: () -> Unit,
     permits: List<PermitState>,
     onPermit: (Permit) -> Unit,
+    leadMin: Int,
+    onLead: (Int) -> Unit,
 ) {
     // A missing permission is shown once, as a row with a button, rather than
     // again here as a sentence telling somebody where to find that button.
@@ -1191,6 +1194,27 @@ fun Health(
         // First, because a refused permission is the one thing on this screen
         // that silently stops everything else from working.
         item { PermissionsSection(permits, onPermit) }
+        item {
+            Text(
+                "Alerts",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+            Text(
+                "Warn me before something with a time, and again when it starts.",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (m in listOf(0, 5, 10, 15, 30, 60)) {
+                    FilterChip(
+                        leadMin == m,
+                        { onLead(m) },
+                        { Text(if (m == 0) "Only when it starts" else "$m min") },
+                    )
+                }
+            }
+        }
         item {
             Text(
                 "Needs attention",

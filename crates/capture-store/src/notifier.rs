@@ -453,6 +453,38 @@ pub const STILL_PROMPT_MS: i64 = 30 * 60 * 1000;
 /// list that shows what is outstanding; it has simply stopped interrupting.
 pub const STALE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Where the lead time is kept: local to the device that speaks, because only
+/// that device says anything (§2.4.1), and which device buzzed when is not a
+/// fact the log records.
+pub const LEAD_KEY: &str = "alerts.lead_min";
+
+/// How long before a timed moment it is warned of, when nobody has said.
+///
+/// Fifteen minutes: enough to finish a sentence and leave the room, short
+/// enough that the warning is still about the thing and not a reminder that
+/// it exists.
+pub const DEFAULT_LEAD_MIN: u32 = 15;
+
+/// How long before a timed moment it is warned of, in milliseconds. Zero means
+/// no warning.
+pub fn lead_ms(ops: &crate::ops::Ops) -> Result<i64> {
+    let min = ops
+        .get(LEAD_KEY)?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_LEAD_MIN);
+    Ok(i64::from(min) * 60 * 1000)
+}
+
+/// What a warning says: how far ahead, then the capture's own words.
+pub fn warning(text: &str, ahead_ms: i64) -> String {
+    format!("in {} min: {text}", ahead_ms / 60_000)
+}
+
+/// Set the lead time, in minutes. Zero turns warnings off.
+pub fn set_lead_min(ops: &crate::ops::Ops, min: u32) -> Result<()> {
+    ops.set(LEAD_KEY, &min.to_string())
+}
+
 /// Decide when something due may actually be said, and how late it is.
 ///
 /// # The two rules, and which wins

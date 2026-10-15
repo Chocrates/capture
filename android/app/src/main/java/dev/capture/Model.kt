@@ -177,6 +177,9 @@ class Model(private val archive: Archive) : ViewModel() {
      */
     var notifier by mutableStateOf<String?>(null)
 
+    /** How many minutes before a timed moment this phone warns of it. */
+    var leadMin by mutableStateOf(15)
+
     /** Who the default rule picks, for when nobody has chosen (§2.4.1). */
     var defaultNotifier by mutableStateOf<String?>(null)
         private set
@@ -354,6 +357,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 notifier = archive.notifier()
                 defaultNotifier = archive.defaultNotifier()
                 costs = archive.costs()
+                leadMin = archive.alertLeadMinutes().toInt()
             }
             is Screen.Editor -> load { note = archive.note(to.name) }
             is Screen.Note -> load {
@@ -841,6 +845,22 @@ class Model(private val archive: Archive) : ViewModel() {
      * Bounded, because a run that failed is retried with the platform's
      * backoff and is not finished; the screen is re-read regardless.
      */
+    /**
+     * Set how far ahead a timed moment is warned of, and arm for it.
+     *
+     * Armed again at once: the next alarm was set for whatever was next under
+     * the old lead, and a warning that moved earlier would otherwise wait for
+     * the next capture or resume to be noticed.
+     */
+    fun setLead(context: android.content.Context, minutes: Int) {
+        val app = context.applicationContext
+        load {
+            archive.setAlertLeadMinutes(minutes.toUInt())
+            leadMin = archive.alertLeadMinutes().toInt()
+            Alarms.rearm(app)
+        }
+    }
+
     fun syncNow(context: android.content.Context) {
         val app = context.applicationContext
         val run = SyncWorker.now(app)

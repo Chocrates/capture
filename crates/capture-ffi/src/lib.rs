@@ -91,6 +91,9 @@ pub struct Alert {
     /// Whether this moment was already delivered. A surface showing what is
     /// coming needs it; a surface about to deliver checks it.
     pub delivered: bool,
+    /// For a warning, how many minutes ahead of the moment it is; zero for the
+    /// moment itself.
+    pub ahead_min: u32,
 }
 
 /// When the alarm should next go off, and whether that moment earns an exact
@@ -970,6 +973,20 @@ impl Archive {
     /// Local state rather than a `setting` event: it is a fact about this
     /// phone's permissions, not a decision about the archive, and syncing it
     /// would tell the desktop something untrue about itself (§2.5.2).
+    /// How many minutes before a timed moment this device warns of it. Zero
+    /// is no warning.
+    pub fn alert_lead_minutes(&self) -> Result<u32> {
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        Ok((capture_store::notifier::lead_ms(&ops)? / 60_000) as u32)
+    }
+
+    /// Set how many minutes before a timed moment this device warns of it.
+    pub fn set_alert_lead_minutes(&self, minutes: u32) -> Result<()> {
+        let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
+        capture_store::notifier::set_lead_min(&ops, minutes)?;
+        Ok(())
+    }
+
     pub fn set_alerts_inexact(&self, inexact: bool) -> Result<()> {
         let ops = capture_store::ops::Ops::open(&self.paths.ops)?;
         ops.set("alerts.inexact", if inexact { "1" } else { "0" })?;
@@ -1034,8 +1051,10 @@ impl Archive {
         let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
         let now = self.now_ms() as i64;
 
+        // Warnings included: a timed moment also comes due its lead before.
+        let lead = capture_store::notifier::lead_ms(&ops)?;
         store
-            .due_by(now + within_ms, now, &self.zone_name())?
+            .announce_by(now + within_ms, now, &self.zone_name(), lead)?
             .into_iter()
             .map(|d| {
                 Ok(Alert {
@@ -1045,6 +1064,7 @@ impl Archive {
                     occ: d.occ,
                     timed: d.timed,
                     delivered: ops.alerted(&d.tgt.0, d.occ, d.at)?,
+                    ahead_min: (d.ahead / 60_000) as u32,
                 })
             })
             .collect()
@@ -3484,6 +3504,7 @@ mod wake {
             occ: None,
             timed,
             delivered,
+            ahead_min: 0,
         }
     }
 

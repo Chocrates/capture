@@ -220,9 +220,14 @@ fn the_due_list_says_what_it_will_do() {
     let rows = json["due"]
         .as_array()
         .unwrap_or_else(|| panic!("no `due` array: {json}"));
-    assert_eq!(rows.len(), 1, "{json}");
-    assert_eq!(rows[0]["state"], "waiting", "{json}");
-    assert_eq!(rows[0]["slug"], event.as_str(), "{json}");
+    // The warning a lead before it, then the moment (alerts you cannot miss).
+    assert_eq!(rows.len(), 2, "{json}");
+    for row in rows {
+        assert_eq!(row["state"], "waiting", "{json}");
+        assert_eq!(row["slug"], event.as_str(), "{json}");
+    }
+    assert_eq!(rows[0]["ahead_ms"], 15 * 60 * 1000, "{json}");
+    assert_eq!(rows[1]["ahead_ms"], 0, "{json}");
     assert_eq!(json["unread"], 0, "{json}");
     assert!(json["unsettled"].is_null(), "{json}");
 

@@ -859,6 +859,12 @@ pub struct Due {
     /// distinction the time model already draws (§3.2), asked a different
     /// question.
     pub timed: bool,
+    /// How far ahead of the moment this is said, for a warning. Zero for the
+    /// moment itself.
+    ///
+    /// A warning is its own moment — `at` is the start less the lead — so it
+    /// has its own delivery record, and saying it does not spend the moment.
+    pub ahead: i64,
 }
 
 /// One line of a list: an expanded item, or a task carrying its tag.
@@ -2410,6 +2416,7 @@ impl Store {
                     occ: None,
                     text,
                     timed: true,
+                    ahead: 0,
                 });
             }
         }
@@ -2453,6 +2460,7 @@ impl Store {
                     occ: Some(occ),
                     text,
                     timed: !all_day,
+                    ahead: 0,
                 });
             }
         }
@@ -2494,12 +2502,45 @@ impl Store {
                     occ: None,
                     text,
                     timed: false,
+                    ahead: 0,
                 });
             }
         }
 
         // Oldest first: a backlog delivered in the order it accumulated reads
         // as a day that happened, rather than as a pile.
+        out.sort_by_key(|d| (d.at, d.tgt.0, d.occ));
+        Ok(out)
+    }
+
+    /// What is to be said by `horizon`: every moment [`Store::due_by`] names,
+    /// and a warning `lead_ms` before each one that names a time of day.
+    ///
+    /// The warning is asked for as far ahead as the lead, so the ring that
+    /// asks "what has come due by now" finds the warning for a moment that has
+    /// not. None for a moment already begun — "in 15 min" for something
+    /// underway is wrong twice — and none for a day, which has no before.
+    pub fn announce_by(
+        &self,
+        horizon: i64,
+        now: i64,
+        zone: &str,
+        lead_ms: i64,
+    ) -> Result<Vec<Due>> {
+        let lead = lead_ms.max(0);
+        let mut out = Vec::new();
+        for d in self.due_by(horizon.saturating_add(lead), now, zone)? {
+            if lead > 0 && d.timed && d.at > now && d.at - lead <= horizon {
+                out.push(Due {
+                    at: d.at - lead,
+                    ahead: lead,
+                    ..d.clone()
+                });
+            }
+            if d.at <= horizon {
+                out.push(d);
+            }
+        }
         out.sort_by_key(|d| (d.at, d.tgt.0, d.occ));
         Ok(out)
     }

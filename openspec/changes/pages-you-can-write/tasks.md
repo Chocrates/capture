@@ -10,7 +10,7 @@
 
 - [x] 2.1 CLI: `capture page new TITLE [--under NAME | --of @x]`, `capture page NAME`, `capture unpage NAME`; `show` draws checklist lines.
 - [x] 2.2 FFI: create/make/unmake page, checklist lines, tick line, completions.
-- [~] 2.3 Phone: editor screen with completion; New page (Pages tab, entity page); Make this a page; page drawing with tickable lines and tappable links.
+- [x] 2.3 Phone: editor screen with completion; New page (Pages tab, entity page); Make this a page; page drawing with tickable lines and tappable links.
 - [x] 2.4 Desktop: New page; Make this a page; completion for all four sigils; checklist drawing.
 
 ## 3. Verification
@@ -27,4 +27,4 @@
   note, by its chosen name where that matches. The desktop had the same duplicate.
 - The phone drew `@`/`^`/`#` as tappable but not `[[links]]`; `pieces` now splits links too.
 - The desktop's `names` command is gone; both editors call `completions`.
-- 2.3: builds; FFI tested; not yet seen on the device.
+- 2.3: seen on the dev app 2026-10-14: saved, ticked; a page offered "Everything on #" (fixed, 0778e90).
