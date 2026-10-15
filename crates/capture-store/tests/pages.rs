@@ -236,3 +236,27 @@ fn completions_offer_pages_people_projects_and_tags_by_prefix() {
     assert_eq!(names("#", "ca"), vec!["cars".to_string()]);
     assert!(names("@", "zz").is_empty());
 }
+
+#[test]
+fn a_page_can_start_as_a_persons_page() {
+    let scratch = Scratch::new("of");
+    let paths = scratch.paths();
+    capture(&paths, "coffee with @sarah");
+    let made = pages::create_for(&paths, "person", "sarah", "Sarah").unwrap();
+    assert_eq!(kind(&paths, &made.slug).as_deref(), Some("page"));
+
+    let store = capture_store::projection::current(&paths).unwrap();
+    let ent = store.entity("person", "sarah").unwrap().unwrap();
+    let tgt = store.resolve(&made.slug).unwrap().unwrap();
+    assert_eq!(ent.backing, Some(tgt), "the page is not sarah's");
+
+    // Somebody nobody has named yet is refused, and nothing is left behind.
+    let before = store.timeline(100).unwrap().len();
+    assert!(pages::create_for(&paths, "person", "nobody", "Nobody").is_err());
+    let after = capture_store::projection::current(&paths)
+        .unwrap()
+        .timeline(100)
+        .unwrap()
+        .len();
+    assert_eq!(after, before, "a refused page left a capture behind");
+}

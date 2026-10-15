@@ -475,6 +475,15 @@ class Model(private val archive: Archive) : ViewModel() {
         withContext(Dispatchers.Main) { go(Screen.Editor(made.name ?: made.slug)) }
     }
 
+    /** Start the page that is a person or project, and open it for writing. */
+    fun newPageFor(mention: String, title: String) = load {
+        val made = archive.newPageFor(mention, title)
+        if (made.name == null) {
+            trouble = "That name was taken, so this page is called ${made.slug}."
+        }
+        withContext(Dispatchers.Main) { go(Screen.Editor(made.name ?: made.slug)) }
+    }
+
     /** Make a capture a page, and open it for writing. */
     fun makePage(name: String) = load {
         archive.makePage(name)

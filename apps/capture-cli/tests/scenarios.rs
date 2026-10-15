@@ -1962,6 +1962,19 @@ fn a_page_is_started_written_ticked_and_handed_back() {
 
     let (code, out) = s.run(&["page", "new"]);
     assert!(code != 0 && out.contains("title"), "{out}");
+
+    // A person's page, started as theirs.
+    s.capture("coffee with @sarah");
+    s.ok(&["settle"]);
+    let said = s.ok(&["page", "new", "Sarah", "--of", "@sarah"]);
+    assert!(said.contains("[[sarah]]"), "{said}");
+    let page = s.ok(&["entity", "@sarah"]);
+    assert!(
+        page.contains("the note that is this person"),
+        "the page is not hers: {page}"
+    );
+    let (code, out) = s.run(&["page", "new", "Nobody", "--of", "@nobody"]);
+    assert!(code != 0 && out.contains("nobody"), "{out}");
 }
 
 /// `capture cal` draws a month from the same read as every other surface.

@@ -872,6 +872,23 @@ pub fn new_page(title: String, under: Option<String>) -> std::result::Result<Pag
     })())
 }
 
+/// Start the page that is a person, project or tag, and bind it as theirs.
+#[tauri::command]
+pub fn new_page_for(
+    sigil: String,
+    value: String,
+    title: String,
+) -> std::result::Result<PageMade, String> {
+    wire((|| {
+        let kind = entity_kind(sigil.chars().next().unwrap_or(' '))?;
+        let made = capture_store::pages::create_for(&paths()?, kind, &value, &title)?;
+        Ok(PageMade {
+            slug: made.slug,
+            name: made.name,
+        })
+    })())
+}
+
 /// Make a capture a page. `reread` makes it a capture again.
 #[tauri::command]
 pub fn make_page(name: String) -> std::result::Result<(), String> {

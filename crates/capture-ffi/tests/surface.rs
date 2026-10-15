@@ -2143,3 +2143,23 @@ fn the_phone_is_warned_ahead_by_its_own_lead() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A person's page started from their page on the phone (pages, 2026-10-14).
+#[test]
+fn a_persons_page_is_started_from_the_phone() {
+    let root = scratch("page-for");
+    let a = Archive::open(root.clone()).unwrap();
+    a.capture("coffee with @sarah".into()).unwrap();
+    a.settle().unwrap();
+    let made = a.new_page_for("@sarah".into(), "Sarah".into()).unwrap();
+    let ent = a.entity("@sarah".into()).unwrap().expect("sarah");
+    assert_eq!(
+        ent.backing.map(|n| n.slug),
+        Some(made.slug.clone()),
+        "the page is not hers"
+    );
+    assert_eq!(a.note(made.slug).unwrap().kind, "page");
+    assert!(a.new_page_for("@nobody".into(), "Nobody".into()).is_err());
+
+    std::fs::remove_dir_all(&root).ok();
+}

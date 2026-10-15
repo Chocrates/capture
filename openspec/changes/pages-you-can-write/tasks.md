@@ -21,8 +21,10 @@
 
 ## Notes from building it
 
-- Starting a page *as* a person's or project's page (D2's `--of @x`) is not built: the store's
-  `create` takes a parent only. Binding an existing page to an entity works as before.
+- Starting a page *as* a person's or project's page (D2's `--of @x`) built 2026-10-14:
+  `pages::create_for` refuses an entity nobody has named before any capture exists; CLI `--of`,
+  FFI `new_page_for`, desktop "start a page…", phone "Start a page" on the entity page.
+- A page no longer offers "It's a task" / "Just a note"; "Make it a capture again" is its way back.
 - `[[` completion offered a named note twice (alias and slug); `names_like` now gives one offer per
   note, by its chosen name where that matches. The desktop had the same duplicate.
 - The phone drew `@`/`^`/`#` as tappable but not `[[links]]`; `pieces` now splits links too.

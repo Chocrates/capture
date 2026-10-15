@@ -1815,6 +1815,19 @@ impl Archive {
         })
     }
 
+    /// Start the page that *is* a person, project or tag, by its mention
+    /// (`@sarah`), titled `title`. The entity's page shows it above the notes
+    /// naming it.
+    pub fn new_page_for(&self, mention: String, title: String) -> Result<PageMade> {
+        let _w = self.write_lock()?;
+        let (kind, value) = split_mention(&mention)?;
+        let made = capture_store::pages::create_for(&self.paths, kind, &value, &title)?;
+        Ok(PageMade {
+            slug: made.slug,
+            name: made.name,
+        })
+    }
+
     /// Make a capture a page. Its words stay; nothing in it is read again.
     /// `reread` makes it a capture again.
     pub fn make_page(&self, name: String) -> Result<()> {

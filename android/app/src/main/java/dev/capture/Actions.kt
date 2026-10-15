@@ -84,7 +84,9 @@ fun Actions(note: NoteSummary, pending: Pending?, model: Model) {
         // Here and not on a timeline row. A correction is pinned, so it beats
         // every later reparse, and a control on a scrolling surface is a
         // mis-tap away from writing one of those while thumbing past.
-        if (note.kind != "task") {
+        // Not on a page: a page is never a task or a plain capture by
+        // correction, only by "Make it a capture again", which says so.
+        if (note.kind != "task" && note.kind != "page") {
             TextButton({ model.asTask(note.slug, null) }) { Text("It's a task") }
         }
         if (note.kind == "task") {
@@ -98,7 +100,7 @@ fun Actions(note: NoteSummary, pending: Pending?, model: Model) {
         }
         // A thing wrongly promoted is as ordinary as a thing wrongly left
         // alone, so the way back is the same gesture rather than a harder one.
-        if (note.kind != "note") {
+        if (note.kind != "note" && note.kind != "page") {
             TextButton({ model.setKind(note.slug, NoteKind.NOTE) }) { Text("Just a note") }
         }
         // In force, not merely recorded: a mute whose end has passed is still

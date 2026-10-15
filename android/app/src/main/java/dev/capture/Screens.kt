@@ -989,6 +989,11 @@ private fun EntityActions(mention: String, entity: Entity, model: Model) {
             asking = "merge"
         }) { Text("Merge into") }
         if (entity.backing == null) {
+            // A page of their own, started here and written at once.
+            TextButton({
+                answer = entity.display.replaceFirstChar { it.uppercase() }
+                asking = "page"
+            }) { Text("Start a page") }
             TextButton({
                 answer = ""
                 asking = "bind"
@@ -1004,6 +1009,8 @@ private fun EntityActions(mention: String, entity: Entity, model: Model) {
             "merge" -> "Merge into" to
                 "The other one, as written — @sarah-chen. Nothing moves: both " +
                     "names reach one page and every note still says what it said."
+            "page" -> "Start a page" to
+                "A title. The page is shown above every note naming this ${entity.kind}."
             else -> "Backing note" to "The note that *is* this ${entity.kind}, by name."
         }
         AlertDialog(
@@ -1022,6 +1029,7 @@ private fun EntityActions(mention: String, entity: Entity, model: Model) {
                         // `from` is the other one and `into` is this page, so the
                         // surface somebody is looking at is the one that survives.
                         "merge" -> model.mergeEntities(answer, mention)
+                        "page" -> if (answer.isNotBlank()) model.newPageFor(mention, answer.trim())
                         else -> model.bindBacking(mention, answer.ifBlank { null })
                     }
                     asking = null

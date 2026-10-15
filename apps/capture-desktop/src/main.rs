@@ -45,6 +45,7 @@ fn main() {
             ipc::settle_day,
             ipc::reread,
             ipc::new_page,
+            ipc::new_page_for,
             ipc::make_page,
             ipc::completions,
             ipc::month,

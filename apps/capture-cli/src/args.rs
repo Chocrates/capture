@@ -191,6 +191,11 @@ pub enum Command {
         title: String,
         under: Option<String>,
     },
+    /// Start the page that is a person, project or tag.
+    NewPageFor {
+        title: String,
+        of: String,
+    },
     /// Make a capture a page.
     MakePage {
         name: String,
@@ -801,18 +806,23 @@ where
         // `capture reread <note>`. Takes back a correction — an accepted
         // suggestion, a kind set by hand — so the text decides again.
         "reread" => one_name(&args[1..], "reread", |name, _| Command::Reread { name }),
-        // `capture page new <title> [--under <page>]` starts a page;
+        // `capture page new <title> [--under <page> | --of @x]` starts a page;
         // `capture page <note>` makes a capture one. A page is never read for
         // dates or types; `capture unpage` hands it back to the recognizer.
         "page" => match &args[1..] {
             [new, rest @ ..] if new == "new" => {
-                let (title, under) = match rest.iter().position(|a| a == "--under") {
+                let flag = rest.iter().position(|a| a == "--under" || a == "--of");
+                let (title, flagged) = match flag {
                     Some(i) => match rest.get(i + 1) {
-                        Some(u) if i + 2 == rest.len() => (&rest[..i], Some(u.clone())),
+                        Some(u) if i + 2 == rest.len() => {
+                            (&rest[..i], Some((rest[i].as_str(), u.clone())))
+                        }
                         _ => {
                             return Err(Bad::Value {
                                 command: "page".into(),
-                                problem: "--under takes one page, after the title".into(),
+                                problem: "--under takes one page and --of one @person, ^project \
+                                          or #tag, after the title"
+                                    .into(),
                             });
                         }
                     },
@@ -824,9 +834,13 @@ where
                         problem: "give the page a title: capture page new Car maintenance".into(),
                     });
                 }
-                Ok(Command::NewPage {
-                    title: title.join(" "),
-                    under,
+                let title = title.join(" ");
+                Ok(match flagged {
+                    Some(("--of", of)) => Command::NewPageFor { title, of },
+                    under => Command::NewPage {
+                        title,
+                        under: under.map(|(_, u)| u),
+                    },
                 })
             }
             [name] => Ok(Command::MakePage { name: name.clone() }),
@@ -1630,7 +1644,7 @@ TIME AND TASKS
   capture hour <note> am|pm      say which half of the clock "at 2" meant
   capture day <note> 1|2         say which of two days "next thursday" meant
   capture reread <note>          take back a correction; the text decides again
-  capture page new <title> [--under <page>]
+  capture page new <title> [--under <page> | --of @person]
                                  start a page: never read for dates, named by its title
   capture page <note>            make a capture a page
   capture unpage <note>          make a page a capture again

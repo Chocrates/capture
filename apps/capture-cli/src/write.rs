@@ -1046,6 +1046,15 @@ pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<(
     Ok(())
 }
 
+/// Start the page that is a person, project or tag.
+pub fn new_page_for(paths: StorePaths, title: &str, of: &str) -> Result<()> {
+    let (kind, value) = crate::read::split_mention(of)?;
+    let made = capture_store::pages::create_for(&paths, kind, &value, title)?;
+    let name = made.name.unwrap_or(made.slug);
+    say!("Page [[{name}]] started as {of}'s page. Write it with: capture edit {name}");
+    Ok(())
+}
+
 /// Make a capture a page: never read for dates or types again.
 pub fn make_page(paths: StorePaths, name: &str) -> Result<()> {
     capture_store::pages::make(&paths, name)?;

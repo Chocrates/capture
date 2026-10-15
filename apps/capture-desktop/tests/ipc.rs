@@ -269,6 +269,19 @@ fn the_window_answers_what_the_store_holds() {
     );
     assert_eq!(ipc::reread(dentist).unwrap(), "event");
 
+    // Sam's own page, started from Sam's.
+    let sams = ipc::new_page_for("@".into(), "sam".into(), "Sam".into()).unwrap();
+    let ent = capture_store::projection::current(&paths)
+        .unwrap()
+        .entity("person", "sam")
+        .unwrap()
+        .expect("sam");
+    let tgt = capture_store::projection::current(&paths)
+        .unwrap()
+        .resolve(&sams.slug)
+        .unwrap();
+    assert_eq!(ent.backing, tgt, "the page is not Sam's");
+
     // ------------------------------------------------------- a day left open
     //
     // A Thursday beside a Friday's date: asked on both days, answered from the

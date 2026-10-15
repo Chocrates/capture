@@ -62,6 +62,26 @@ pub fn create(paths: &StorePaths, title: &str, under: Option<&str>) -> Result<Cr
     Ok(Created { slug, name })
 }
 
+/// Start a page that *is* a person, project or tag: made as [`create`] makes
+/// one, then bound as its backing note, so the entity's page shows it above
+/// everything that names it.
+///
+/// The entity is asked for first, so a name nobody has written refuses before
+/// a capture exists rather than leaving an orphan page behind.
+pub fn create_for(paths: &StorePaths, kind: &str, name: &str, title: &str) -> Result<Created> {
+    if crate::projection::current(paths)?
+        .entity_id(kind, name)?
+        .is_none()
+    {
+        return Err(Error::NotFound(format!(
+            "no {kind} called '{name}' — an entity exists because a note names it"
+        )));
+    }
+    let made = create(paths, title, None)?;
+    crate::mutate::bind_backing(paths, kind, name, Some(&made.slug))?;
+    Ok(made)
+}
+
 /// Make any note a page. Its words are untouched; only what it is changes.
 pub fn make(paths: &StorePaths, name: &str) -> Result<()> {
     crate::promote::correct(paths, name, Promoted::Page)

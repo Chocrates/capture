@@ -1461,7 +1461,8 @@ function actions(n, into = view, promotion = null) {
   // recognizer *made* and was not confident enough to apply. That control needs
   // there to be a reading; this one is for when there is none, which is exactly
   // when somebody needs it.
-  if (promotion?.kind !== "task") {
+  // Not on a page, which goes back by "Make it a capture again" and says so.
+  if (promotion?.kind !== "task" && promotion?.kind !== "page") {
     add("Make a task…", async () => {
       // Empty is an ordinary answer, not a refusal: deciding a thing is owed
       // and deciding when it is owed are different decisions, and most tasks
@@ -1485,7 +1486,7 @@ function actions(n, into = view, promotion = null) {
   // separates it from the other direction. Making something a series means
   // writing a recurrence, and a free-text prompt for one is a worse surface
   // than the capture box, which already reads "every weekday at 9".
-  if (promotion && promotion.kind && promotion.kind !== "note") {
+  if (promotion && promotion.kind && promotion.kind !== "note" && promotion.kind !== "page") {
     add("Make a note", async () => {
       await call("set_kind", { name: n.slug, kind: "note" });
       toast("A plain note now. The text is unchanged.");
@@ -1730,7 +1731,18 @@ function entityActions(sigil, value, into) {
     showMentions(sigil, value, into);
   });
 
-  bar.append(rename, merge, bind);
+  // A page of its own, written about them and shown above every note naming
+  // them (pages, 2026-10-14). Binding replaces whatever note was bound.
+  const page = el("button", "act", "start a page…");
+  page.addEventListener("click", async () => {
+    const title = prompt(`Title of ${sigil}${value}'s page:`, value);
+    if (!title || !title.trim()) return;
+    const made = await call("new_page_for", { sigil, value, title: title.trim() });
+    if (!made.name) toast(`That name was taken, so this page is called ${made.slug}.`);
+    await openPageForWriting(made.name || made.slug);
+  });
+
+  bar.append(rename, merge, bind, page);
   into.append(bar);
 }
 
