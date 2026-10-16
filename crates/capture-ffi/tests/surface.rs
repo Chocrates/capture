@@ -5,7 +5,7 @@
 //! interesting question — did the store do the right thing — is then two
 //! layers and a language away from where it is answered.
 
-use capture_ffi::{Archive, Captured, NoteKind, Watching};
+use capture_ffi::{Archive, Captured, NoteKind, PagePart, Watching};
 
 use capture_store::pairing::PORT as PAIRING_PORT;
 
@@ -1963,6 +1963,69 @@ fn a_page_is_written_and_ticked_from_the_phone() {
         "event",
         "a page made a capture again"
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A page reads once on the phone: each checklist line is drawn as its tick box
+/// where it was written, and the page says which pages link to it
+/// (pages, 2026-10-15). Before this the lines were drawn as text and then again
+/// as a list beneath, and the phone never said what linked to a page.
+#[test]
+fn a_page_reads_once_and_says_what_links_to_it() {
+    let root = scratch("page-once");
+    let a = Archive::open(root.clone()).unwrap();
+    let packing = a.new_page("Packing list".into(), None).unwrap();
+    a.edit(
+        packing.slug.clone(),
+        "Packing list
+for the trip
+- passport
+[x] charger
+
+that's all"
+            .into(),
+    )
+    .unwrap();
+    let trip = a.new_page("Weekend trip".into(), None).unwrap();
+    a.edit(
+        trip.slug.clone(),
+        "Weekend trip
+bring everything on [[packing-list]]"
+            .into(),
+    )
+    .unwrap();
+    a.settle().unwrap();
+
+    let page = a.note(packing.slug.clone()).unwrap();
+    assert_eq!(
+        page.parts,
+        vec![
+            PagePart::Prose {
+                text: "Packing list\nfor the trip".into()
+            },
+            PagePart::Item { ord: 0 },
+            PagePart::Item { ord: 1 },
+            PagePart::Prose {
+                text: "\nthat's all".into()
+            },
+        ]
+    );
+    // A note that is not a page is drawn as it always was.
+    let Captured::Stored { slug } = a.capture("groceries: milk, eggs".into()).unwrap() else {
+        panic!("spooled")
+    };
+    a.settle().unwrap();
+    assert!(a.note(slug).unwrap().parts.is_empty());
+
+    let from: Vec<(String, Option<String>)> = a
+        .backlinks(packing.slug.clone())
+        .unwrap()
+        .into_iter()
+        .map(|b| (b.slug, b.alias))
+        .collect();
+    assert_eq!(from, vec![(trip.slug.clone(), Some("weekend-trip".into()))]);
+    assert!(a.backlinks(trip.slug.clone()).unwrap().is_empty());
 
     std::fs::remove_dir_all(&root).ok();
 }

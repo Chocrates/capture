@@ -245,6 +245,34 @@ pub struct NoteSummary {
     /// second implementation of the form, differing from this one the first
     /// time a guard changed.
     pub list_tag: Option<String>,
+    /// A page's text in the order it was written, with each checklist line
+    /// standing as the item it is. Empty for anything that is not a page.
+    ///
+    /// So a page reads once: its lines used to be drawn as text and then
+    /// again as tick boxes beneath (pages, 2026-10-15). Split here rather
+    /// than on the phone, which would otherwise need its own copy of which
+    /// lines are checklist lines.
+    pub parts: Vec<PagePart>,
+}
+
+/// One stretch of a page as it is drawn.
+#[derive(Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PagePart {
+    /// Lines that are not checklist lines, joined as written.
+    Prose { text: String },
+    /// A checklist line: the item at this place in `items`.
+    Item { ord: u32 },
+}
+
+/// A note that links to another by `[[name]]`.
+#[derive(Debug, uniffi::Record)]
+pub struct Backlink {
+    pub slug: String,
+    /// The linking note's own name, where it has one: what a person reads
+    /// instead of the slug.
+    pub alias: Option<String>,
+    /// The name it used, which may not be the linked note's current one.
+    pub name: String,
 }
 
 /// A run of text split at its mentions.
@@ -1197,6 +1225,25 @@ impl Archive {
             .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
         let row = store.note(&tgt)?.ok_or(CaptureError::NotFound { name })?;
         read_as(&store, row, self.now_ms())
+    }
+
+    /// The notes that link to this one by `[[name]]`, as the desktop's
+    /// "Linked from" lists them.
+    pub fn backlinks(&self, name: String) -> Result<Vec<Backlink>> {
+        let store = self.read()?;
+        let tgt = store
+            .resolve(&name)?
+            .ok_or(CaptureError::NotFound { name })?;
+        let mut out = Vec::new();
+        for b in store.links_to(&tgt)? {
+            let alias = store.note(&b.tgt)?.and_then(|n| n.alias);
+            out.push(Backlink {
+                slug: b.slug,
+                alias,
+                name: b.name,
+            });
+        }
+        Ok(out)
     }
 
     /// Full-text search.
@@ -3333,6 +3380,11 @@ fn read_as(
     }
     // A page's checklist sits under no tag, and has no tag-wide view to offer.
     s.list_tag = tag.filter(|t| !t.is_empty());
+    if s.kind == "page"
+        && let Some(text) = &s.text
+    {
+        s.parts = page_parts(text);
+    }
     Ok(s)
 }
 
@@ -3405,7 +3457,40 @@ fn summarise(n: capture_store::projection::NoteRow, now: u64) -> NoteSummary {
         kind: "note".into(),
         descriptor: String::new(),
         items: Vec::new(),
+        parts: Vec::new(),
     }
+}
+
+/// A page's text split into prose and checklist lines, in order.
+///
+/// The `n`th checklist line is item `n`: the projection writes a page's items
+/// from the same `checklist_of`, in the same order.
+fn page_parts(text: &str) -> Vec<PagePart> {
+    let items = capture_parse::checklist_of(text);
+    let mut next = items.iter().enumerate().peekable();
+    let mut out = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
+    for (at, line) in text.lines().enumerate() {
+        match next.peek() {
+            Some((ord, item)) if item.line == at => {
+                if !prose.is_empty() {
+                    out.push(PagePart::Prose {
+                        text: prose.join("\n"),
+                    });
+                    prose.clear();
+                }
+                out.push(PagePart::Item { ord: *ord as u32 });
+                next.next();
+            }
+            _ => prose.push(line),
+        }
+    }
+    if !prose.is_empty() {
+        out.push(PagePart::Prose {
+            text: prose.join("\n"),
+        });
+    }
+    out
 }
 
 /// The zone a person is in, by name, falling back to UTC only where the

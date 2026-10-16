@@ -57,6 +57,7 @@ import uniffi.capture_ffi.Condition
 import uniffi.capture_ffi.ListLine
 import uniffi.capture_ffi.Named
 import uniffi.capture_ffi.NoteSummary
+import uniffi.capture_ffi.PagePart
 import uniffi.capture_ffi.Peer
 import uniffi.capture_ffi.Pending
 import uniffi.capture_ffi.Recording
@@ -253,6 +254,17 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                     },
                     style = MaterialTheme.typography.bodyLarge,
                 )
+            } else if (note.parts.isNotEmpty()) {
+                // A page reads once: each checklist line is its tick box, where
+                // it was written. Drawing the text and then the list beneath it
+                // put every line on screen twice (2026-10-15).
+                for (part in note.parts) {
+                    when (part) {
+                        is PagePart.Prose -> MentionedText(part.text, model)
+                        is PagePart.Item -> note.items.getOrNull(part.ord.toInt())
+                            ?.let { ItemRow(it, note.slug, model) }
+                    }
+                }
             } else {
                 // The mentions in it lead to their pages. §4.3 calls the entity
                 // link the one that carries the load — it exists without anybody
@@ -260,30 +272,18 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 // while the window makes it a link would make one note mean two
                 // different things depending on where it is read.
                 MentionedText(body, model)
+                // The items this capture names, drawn here rather than behind a
+                // tap. The button that used to stand in this place existed
+                // because the row could not render itself; a row that can does
+                // not need one.
+                for (item in note.items) ItemRow(item, note.slug, model)
             }
-            // The items this capture names, drawn here rather than behind a
-            // tap. The button that used to stand in this place existed because
-            // the row could not render itself; a row that can does not need
-            // one.
-            for (item in note.items) {
-                Row(
-                    Modifier.fillMaxWidth()
-                        // By position, not by words. The row knows which one it
-                        // is, and two items reading the same used to be
-                        // untickable from here for want of saying so.
-                        .clickable {
-                            item.ord?.let { model.tickAt(note.slug, it, !item.done) }
-                        }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(checked = item.done, onCheckedChange = null)
-                    Text(
-                        item.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        textDecoration = if (item.done) TextDecoration.LineThrough else null,
-                        modifier = Modifier.padding(start = 12.dp),
-                    )
+
+            // What links here, as the desktop's "Linked from" says it.
+            if (model.linkedFrom.isNotEmpty()) {
+                Text("Linked from", style = MaterialTheme.typography.labelMedium)
+                for (b in model.linkedFrom) {
+                    TextButton({ model.go(Screen.Note(b.slug)) }) { Text(b.alias ?: b.slug) }
                 }
             }
 
@@ -364,6 +364,28 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
         }
         HorizontalDivider()
         Actions(note, pending, model)
+    }
+}
+
+/** One item, ticked by position. */
+@Composable
+private fun ItemRow(item: ListLine, slug: String, model: Model) {
+    Row(
+        Modifier.fillMaxWidth()
+            // By position, not by words. The row knows which one it is, and
+            // two items reading the same used to be untickable from here for
+            // want of saying so.
+            .clickable { item.ord?.let { model.tickAt(slug, it, !item.done) } }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = item.done, onCheckedChange = null)
+        Text(
+            item.text,
+            style = MaterialTheme.typography.bodyLarge,
+            textDecoration = if (item.done) TextDecoration.LineThrough else null,
+            modifier = Modifier.padding(start = 12.dp),
+        )
     }
 }
 

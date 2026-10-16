@@ -16,7 +16,8 @@
 ## 3. Verification
 
 - [x] 3.1 `make ci`; sabotage each.
-- [ ] 3.2 Dev app: write a packing page on the phone, tick lines, link it from another page, see it on the desktop after sync.
+- [x] 3.2 Dev app: write a packing page on the phone, tick lines, link it from another page, see it on the desktop after sync.
+  - 2026-10-15, phone half on the dev app: wrote "Weekend trip" linking [[packing-list]], followed the link both ways, ticked and unticked. Found and fixed two things: a page drew its checklist lines twice (as text, then as tick boxes beneath), and the phone never said what links to a page. Now each line is its tick box where it was written (`NoteSummary.parts`, from `checklist_of`'s new `line`), and "Linked from" lists linking pages by name (`Archive::backlinks`). Desktop half not checked: the dev app never pairs with the real desktop, and the desktop window cannot be screenshotted. The desktop still draws a page's text and then its list.
 - [ ] 3.3 Real use for a week.
 
 ## Notes from building it

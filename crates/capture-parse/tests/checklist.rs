@@ -50,3 +50,14 @@ fn prose_that_merely_starts_with_a_dash_word_is_not_an_item() {
 fn a_heading_or_a_tag_is_not_an_item() {
     assert!(items("# Heading\n#tag at the start").is_empty());
 }
+
+#[test]
+fn each_item_knows_which_line_it_was_written_on() {
+    // So a surface can draw the tick box where the line is, instead of the
+    // text and then the list again beneath it (pages, 2026-10-15).
+    let lines: Vec<usize> = checklist_of("Packing\n- passport\nprose\n\n[x] charger")
+        .into_iter()
+        .map(|l| l.line)
+        .collect();
+    assert_eq!(lines, vec![1, 4]);
+}

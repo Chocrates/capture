@@ -216,7 +216,11 @@ fn the_due_list_says_what_it_will_do() {
     let event = s.capture("dentist tomorrow at 2pm");
     s.ok(&["settle"]);
 
-    let json = s.json(&["due"]);
+    // Asked at the real clock, not `NOW`: "tomorrow" is read from the
+    // capture's own stamp, which follows the wall, and `due` looks a week
+    // ahead. Asked at `NOW` this passed until the wall clock was a week past
+    // it, then found nothing (2026-10-16).
+    let json = s.json_at(&jiff::Timestamp::now().to_string(), &["due"]);
     let rows = json["due"]
         .as_array()
         .unwrap_or_else(|| panic!("no `due` array: {json}"));

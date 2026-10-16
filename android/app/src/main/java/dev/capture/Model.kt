@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.capture_ffi.AgendaEntry
+import uniffi.capture_ffi.Backlink
 import uniffi.capture_ffi.CalendarShape
 import uniffi.capture_ffi.CalendarView
 import uniffi.capture_ffi.Archive
@@ -145,6 +146,10 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /** What this note is was said by a person, so edits do not move it. */
     var corrected by mutableStateOf(false)
+        private set
+
+    /** The notes that link to this one by `[[name]]`. */
+    var linkedFrom by mutableStateOf<List<Backlink>>(emptyList())
         private set
     var hits by mutableStateOf<List<NoteSummary>>(emptyList())
         private set
@@ -368,6 +373,7 @@ class Model(private val archive: Archive) : ViewModel() {
                 unclearHour = archive.unclearHour(to.name)
                 unclearDay = archive.unclearDay(to.name)
                 corrected = archive.corrected(to.name)
+                linkedFrom = archive.backlinks(to.name)
             }
             is Screen.Search -> hits = emptyList()
             is Screen.Pairing -> pairing = PairingState.Idle
@@ -570,6 +576,7 @@ class Model(private val archive: Archive) : ViewModel() {
         unclearHour = archive.unclearHour(name)
         unclearDay = archive.unclearDay(name)
         corrected = archive.corrected(name)
+        linkedFrom = archive.backlinks(name)
         // The lists behind this note are now stale in a way that is visible
         // the moment the back gesture happens.
         timeline = archive.timeline(100u)
@@ -825,7 +832,10 @@ class Model(private val archive: Archive) : ViewModel() {
                 projects = archive.projects()
             }
             is Screen.Entity -> entity = archive.entity(here.mention)
-            is Screen.Note -> note = archive.note(here.name)
+            is Screen.Note -> {
+                note = archive.note(here.name)
+                linkedFrom = archive.backlinks(here.name)
+            }
             is Screen.Plans -> plans = archive.intents()
             else -> {}
         }

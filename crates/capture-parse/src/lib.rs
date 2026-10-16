@@ -629,6 +629,9 @@ pub struct ChecklistLine {
     pub item: alloc::string::String,
     /// Written ticked: `[x]`.
     pub done: bool,
+    /// Which line of the text it is, counted from 0 as `str::lines` counts,
+    /// so a surface can draw the tick box where the line was written.
+    pub line: usize,
 }
 
 /// The checklist lines of a page, in order (pages, 2026-10-13).
@@ -646,7 +649,7 @@ pub struct ChecklistLine {
 pub fn checklist_of(text: &str) -> alloc::vec::Vec<ChecklistLine> {
     use alloc::string::ToString;
     let mut out = alloc::vec::Vec::new();
-    for line in text.lines() {
+    for (at, line) in text.lines().enumerate() {
         let l = line.trim_start();
         let (rest, bulleted) = match l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")) {
             Some(r) => (r.trim_start(), true),
@@ -671,6 +674,7 @@ pub fn checklist_of(text: &str) -> alloc::vec::Vec<ChecklistLine> {
         out.push(ChecklistLine {
             item: item.to_string(),
             done,
+            line: at,
         });
     }
     out
