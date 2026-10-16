@@ -23,7 +23,8 @@
 ## 4. Verification
 
 - [x] 4.1 `make ci`; sabotage each fix once.
-- [ ] 4.2 Phone dev app: "therapy next thursday at 4pm" shows on both Thursdays with the question; answering lands it.
+- [x] 4.2 Phone dev app: "therapy next thursday at 4pm" shows on both Thursdays with the question; answering lands it.
+  - Seen on the dev app 2026-10-13 (ledger).
 - [ ] 4.3 Real use: the person's therapy note is re-read and lands on 22 Oct 16:00.
 
 ## Notes from building it

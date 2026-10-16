@@ -22,3 +22,8 @@
 - 3.2 on the dev app 2026-10-14: lead 5 min set in Settings; "alarm test at 7:44pm" armed 19:39:00
   exactly, then 19:44:00; at 19:44 the alarm ringtone played on USAGE_ALARM with vibration.
 - Not seen: whether the ring repeated until dismissed (FLAG_INSISTENT); the person was holding the phone.
+
+## 4. Later (asked to wait, 2026-10-15)
+
+- [ ] 4.1 Ring through Do Not Disturb: ask once for notification-policy access, let the `alarms` channel bypass DND. Dev app first.
+- [ ] 4.2 Full-screen alarm on the lock screen.
