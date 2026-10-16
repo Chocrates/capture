@@ -13,7 +13,7 @@
 
 - [x] 3.1 `make ci`; sabotage each new test once.
 - [x] 3.2 Dev app: a moment 20 minutes out warns at 15 and rings at 0, loud, on vibrate.
-- [ ] 3.3 Real use.
+- [ ] 3.3 Real use. (2026-10-15: a real alert rang until swiped away — insistent ring confirmed on device. Warning-then-moment pair still to be seen.)
 
 ## Notes from building it
 
