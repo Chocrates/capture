@@ -250,6 +250,26 @@ fn the_window_answers_what_the_store_holds() {
         lines,
         vec![("passport".into(), false), ("charger".into(), true)]
     );
+    // Each item says which line it was written on, so the window draws its tick
+    // box there instead of the text and then the list again (2026-10-16).
+    assert_eq!(page.item_lines, vec![2, 3]);
+    let plain = capture(&paths, "groceries: milk, eggs");
+    capture_store::promote::settle(&paths).unwrap();
+    assert!(
+        ipc::note(plain).unwrap().item_lines.is_empty(),
+        "a list that is not a page is drawn as it was"
+    );
+    // What links here is listed by the linking page's name, not its slug.
+    let weekend = ipc::new_page("Weekend".into(), None).unwrap();
+    ipc::edit(
+        weekend.slug.clone(),
+        "Weekend\nbring [[trip-packing]]".into(),
+    )
+    .unwrap();
+    capture_store::promote::settle(&paths).unwrap();
+    let from = ipc::note("trip-packing".into()).unwrap().backlinks;
+    assert_eq!(from.len(), 1);
+    assert_eq!(from[0].alias.as_deref(), Some("weekend"));
     assert_eq!(
         ipc::completions("[[".into(), "trip".into()).unwrap(),
         vec!["trip-packing"]

@@ -166,6 +166,9 @@ pub struct Link {
 #[derive(Serialize, Debug)]
 pub struct Backlink {
     pub slug: String,
+    /// The linking note's own name, where it has one: what a person reads
+    /// instead of the slug.
+    pub alias: Option<String>,
     /// The name it used, which may not be this note's current one.
     pub name: String,
 }
@@ -224,6 +227,15 @@ pub struct Page {
     pub unclear_hour: Option<u32>,
     /// The two days the text leaves open, as "Thu 15 Oct", or empty.
     pub unclear_day: Vec<String>,
+    /// For a page, the line each checklist item was written on: item `n` is on
+    /// line `item_lines[n]`, counting `\n`s in the body from 0. Empty for
+    /// anything else.
+    ///
+    /// So the page draws each item's tick box where its line is, instead of
+    /// the text and then the list again beneath it (2026-10-16). Taken from
+    /// the `checklist_of` the projection writes the items from, so the window
+    /// never decides for itself which lines are items.
+    pub item_lines: Vec<u32>,
 }
 
 /// What a note currently is, beside what was captured.
@@ -469,14 +481,15 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             })
             .collect();
 
-        let backlinks = s
-            .links_to(&tgt)?
-            .into_iter()
-            .map(|b| Backlink {
+        let mut backlinks = Vec::new();
+        for b in s.links_to(&tgt)? {
+            let alias = s.note(&b.tgt)?.and_then(|n| n.alias);
+            backlinks.push(Backlink {
                 slug: b.slug,
+                alias,
                 name: b.name,
-            })
-            .collect();
+            });
+        }
 
         // The body, split once here so the page never has to find a link
         // itself. Zipped against `links` in order, which is what `ord` in that
@@ -545,6 +558,14 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             _ => None,
         };
 
+        let item_lines = match (&promotion, row.text.as_deref()) {
+            (Some(p), Some(text)) if p.kind == "page" => capture_parse::checklist_of(text)
+                .into_iter()
+                .map(|l| l.line as u32)
+                .collect(),
+            _ => Vec::new(),
+        };
+
         Ok(Page {
             note: rendered(&s, row)?,
             body,
@@ -555,6 +576,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
             suggestion,
             unclear_hour,
             unclear_day: day_labels(s.unclear_day_of(&tgt)?),
+            item_lines,
         })
     })())
 }

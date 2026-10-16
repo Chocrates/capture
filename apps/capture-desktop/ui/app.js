@@ -898,6 +898,21 @@ function openNote(name) {
   return showNote(name);
 }
 
+/// One item with a real checkbox, ticked by position: two items reading the
+/// same are ordinary on a shopping list, and their words cannot tell them apart.
+function tickItem(slug, item, ord) {
+  const li = el("li", item.done ? "item done" : "item");
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = item.done;
+  box.addEventListener("change", async () => {
+    await call("tick_item_at", { name: slug, ord, done: box.checked });
+    showNote(slug);
+  });
+  li.append(box, el("span", "item-text", item.text));
+  return li;
+}
+
 async function showNote(name, into = view) {
   // `into` is what makes a note page embeddable. Inside the wiki pane it is the
   // pane's content area rather than the whole surface, so the sidebar beside it
@@ -930,20 +945,20 @@ async function showNote(name, into = view) {
     // here. Every piece goes in as text — a note is stored verbatim and may
     // contain anything at all, so a link's name is set with textContent like
     // everything else and never as markup.
-    for (const p of page.body) {
+    const pieceNode = (p) => {
       if (p.mention) {
         // Followable in the middle of a sentence, with its sigil kept: it is
         // what somebody typed and how they will look for it, and hiding it
         // would make the page a paraphrase of the note rather than the note.
         const m = el("button", "mention", `${p.mention}${p.text}`);
         m.addEventListener("click", () => openMentions(p.mention, p.text));
-        text.append(m);
+        return m;
       } else if (!p.link) {
-        text.append(document.createTextNode(p.text));
+        return document.createTextNode(p.text);
       } else if (p.state === "ok") {
         const a = el("button", "link", p.text);
         a.addEventListener("click", () => openNote(p.target));
-        text.append(a);
+        return a;
       } else {
         // Shown, not hidden, and showing the name that failed. §4.3: an
         // unexplained absence costs more trust than an explained one, and a
@@ -959,8 +974,41 @@ async function showNote(name, into = view) {
           p.state === "moved"
             ? "this name no longer means what it did when it was written"
             : "nothing has this name yet";
-        text.append(b);
+        return b;
       }
+    };
+    const itemLines = page.item_lines || [];
+    if (itemLines.length && n.items.length) {
+      // A page, drawn line by line so each checklist line is its tick box
+      // where it was written, as the phone draws it (2026-10-16). Which lines
+      // are items is the store's answer, never this page's.
+      const itemAt = new Map(itemLines.map((line, ord) => [line, ord]));
+      const lines = [[]];
+      for (const p of page.body) {
+        if (p.mention || p.link) {
+          lines[lines.length - 1].push(pieceNode(p));
+          continue;
+        }
+        p.text.split("\n").forEach((part, i) => {
+          if (i > 0) lines.push([]);
+          if (part) lines[lines.length - 1].push(document.createTextNode(part));
+        });
+      }
+      lines.forEach((nodes, i) => {
+        const ord = itemAt.get(i);
+        const item = ord === undefined ? undefined : n.items[ord];
+        if (item) {
+          const row = el("ul", "items tickable");
+          row.append(tickItem(n.slug, item, ord));
+          text.append(row);
+        } else {
+          const line = el("div", "line");
+          line.append(...nodes);
+          text.append(line);
+        }
+      });
+    } else {
+      for (const p of page.body) text.append(pieceNode(p));
     }
   } else {
     text.className = "text absent";
@@ -1018,29 +1066,21 @@ async function showNote(name, into = view) {
   //
   // Ticked by position. Two items reading the same are ordinary on a shopping
   // list, and their words cannot tell them apart.
-  if (page.items && page.items.length) {
-    const list = el("ul", "items tickable");
-    page.items.forEach((item, ord) => {
-      const li = el("li", item.done ? "item done" : "item");
-      const box = el("input");
-      box.type = "checkbox";
-      box.checked = item.done;
-      box.addEventListener("change", async () => {
-        await call("tick_item_at", { name: n.slug, ord, done: box.checked });
-        showNote(n.slug);
-      });
-      li.append(box, el("span", "text", item.text));
-      list.append(li);
-    });
-    into.append(list);
-    const left = page.items.filter((i) => !i.done).length;
+  if (n.items.length) {
+    // On a page the boxes are already in the text, where each line is.
+    if (!(page.item_lines || []).length) {
+      const list = el("ul", "items tickable");
+      n.items.forEach((item, ord) => list.append(tickItem(n.slug, item, ord)));
+      into.append(list);
+    }
+    const left = n.items.filter((i) => !i.done).length;
     into.append(
       el(
         "p",
         "hint",
         left === 0
-          ? `All ${page.items.length} done.`
-          : `${left} of ${page.items.length} left.`,
+          ? `All ${n.items.length} done.`
+          : `${left} of ${n.items.length} left.`,
       ),
     );
   }
@@ -1109,7 +1149,13 @@ async function showNote(name, into = view) {
   // A correction outlives every edit. That is the point of one, and it was a
   // trap on 2026-10-13: an accepted suggestion held the wrong day through every
   // fix to the text. So the way back is shown wherever one is in force.
-  if (page.promotion && page.promotion.pinned) {
+  if (page.promotion && page.promotion.kind === "page") {
+    // A page is undone by "Make it a capture again" among the actions, so it
+    // says what it is rather than offering the same thing a second time.
+    into.append(
+      el("p", "hint", "A page: nothing in it goes on the calendar or the task list."),
+    );
+  } else if (page.promotion && page.promotion.pinned) {
     const box = el("div", "suggestion");
     box.append(el("p", null, "You set what this is, so editing the text will not change it."));
     const b = el("button", "act", "Read it again from the text");
@@ -1173,7 +1219,7 @@ async function showNote(name, into = view) {
 
   into.append(linkList("Linked from", page.backlinks, (b) => {
     const li = el("li");
-    const a = el("a", null, b.slug);
+    const a = el("a", null, b.alias || b.slug);
     a.addEventListener("click", () => openNote(b.slug));
     li.append(a, ` — as ${b.name}`);
     return li;
