@@ -151,7 +151,11 @@ private fun NoteRow(
         // truncating one of those would be noise. The whole list is one tap
         // away on the note, which is where a list somebody is working through
         // belongs anyway.
-        for (item in note.items.take(ITEMS_ON_A_ROW)) {
+        //
+        // None on a page's row: its checklist lines are already in its text,
+        // and drawing them again put each on the row twice (2026-10-18).
+        val shown = if (note.kind == "page") emptyList() else note.items
+        for (item in shown.take(ITEMS_ON_A_ROW)) {
             Row(
                 Modifier.fillMaxWidth()
                     // Tap ticks, hold opens.
@@ -187,7 +191,7 @@ private fun NoteRow(
             }
         }
 
-        if (note.items.size > ITEMS_ON_A_ROW) {
+        if (shown.size > ITEMS_ON_A_ROW) {
             Text(
                 "and ${note.items.size - ITEMS_ON_A_ROW} more",
                 style = MaterialTheme.typography.labelMedium,

@@ -259,6 +259,16 @@ fn the_window_answers_what_the_store_holds() {
         ipc::note(plain).unwrap().item_lines.is_empty(),
         "a list that is not a page is drawn as it was"
     );
+    // A search result says what each note is, as the timeline row does. It
+    // used to come back bare: no kind, no descriptor, no items (2026-10-18).
+    let found = ipc::search("trip".into()).unwrap();
+    let hit = found
+        .iter()
+        .find(|n| n.alias.as_deref() == Some("trip-packing"))
+        .expect("the page is found");
+    assert_eq!(hit.kind, "page");
+    assert_eq!(hit.items.len(), 2);
+
     // What links here is listed by the linking page's name, not its slug.
     let weekend = ipc::new_page("Weekend".into(), None).unwrap();
     ipc::edit(

@@ -2018,6 +2018,14 @@ bring everything on [[packing-list]]"
     a.settle().unwrap();
     assert!(a.note(slug).unwrap().parts.is_empty());
 
+    // A search result says what each note is, as the timeline row does. It
+    // used to come back bare: no kind, no descriptor, no items (2026-10-18).
+    let hits = a.search("passport".into(), 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].kind, "page");
+    assert_eq!(hits[0].items.len(), 2);
+    assert!(!hits[0].parts.is_empty());
+
     let from: Vec<(String, Option<String>)> = a
         .backlinks(packing.slug.clone())
         .unwrap()
@@ -2215,7 +2223,18 @@ fn a_persons_page_is_started_from_the_phone() {
     a.capture("coffee with @sarah".into()).unwrap();
     a.settle().unwrap();
     let made = a.new_page_for("@sarah".into(), "Sarah".into()).unwrap();
+    a.capture("dinner with @sarah thursday at 7pm".into())
+        .unwrap();
+    a.settle().unwrap();
     let ent = a.entity("@sarah".into()).unwrap().expect("sarah");
+    // Her page and the notes naming her say what they are, as a timeline row
+    // does. They used to come back bare (2026-10-18).
+    assert_eq!(ent.backing.as_ref().map(|n| n.kind.as_str()), Some("page"));
+    assert!(
+        ent.notes.iter().any(|n| n.kind == "event"),
+        "the dinner is not an event here: {:?}",
+        ent.notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+    );
     assert_eq!(
         ent.backing.map(|n| n.slug),
         Some(made.slug.clone()),

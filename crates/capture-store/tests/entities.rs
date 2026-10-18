@@ -233,6 +233,40 @@ fn a_backing_note_shows_once_and_keeps_being_what_it_was() {
 }
 
 #[test]
+fn what_was_decided_about_an_entity_survives_the_next_capture() {
+    // Found 2026-10-18: a person's page stopped being theirs as soon as any new
+    // note was captured. An ordinary capture updates the projection from a
+    // fold of only the notes it touches, and that update rewrote every entity
+    // from a fold holding none of the rename, merge or bind events — so all
+    // three were undone by the next thing written, with nothing saying so.
+    let scratch = Scratch::new("survives");
+    let paths = scratch.paths();
+    let page = capture(&paths, "everything about sarah");
+    capture(&paths, "ask @sarah about the invoice");
+    capture(&paths, "@sarah-chen sent the contract");
+    capture(&paths, "^acme kickoff");
+    mutate::bind_backing(&paths, "person", "sarah", Some(&page)).unwrap();
+    mutate::merge_entities(&paths, "person", "sarah-chen", "sarah").unwrap();
+    mutate::rename_entity(&paths, "project", "acme", "Acme Corp").unwrap();
+    settled(&paths);
+
+    // The next ordinary capture, naming both.
+    capture(&paths, "dinner with @sarah about ^acme");
+    let store = settled(&paths);
+
+    let sarah = store.entity("person", "sarah").unwrap().unwrap();
+    let tgt = store.resolve(&page).unwrap();
+    assert_eq!(sarah.backing, tgt, "her page stopped being hers");
+    assert_eq!(
+        store.entity_id("person", "sarah-chen").unwrap(),
+        Some(sarah.ent),
+        "the merge came undone"
+    );
+    let acme = store.entity("project", "acme").unwrap().unwrap();
+    assert_eq!(acme.display, "Acme Corp", "the rename came undone");
+}
+
+#[test]
 fn a_destroyed_note_names_nobody() {
     // The guard in `write_into` has always been there and has never been tested.
     // An entity page must not become a way to read what redaction removed.

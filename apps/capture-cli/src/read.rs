@@ -1001,7 +1001,7 @@ impl View for Review {
             say!();
             for i in items {
                 let why = match i.because {
-                    capture_store::review::Because::Forward => "you said to come back to this",
+                    capture_store::review::Because::Forward => "it has a date still ahead",
                     capture_store::review::Because::Never => "never looked at since capture",
                     capture_store::review::Because::Context => "captured somewhere like here",
                 };

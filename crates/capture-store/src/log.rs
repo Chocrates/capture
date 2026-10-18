@@ -497,16 +497,28 @@ impl Log {
     }
 
     /// Events that change notes they do not name.
+    ///
+    /// Mutes by rule, and what was decided about entities: renames, merges and
+    /// bindings. The entity ones govern every note that mentions the entity,
+    /// and the projection's entity rows are rewritten from whatever fold it is
+    /// handed — so a partial fold without them undid all three on the next
+    /// ordinary capture (found 2026-10-18).
     pub fn rules(&self) -> Result<Vec<Envelope>> {
+        use capture_core::event::Kind;
         let mut st = self.conn.prepare(
             "SELECT id, dev, seq, hlc_wall, hlc_counter, hlc_origin, kind, tgt, prev, occ,
                     chain, bhash, body, sig
-             FROM events WHERE tgt IS NULL AND kind = ?1 AND aside IS NULL
+             FROM events WHERE tgt IS NULL AND kind IN (?1, ?2, ?3, ?4) AND aside IS NULL
              ORDER BY hlc_wall, hlc_counter, hlc_origin",
         )?;
         let mut out = Vec::new();
         for r in st.query_map(
-            params![capture_core::event::Kind::MUTE.0 as i64],
+            params![
+                Kind::MUTE.0 as i64,
+                Kind::ENTITY_RENAME.0 as i64,
+                Kind::ENTITY_MERGE.0 as i64,
+                Kind::ENTITY_BIND.0 as i64,
+            ],
             row_to_envelope,
         )? {
             out.push(r?);

@@ -636,6 +636,16 @@ async function call(name, args) {
 /// a few seconds later.
 function notReady(e) {
   view.replaceChildren();
+  const said = String(e.message || e);
+  // A name that answers to nothing is not a store that is busy, and waiting
+  // will not change it: the note was renamed or destroyed, or never was. Said
+  // as that, rather than "trying again" (seen rendered 2026-10-18).
+  if (said.startsWith("not found:")) {
+    view.append(el("h2", null, "Nothing has that name"));
+    view.append(el("p", null, said.slice("not found:".length).trim()));
+    view.append(el("p", "hint", "It may have been renamed or destroyed. Search finds it by its words."));
+    return;
+  }
   view.append(el("h2", null, "Could not read the store"));
   view.append(el("p", null, String(e.message || e)));
   view.append(el("p", "hint", "Trying again — this usually clears on its own."));
@@ -771,7 +781,12 @@ function noteRow(note, onOpen) {
   //
   // By position within this capture, never by the item's words. Two items
   // reading the same are ordinary on a shopping list.
-  if (note.items && note.items.length) {
+  //
+  // Not on a page's row: a page's checklist lines are already in its text, and
+  // drawing them again beneath put every one on the row twice (2026-10-18).
+  // They are ticked on the page, where each is drawn in place.
+  row.append(body);
+  if (note.items && note.items.length && note.kind !== "page") {
     const list = el("ul", "items tickable");
     note.items.forEach((item, ord) => {
       const li = el("li", item.done ? "item done" : "item");
@@ -800,13 +815,11 @@ function noteRow(note, onOpen) {
         li.classList.toggle("done", box.checked);
         refresh();
       });
-      li.append(box, el("span", "text", item.text));
+      li.append(box, el("span", "item-text", item.text));
       list.append(li);
     });
     row.append(list);
   }
-
-  row.append(body);
   return row;
 }
 
@@ -2166,7 +2179,7 @@ async function showReview() {
 }
 
 const WHY = {
-  forward: "you said to come back to this",
+  forward: "it has a date still ahead",
   "never-engaged": "never looked at since capture",
   context: "captured somewhere like here",
 };

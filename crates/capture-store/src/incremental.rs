@@ -51,10 +51,15 @@ pub fn apply(
         return Ok(whole.notes.len());
     }
 
-    let touched = affected(arriving);
+    let mut touched = affected(arriving);
     if touched.is_empty() {
         return Ok(0);
     }
+    // The notes bound as entities' pages come along too. A binding travels
+    // with the rules, and the fold applies one only when the note it names is
+    // in the fold — without it the binding is held as `NoTarget` and the
+    // entity is written with no page.
+    touched.extend(bound_notes(&log.rules()?));
 
     // Every event belonging to a touched note, however old — plus every rule
     // that governs notes without naming them.
@@ -95,6 +100,17 @@ pub fn apply(
     let partial = fold::fold_seeded(&relevant, &known);
     store.merge(&partial, now)?;
     Ok(touched.len())
+}
+
+/// The notes any binding among these events names.
+fn bound_notes(rules: &[Envelope]) -> BTreeSet<EventId> {
+    rules
+        .iter()
+        .filter(|e| e.header.kind == Kind::ENTITY_BIND)
+        .filter_map(|e| e.body.as_ref())
+        .filter_map(|b| minicbor::decode::<capture_core::body::EntityBindBody>(b).ok())
+        .filter_map(|b| b.note)
+        .collect()
 }
 
 /// Every name these events could ask the projection about.

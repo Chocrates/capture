@@ -52,7 +52,7 @@ fun ReviewSession(
                     // invisible is indistinguishable from a random one.
                     Text(
                         when (item.because) {
-                            "forward" -> "You said you'd come back to this"
+                            "forward" -> "It has a date still ahead"
                             "never-engaged" -> "Captured, never returned to"
                             else -> "Fits where you are now"
                         },

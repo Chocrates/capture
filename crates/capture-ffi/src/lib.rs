@@ -1261,7 +1261,8 @@ impl Archive {
                 break;
             }
             if let Some(n) = store.note(&tgt)? {
-                out.push(summarise(n, self.now_ms()));
+                // Read as a timeline row is, so a hit says what it is.
+                out.push(read_as(&store, n, self.now_ms())?);
             }
         }
         Ok(out)
@@ -3211,15 +3212,20 @@ impl Archive {
         row: capture_store::projection::EntityRow,
     ) -> Result<Entity> {
         let now = jiff::Timestamp::now().as_millisecond().max(0) as u64;
+        // Read as timeline rows are, so the page and the notes naming it say
+        // what they are. They came back bare until 2026-10-18.
         let backing = match row.backing {
-            Some(tgt) => store.note(&tgt)?.map(|n| summarise(n, now)),
+            Some(tgt) => match store.note(&tgt)? {
+                Some(n) => Some(read_as(store, n, now)?),
+                None => None,
+            },
             None => None,
         };
         let notes = store
             .entity_notes(&row.ent, now)?
             .into_iter()
-            .map(|n| summarise(n, now))
-            .collect();
+            .map(|n| read_as(store, n, now))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Entity {
             display: row.display,
             kind: row.kind,

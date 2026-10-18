@@ -105,7 +105,7 @@ h2:first-child { margin-top: 0; }
 /* Context is shown on the row, not behind an interaction. It is frequently the
  * recognition cue when the text is not, which is the only reason it is
  * collected — hiding it wastes it. */
-.ctx { margin-top: .35rem; display: flex; flex-wrap: wrap; gap: .3rem; }
+.ctx { margin: .35rem 0 .6rem; display: flex; flex-wrap: wrap; gap: .3rem; }
 .ctx button {
   background: none; border: 1px solid var(--line); border-radius: 4px;
   color: var(--dim); font-size: .75rem; padding: .05rem .4rem; cursor: pointer;
@@ -422,7 +422,7 @@ nav .hist:not(:disabled):hover { color: var(--text); }
   padding: .1rem 0;
 }
 .note .items.tickable input[type="checkbox"] { cursor: pointer; }
-.note .items.tickable .item.done .text {
+.note .items.tickable .item.done .item-text {
   color: var(--dim);
   text-decoration: line-through;
 }

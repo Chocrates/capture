@@ -53,7 +53,9 @@ pub const SESSION: usize = 5;
 /// Why a note was chosen, in the priority order §2.8 states.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Because {
-    /// It carries a forward marker the recognizer found — "revisit Q2".
+    /// It has a start still ahead — "revisit Q2", but equally "dentist
+    /// thursday". The query selects any future start, so the surfaces say
+    /// that rather than "you said to come back to this" (2026-10-18).
     Forward,
     /// It has never been engaged with since it was captured.
     Never,

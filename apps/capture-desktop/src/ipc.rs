@@ -1556,7 +1556,8 @@ pub fn search(query: String) -> std::result::Result<Vec<Note>, String> {
         let mut out = Vec::new();
         for tgt in s.search(&query, now)? {
             if let Some(n) = s.note(&tgt)? {
-                out.push(Note::from(n));
+                // Rendered as a timeline row is, so a hit says what it is.
+                out.push(rendered(&s, n)?);
             }
         }
         Ok(out)
