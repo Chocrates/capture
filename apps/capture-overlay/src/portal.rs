@@ -37,8 +37,9 @@ use std::collections::HashMap;
 
 use capture_store::hotkey::Chord;
 use capture_store::{Error, Result};
-use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use futures_lite::StreamExt;
+use zbus::proxy::SignalStream;
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 
 /// Where the portal lives.
 const DEST: &str = "org.freedesktop.portal.Desktop";
@@ -84,15 +85,56 @@ pub fn token(kind: &str, n: u64) -> String {
 /// only part of answering the chord; the press also has to be recorded, or the
 /// dead-gesture check reports a working gesture as dead.
 pub fn hold(chord: &Chord, fired: impl Fn() -> bool + Send + 'static) -> Result<()> {
-    let conn = Connection::session().map_err(|e| dbus("cannot reach the session bus", e))?;
+    let (conn, mut activations) = zbus::block_on(open(chord))?;
+
+    std::thread::spawn(move || {
+        // The connection is moved in and held: dropping it would close the
+        // session, and the portal would forget the binding.
+        let _conn = conn;
+        zbus::block_on(async {
+            while let Some(message) = activations.next().await {
+                // `(o session_handle, s shortcut_id, t timestamp, a{sv} options)`.
+                // Only the id is inspected; the session is this process's own,
+                // and the portal's timestamp is the desktop's clock rather than
+                // the store's.
+                let Ok((_, id, _, _)) = message.body().deserialize::<(
+                    OwnedObjectPath,
+                    String,
+                    u64,
+                    HashMap<String, OwnedVariant>,
+                )>() else {
+                    tracing::warn!("an activation arrived in a shape this does not understand");
+                    continue;
+                };
+
+                if id != SHORTCUT_ID {
+                    continue;
+                }
+
+                if !fired() {
+                    return;
+                }
+            }
+            tracing::warn!("the portal stopped sending activations; the chord is no longer bound");
+        })
+    });
+
+    Ok(())
+}
+
+/// Open the session and bind the chord, then subscribe to its activations.
+async fn open(chord: &Chord) -> Result<(Connection, SignalStream<'static>)> {
+    let conn = Connection::session()
+        .await
+        .map_err(|e| dbus("cannot reach the session bus", e))?;
 
     let unique = conn
         .unique_name()
         .ok_or_else(|| Error::Usage("the session bus gave this process no name".into()))?
         .to_string();
 
-    let session = create_session(&conn, &unique)?;
-    let trigger = bind(&conn, &unique, &session, chord)?;
+    let session = create_session(&conn, &unique).await?;
+    let trigger = bind(&conn, &unique, &session, chord).await?;
 
     // What the user agreed to, which is not necessarily what was asked for.
     // Reported rather than assumed: a portal that binds a different chord and a
@@ -110,65 +152,43 @@ pub fn hold(chord: &Chord, fired: impl Fn() -> bool + Send + 'static) -> Result<
     }
 
     let shortcuts = Proxy::new(&conn, DEST, OBJECT, SHORTCUTS)
+        .await
         .map_err(|e| dbus("cannot reach the shortcuts portal", e))?;
 
-    let mut activations = shortcuts
+    let activations = shortcuts
         .receive_signal("Activated")
+        .await
         .map_err(|e| dbus("cannot listen for shortcut activations", e))?;
 
-    std::thread::spawn(move || {
-        // The connection is moved in and held: dropping it would close the
-        // session, and the portal would forget the binding.
-        let _conn = conn;
-        for message in activations.by_ref() {
-            // `(o session_handle, s shortcut_id, t timestamp, a{sv} options)`.
-            // Only the id is inspected; the session is this process's own, and
-            // the portal's timestamp is the desktop's clock rather than the
-            // store's.
-            let Ok((_, id, _, _)) =
-                message
-                    .body()
-                    .deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
-            else {
-                tracing::warn!("an activation arrived in a shape this does not understand");
-                continue;
-            };
-
-            if id != SHORTCUT_ID {
-                continue;
-            }
-
-            if !fired() {
-                return;
-            }
-        }
-        tracing::warn!("the portal stopped sending activations; the chord is no longer bound");
-    });
-
-    Ok(())
+    Ok((conn, activations))
 }
 
 /// Ask the portal for a session, and wait for it to say yes.
-fn create_session(conn: &Connection, unique: &str) -> Result<OwnedObjectPath> {
+async fn create_session(conn: &Connection, unique: &str) -> Result<OwnedObjectPath> {
     let handle = token("session", 1);
     let session_token = token("shared", 1);
 
     // Subscribed before the call, which is the whole reason this is not a
     // `gdbus` one-liner.
-    let mut replies = responses(conn, unique, &handle)?;
+    let mut replies = responses(conn, unique, &handle).await?;
 
-    let options: HashMap<&str, Value> = HashMap::from([
-        ("handle_token", Value::from(handle.as_str())),
-        ("session_handle_token", Value::from(session_token.as_str())),
+    let options: HashMap<&str, Variant> = HashMap::from([
+        ("handle_token", Variant::from(handle.as_str())),
+        (
+            "session_handle_token",
+            Variant::from(session_token.as_str()),
+        ),
     ]);
 
     let shortcuts = Proxy::new(conn, DEST, OBJECT, SHORTCUTS)
+        .await
         .map_err(|e| dbus("cannot reach the shortcuts portal", e))?;
     shortcuts
         .call_method("CreateSession", &(options,))
+        .await
         .map_err(|e| dbus("the portal refused to open a session", e))?;
 
-    let results = wait(&mut replies, "opening a session")?;
+    let results = wait(&mut replies, "opening a session").await?;
 
     // `session_handle` is a string in the results and an object path
     // everywhere it is then used. The specification is inconsistent about this
@@ -194,24 +214,25 @@ fn create_session(conn: &Connection, unique: &str) -> Result<OwnedObjectPath> {
 }
 
 /// Ask for the chord, and report what was actually bound.
-fn bind(
+async fn bind(
     conn: &Connection,
     unique: &str,
     session: &OwnedObjectPath,
     chord: &Chord,
 ) -> Result<Option<String>> {
     let handle = token("bind", 1);
-    let mut replies = responses(conn, unique, &handle)?;
+    let mut replies = responses(conn, unique, &handle).await?;
 
-    let mut description: HashMap<&str, Value> = HashMap::new();
-    description.insert("description", Value::from("Capture a note"));
-    description.insert("preferred_trigger", Value::from(chord.portal()));
+    let mut description: HashMap<&str, Variant> = HashMap::new();
+    description.insert("description", Variant::from("Capture a note"));
+    description.insert("preferred_trigger", Variant::from(chord.portal()));
 
-    let shortcuts: Vec<(&str, HashMap<&str, Value>)> = vec![(SHORTCUT_ID, description)];
-    let options: HashMap<&str, Value> =
-        HashMap::from([("handle_token", Value::from(handle.as_str()))]);
+    let shortcuts: Vec<(&str, HashMap<&str, Variant>)> = vec![(SHORTCUT_ID, description)];
+    let options: HashMap<&str, Variant> =
+        HashMap::from([("handle_token", Variant::from(handle.as_str()))]);
 
     let proxy = Proxy::new(conn, DEST, OBJECT, SHORTCUTS)
+        .await
         .map_err(|e| dbus("cannot reach the shortcuts portal", e))?;
 
     // The empty parent window is deliberate: there is no window to parent the
@@ -219,32 +240,31 @@ fn bind(
     // showing it to ask about a keybinding would be the wrong surface entirely.
     proxy
         .call_method("BindShortcuts", &(session, shortcuts, "", options))
+        .await
         .map_err(|e| dbus("the portal refused to bind the chord", e))?;
 
-    let results = wait(&mut replies, "binding the chord")?;
+    let results = wait(&mut replies, "binding the chord").await?;
     Ok(bound_trigger(&results))
 }
 
 /// What the portal says it bound, if it says.
-fn bound_trigger(results: &HashMap<String, OwnedValue>) -> Option<String> {
+fn bound_trigger(results: &HashMap<String, OwnedVariant>) -> Option<String> {
     let shortcuts = results.get("shortcuts")?;
-    let list: Vec<(String, HashMap<String, OwnedValue>)> =
+    let list: Vec<(String, HashMap<String, OwnedVariant>)> =
         Vec::try_from(shortcuts.try_clone().ok()?).ok()?;
     let (_, props) = list.into_iter().find(|(id, _)| id == SHORTCUT_ID)?;
     String::try_from(props.get("trigger_description")?.try_clone().ok()?).ok()
 }
 
 /// Subscribe to the replies for one request, before it is made.
-fn responses<'a>(
-    conn: &'a Connection,
-    unique: &str,
-    handle: &str,
-) -> Result<zbus::blocking::proxy::SignalIterator<'a>> {
+async fn responses(conn: &Connection, unique: &str, handle: &str) -> Result<SignalStream<'static>> {
     let path = request_path(unique, handle);
     let request = Proxy::new(conn, DEST, path, REQUEST)
+        .await
         .map_err(|e| dbus("cannot listen for the portal's reply", e))?;
     request
         .receive_signal("Response")
+        .await
         .map_err(|e| dbus("cannot listen for the portal's reply", e))
 }
 
@@ -253,15 +273,16 @@ fn responses<'a>(
 /// Response code 0 is success, 1 is the user cancelling, 2 is the portal ending
 /// the interaction some other way. Cancelling is a decision rather than a fault
 /// and says so — the whole point of this backend is that it is the user's call.
-fn wait(
-    replies: &mut zbus::blocking::proxy::SignalIterator<'_>,
+async fn wait(
+    replies: &mut SignalStream<'_>,
     doing: &str,
-) -> Result<HashMap<String, OwnedValue>> {
+) -> Result<HashMap<String, OwnedVariant>> {
     let message = replies
         .next()
+        .await
         .ok_or_else(|| Error::Usage(format!("the portal never replied while {doing}")))?;
 
-    let (code, results): (u32, HashMap<String, OwnedValue>) =
+    let (code, results): (u32, HashMap<String, OwnedVariant>) =
         message.body().deserialize().map_err(variant)?;
 
     match code {

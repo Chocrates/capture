@@ -6,13 +6,13 @@
 //! actually are. Both are moments the system is *told* about, and waiting
 //! thirty seconds to discover them is a choice rather than a constraint.
 //!
-//! # Why the system bus, and why blocking
+//! # Why the system bus, and why a thread each
 //!
 //! Both signals come from daemons everyone already runs — logind for sleep,
 //! NetworkManager for connectivity — so there is nothing to install and
-//! nothing to poll. The blocking API for the same reason the overlay uses it:
-//! one subscription does not need a scheduler, and this runs on its own thread
-//! and blocks on it.
+//! nothing to poll. Each subscription gets its own thread that sits in
+//! `zbus::block_on` for as long as it listens: one subscription does not need
+//! a scheduler, and zbus drives the connection on the thread that waits.
 //!
 //! # Best effort, always
 //!
@@ -24,7 +24,8 @@
 
 use std::sync::mpsc::Sender;
 
-use zbus::blocking::{Connection, Proxy};
+use futures_lite::StreamExt;
+use zbus::{Connection, Proxy};
 
 /// What woke us.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,21 +68,25 @@ fn watch(tx: Sender<Nudge>) {
 /// interesting: there is no point starting a sync a moment before the network
 /// goes away.
 fn sleep_signals(tx: &Sender<Nudge>) -> zbus::Result<()> {
-    let conn = Connection::system()?;
-    let proxy = Proxy::new(
-        &conn,
-        "org.freedesktop.login1",
-        "/org/freedesktop/login1",
-        "org.freedesktop.login1.Manager",
-    )?;
+    zbus::block_on(async {
+        let conn = Connection::system().await?;
+        let proxy = Proxy::new(
+            &conn,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await?;
 
-    for signal in proxy.receive_signal("PrepareForSleep")? {
-        let going_to_sleep: bool = signal.body().deserialize()?;
-        if !going_to_sleep && tx.send(Nudge::Woke).is_err() {
-            return Ok(()); // the daemon is shutting down
+        let mut signals = proxy.receive_signal("PrepareForSleep").await?;
+        while let Some(signal) = signals.next().await {
+            let going_to_sleep: bool = signal.body().deserialize()?;
+            if !going_to_sleep && tx.send(Nudge::Woke).is_err() {
+                return Ok(()); // the daemon is shutting down
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// NetworkManager's overall state, which changes on every connect and
@@ -91,20 +96,24 @@ fn sleep_signals(tx: &Sender<Nudge>) -> zbus::Result<()> {
 /// about too, because it is what makes the remembered addresses stale. The
 /// round that follows finds nothing and costs nothing.
 fn network_signals(tx: &Sender<Nudge>) -> zbus::Result<()> {
-    let conn = Connection::system()?;
-    let proxy = Proxy::new(
-        &conn,
-        "org.freedesktop.NetworkManager",
-        "/org/freedesktop/NetworkManager",
-        "org.freedesktop.NetworkManager",
-    )?;
+    zbus::block_on(async {
+        let conn = Connection::system().await?;
+        let proxy = Proxy::new(
+            &conn,
+            "org.freedesktop.NetworkManager",
+            "/org/freedesktop/NetworkManager",
+            "org.freedesktop.NetworkManager",
+        )
+        .await?;
 
-    for _ in proxy.receive_signal("StateChanged")? {
-        if tx.send(Nudge::Network).is_err() {
-            return Ok(());
+        let mut signals = proxy.receive_signal("StateChanged").await?;
+        while signals.next().await.is_some() {
+            if tx.send(Nudge::Network).is_err() {
+                return Ok(());
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Start watching, delivering into the daemon's own channel.

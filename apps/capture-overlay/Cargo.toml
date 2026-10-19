@@ -27,3 +27,4 @@ tracing-subscriber = { workspace = true }
 winit = { workspace = true }
 x11rb = { workspace = true }
 zbus = { workspace = true }
+futures-lite = { workspace = true }

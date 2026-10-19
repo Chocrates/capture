@@ -17,8 +17,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jiff = { workspace = true }
 # For the two signals that beat the timer: logind's resume and
-# NetworkManager's state change. Blocking API, one thread each.
+# NetworkManager's state change. One thread each, sitting in zbus::block_on.
 zbus = { workspace = true }
+futures-lite = { workspace = true }
 # To answer "which network is this" and "where can I be reached" with something
 # true. Already in the tree under mdns-sd; named here because this crate uses
 # it directly.
