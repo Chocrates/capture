@@ -66,6 +66,8 @@ fn capture() -> &'static str {
 struct Pty {
     master: OwnedFd,
     child: Child,
+    /// What the shell printed before the first key, for a failure message.
+    startup: String,
 }
 
 impl Pty {
@@ -115,7 +117,11 @@ impl Pty {
         }
 
         let child = cmd.spawn()?;
-        Ok(Pty { master, child })
+        Ok(Pty {
+            master,
+            child,
+            startup: String::new(),
+        })
     }
 
     /// Type bytes, exactly as given.
@@ -140,28 +146,53 @@ impl Pty {
     /// starts, so "fix auth" was captured as "ix auth". The prompt is drawn by
     /// the line editor itself, so once it is on the screen keys reach it.
     fn wait_for_prompt(&mut self) {
+        let seen = self.read_until(b"$ ", 500);
+        self.startup = String::from_utf8_lossy(&seen).escape_debug().to_string();
+        // A moment for the editor to finish drawing what follows the prompt.
+        std::thread::sleep(Duration::from_millis(100));
+        self.drain();
+    }
+
+    /// Type the first key until the line editor echoes it.
+    ///
+    /// Waiting for the prompt was not enough on a CI runner: zsh still
+    /// dropped the first key now and then. What is under test is how the
+    /// finished line reaches the store, not keys typed while a shell starts,
+    /// so the first key is confirmed before the rest follow.
+    fn type_first_until_echoed(&mut self, first: u8) -> std::io::Result<()> {
+        for _ in 0..5 {
+            self.type_bytes(&[first])?;
+            if self.read_until(&[first], 100).contains(&first) {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::other(
+            "the shell never echoed the first key",
+        ))
+    }
+
+    /// Read what the shell prints until `want` appears, for up to `steps`
+    /// 20 ms steps. Returns everything read.
+    fn read_until(&mut self, want: &[u8], steps: u32) -> Vec<u8> {
         let mut f = std::fs::File::from(self.master.try_clone().unwrap());
         let raw = rustix::fs::fcntl_getfl(f.as_fd()).unwrap();
         rustix::fs::fcntl_setfl(f.as_fd(), raw | rustix::fs::OFlags::NONBLOCK).ok();
         let mut seen = Vec::new();
         let mut buf = [0u8; 4096];
-        // Up to ten seconds, in 20 ms steps.
-        for _ in 0..500 {
+        for _ in 0..steps {
             while let Ok(n) = f.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
                 seen.extend_from_slice(&buf[..n]);
             }
-            if seen.windows(2).any(|w| w == b"$ ") {
+            if seen.windows(want.len()).any(|w| w == want) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         rustix::fs::fcntl_setfl(f.as_fd(), raw).ok();
-        // A moment for the editor to finish drawing what follows the prompt.
-        std::thread::sleep(Duration::from_millis(100));
-        self.drain();
+        seen
     }
 
     /// Drain whatever the shell has echoed, so it does not confuse a later read.
@@ -313,11 +344,18 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
 
     pty.wait_for_prompt();
 
-    pty.type_bytes(line.as_bytes()).expect("the line is typed");
+    let (first, rest) = line.as_bytes().split_first().expect("a line to type");
+    pty.type_first_until_echoed(*first)
+        .unwrap_or_else(|e| panic!("{e}; the shell printed: {}", pty.startup));
+    pty.type_bytes(rest).expect("the line is typed");
     std::thread::sleep(Duration::from_millis(150));
     pty.type_bytes(&[CHORD]).expect("the chord is pressed");
 
-    store.wait_for(1)
+    let stored = store.wait_for(1);
+    if stored.first().map(String::as_str) != Some(line) {
+        eprintln!("{shell}: at startup the shell printed: {}", pty.startup);
+    }
+    stored
 }
 
 fn capture_dir() -> PathBuf {

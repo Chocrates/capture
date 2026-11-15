@@ -335,11 +335,28 @@ fn a_killed_drain_neither_loses_nor_duplicates_a_capture() {
         // captures are lost from the top of the numbering, so the survivors
         // stay perfectly consecutive while the losses leave no trace at all.
         for want in acknowledged(scratch.path()) {
-            assert!(
-                present.contains(&want),
-                "round {round}: capture {want} was acknowledged and is now in \
-                 neither the log nor the spool"
-            );
+            if !present.contains(&want) {
+                // Which of two faults: a read-only reader that cannot see a
+                // commit the killed writer made, or a capture really gone. A
+                // writable open recovers the WAL; if it is there now, the
+                // first.
+                let rw = Log::open(&scratch.path().join("events.db")).unwrap();
+                let after_rw = rw
+                    .all()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.body.as_deref().and_then(index_of) == Some(want));
+                panic!(
+                    "round {round}: capture {want} was acknowledged and is now in \
+                     neither the log nor the spool, as a reader sees them \
+                     (after a writable open it is {})",
+                    if after_rw {
+                        "in the log"
+                    } else {
+                        "still nowhere"
+                    }
+                );
+            }
             highest = highest.max(want);
         }
     }
