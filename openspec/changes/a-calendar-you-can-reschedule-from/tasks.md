@@ -47,5 +47,8 @@
 
 ## 6. Close
 
-- [ ] 6.1 `make ci` and `make android` green; sabotage each new test once.
+- [x] 6.1 `make ci` and `make android` green; sabotage each new test once.
+  - 2026-11-15. `make android`: 37 suites pass on an API 35 emulator. Seven sabotages, five caught first time: bare 1–12 read as a time (4 parse tests), `moved_from` dropped, skipped not flagged, "thursday" counted from now (D5), skip after a move a no-op (D7).
+  - Missed, fixed: `settle_hour` without its re-promote passed, because the test's read opened a Session, which re-reads everything first. The gym test now reads the projection as `settle_hour` left it, and catches it.
+  - Missed, left: `occurrence_on` taking the first of several on a day. No rule makes two occurrences on one civil day (the finest is daily), so the refusal is defensive and has no input that reaches it.
 - [ ] 6.2 Deploy to the desktop and the real phone; the person tries their own gym and dentist.

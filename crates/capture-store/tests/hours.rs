@@ -68,6 +68,19 @@ fn the_gym_lands_on_mondays_with_no_time_until_asked() {
     let settled = settle_hour(&paths, &slug, Half::Pm).unwrap();
     assert_eq!(settled, "go to the gym every monday at 2pm");
 
+    // Read as a surface does straight after the answer: the projection as
+    // settle_hour left it, with no Session opened to re-read it first. With
+    // one, a settle_hour that forgot to re-promote passed (found by sabotage,
+    // 2026-11-15).
+    let store = capture_store::projection::current(&paths).unwrap();
+    let tgt = store.resolve(&slug).unwrap().unwrap();
+    let now = store
+        .promotion_of(&tgt)
+        .unwrap()
+        .expect("promoted")
+        .descriptor;
+    assert!(now.contains("14:00"), "not re-read on answering: {now}");
+
     let (descriptor, text) = read(&paths, &slug);
     assert!(descriptor.contains("14:00"), "{descriptor}");
     assert_eq!(
