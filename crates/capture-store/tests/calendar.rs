@@ -16,11 +16,17 @@ use capture_store::session::Session;
 use capture_store::{StorePaths, mutate, promote};
 use capture_time::{FloatingDate, Zone};
 
-const ZONE: &str = "America/Chicago";
 const HOUR: i64 = 60 * 60 * 1000;
 
+/// The zone the capture itself reads in. It was a fixed "America/Chicago",
+/// while a capture's "at 2" and "thursday" follow `$TZ`, so the tests passed
+/// only on a machine set to Chicago and CI had to pin it.
+fn zone_name() -> String {
+    capture_store::notifier::local_zone()
+}
+
 fn zone() -> Zone {
-    Zone::new(ZONE).unwrap()
+    Zone::new(&zone_name()).unwrap()
 }
 
 mod common;
@@ -80,7 +86,7 @@ fn weekly_gym(paths: &StorePaths, monday: FloatingDate) -> String {
                 // Four weeks back, so "last Monday" is always one of its own.
                 start_ms: at(plus(monday, -28), 14),
                 end_ms: Some(at(plus(monday, -28), 15)),
-                tz: ZONE.into(),
+                tz: zone_name(),
             },
             rule: RuleSpec {
                 freq: 1,
@@ -121,7 +127,7 @@ fn a_week_lists_each_day_and_what_happens_on_it() {
             when: When::Timed {
                 start_ms: at(plus(monday, 3), 14),
                 end_ms: None,
-                tz: ZONE.into(),
+                tz: zone_name(),
             },
             location: None,
             attendees: Vec::new(),

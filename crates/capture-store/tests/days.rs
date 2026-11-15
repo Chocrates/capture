@@ -19,11 +19,17 @@ use capture_store::session::Session;
 use capture_store::{StorePaths, mutate, promote};
 use capture_time::{FloatingDate, Zone};
 
-const ZONE: &str = "America/Chicago";
 const HOUR: i64 = 60 * 60 * 1000;
 
+/// The zone the capture itself reads in. It was a fixed "America/Chicago",
+/// while a capture's "at 2" and "thursday" follow `$TZ`, so the tests passed
+/// only on a machine set to Chicago and CI had to pin it.
+fn zone_name() -> String {
+    capture_store::notifier::local_zone()
+}
+
 fn zone() -> Zone {
-    Zone::new(ZONE).unwrap()
+    Zone::new(&zone_name()).unwrap()
 }
 
 fn now() -> i64 {
@@ -224,7 +230,7 @@ fn a_correction_read_again_follows_the_text() {
 fn a_suggestion_says_what_accepting_it_would_leave_out() {
     let thursday = capture_store::review::suggestion_for(
         "dentist thursday, maybe 4pm",
-        Some(ZONE),
+        Some(zone_name().as_str()),
         capture_time::at_local(a_tuesday(), 12, 0, zone()).unwrap(),
     )
     .expect("a bare day is a suggestion");

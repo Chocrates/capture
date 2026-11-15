@@ -22,11 +22,6 @@ env:
   CARGO_TERM_COLOR: always
   # Nothing in CI should post a desktop notification.
   CAPTURE_SILENT: "1"
-  # The zone the suite was written in. Some calendar tests read in a fixed
-  # America/Chicago while the capture under test follows $TZ, so on a UTC
-  # runner the two disagree about which day "monday at 2" is. A test fault,
-  # not a product one; pinned here until those tests name one zone for both.
-  TZ: America/Chicago
 
 jobs:
   linux:
