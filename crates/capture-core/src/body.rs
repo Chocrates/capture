@@ -486,7 +486,38 @@ pub enum When {
         #[n(1)]
         end_date: String,
     },
+    /// A time set by the sun: sunrise or sunset on a date, plus an offset
+    /// (alarms-at-sunrise-and-sunset D2, D4).
+    ///
+    /// No instant and no place. Where the person is never enters the log, so
+    /// the clock time is worked out on the phone, at due time, from where the
+    /// phone last was; every other surface shows "at sunrise". As a series'
+    /// `when`, `date` is the first day.
+    ///
+    /// A new variant on purpose, not a field beside `Timed`: an older build
+    /// holds a promotion it cannot decode, where a trailing field it ignored
+    /// would leave it ringing a placeholder time — wrong, and silently.
+    #[n(2)]
+    Solar {
+        /// The local date, `YYYY-MM-DD`.
+        #[n(0)]
+        date: String,
+        /// [`SUN_RISE`] or [`SUN_SET`].
+        #[n(1)]
+        event: u8,
+        /// Minutes after the event; negative is before. Within ±360.
+        #[n(2)]
+        offset_min: i16,
+        /// The IANA zone the date is in.
+        #[n(3)]
+        tz: String,
+    },
 }
+
+/// [`When::Solar::event`]: sunrise.
+pub const SUN_RISE: u8 = 0;
+/// [`When::Solar::event`]: sunset.
+pub const SUN_SET: u8 = 1;
 
 /// A recurrence rule, as the log stores it.
 ///

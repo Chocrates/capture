@@ -60,6 +60,13 @@ pub fn render(p: &Promoted) -> String {
                     s.push_str(&format!(" at {h:02}:{m:02}"));
                 }
             }
+            if let When::Solar {
+                event, offset_min, ..
+            } = &sf.when
+            {
+                s.push(' ');
+                s.push_str(&sun_phrase(*event, *offset_min));
+            }
             if sf.carries_forward {
                 // Worth saying, because it is the difference between a missed
                 // walk and a missed dose (§3.6).
@@ -83,6 +90,12 @@ fn when(w: &When) -> String {
                 format!("{start_date} – {end_date}")
             }
         }
+        When::Solar {
+            date,
+            event,
+            offset_min,
+            ..
+        } => format!("{date} {}", sun_phrase(*event, *offset_min)),
         When::Timed {
             start_ms,
             end_ms,
@@ -100,6 +113,29 @@ fn when(w: &When) -> String {
                 _ => start,
             }
         }
+    }
+}
+
+/// "at sunrise", "30 min before sunset", "1 h after sunrise".
+///
+/// The one wording every surface shows for a sun time when it does not know
+/// where the person is — which is every surface but the phone.
+pub fn sun_phrase(event: u8, offset_min: i16) -> String {
+    let sun = if event == capture_core::body::SUN_SET {
+        "sunset"
+    } else {
+        "sunrise"
+    };
+    let n = offset_min.unsigned_abs();
+    let amount = if n.is_multiple_of(60) {
+        format!("{} h", n / 60)
+    } else {
+        format!("{n} min")
+    };
+    match offset_min {
+        0 => format!("at {sun}"),
+        o if o < 0 => format!("{amount} before {sun}"),
+        _ => format!("{amount} after {sun}"),
     }
 }
 

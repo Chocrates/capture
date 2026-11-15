@@ -43,6 +43,7 @@ enum class Permit {
     EXACT_ALARMS,
     LOCATION,
     LOCATION_ALWAYS,
+    APPROXIMATE_LOCATION,
     MICROPHONE,
 }
 
@@ -96,6 +97,12 @@ object Permissions {
                 "Location, all the time",
                 watching == Watching.ALWAYS,
                 "A place plan only fires while this app is open — which, walking into a shop, it never is.",
+            ),
+            PermitState(
+                Permit.APPROXIMATE_LOCATION,
+                "Approximate location",
+                Here.roughlyPermitted(context),
+                "Sunrise and sunset alarms cannot ring: the time depends on where you are.",
             ),
             PermitState(
                 Permit.MICROPHONE,

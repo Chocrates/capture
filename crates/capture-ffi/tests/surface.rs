@@ -2245,3 +2245,49 @@ fn a_persons_page_is_started_from_the_phone() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A sun time rings only once the phone has said where it is, and where it is
+/// stays on the phone (alarms-at-sunrise-and-sunset D1, D5).
+#[test]
+fn a_sun_time_waits_for_the_phone_to_say_where_it_is() {
+    let root = scratch("sun");
+    let a = Archive::open(root.clone()).unwrap();
+    a.set_zone("Europe/London".into()).unwrap();
+    assert!(
+        !a.has_sun_times().unwrap(),
+        "nothing to ask location for yet"
+    );
+    assert_eq!(a.here_age_ms().unwrap(), None);
+
+    let slug = match a.capture("swim tomorrow at sunrise".into()).unwrap() {
+        Captured::Stored { slug } => slug,
+        Captured::Spooled => panic!("spooled with a writable store"),
+    };
+    assert!(
+        a.has_sun_times().unwrap(),
+        "the phone should ask for location now"
+    );
+    let within = 3 * 24 * 60 * 60 * 1000;
+    let mine = |a: &Archive| -> Vec<capture_ffi::Alert> {
+        a.due(within)
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.slug == slug)
+            .collect()
+    };
+    assert!(mine(&a).is_empty(), "rang with nowhere known");
+
+    // A fix taken now, as the platform would stamp it.
+    let now = jiff::Timestamp::now().as_millisecond();
+    a.set_here(51.4823, -0.0123, now).unwrap();
+    let age = a.here_age_ms().unwrap().expect("held");
+    assert!((0..60_000).contains(&age), "{age}");
+
+    let due = mine(&a);
+    assert_eq!(due.len(), 2, "the moment and its warning: {due:?}");
+    assert!(due.iter().all(|d| d.timed), "a sun time is time-critical");
+    assert!(due.iter().all(|d| d.occ.is_some()), "named by its day");
+
+    assert!(a.set_here(123.0, 0.0, now).is_err(), "not a place");
+    std::fs::remove_dir_all(&root).ok();
+}

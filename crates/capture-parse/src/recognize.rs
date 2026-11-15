@@ -68,6 +68,30 @@ pub enum When {
     Date(FloatingDate),
     /// A moment: UTC milliseconds, resolved in the capture's zone.
     Moment(i64),
+    /// A day and a sun event on it: "tomorrow 30 min before sunset". No
+    /// instant, because none exists until somewhere is known (D2).
+    Sun(FloatingDate, Sun),
+}
+
+/// Sunrise or sunset, and how far from it (alarms-at-sunrise-and-sunset D8).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Sun {
+    /// [`capture_core::body::SUN_RISE`] or [`capture_core::body::SUN_SET`].
+    pub event: u8,
+    /// Minutes after it; negative is before.
+    pub offset_min: i16,
+}
+
+impl Sun {
+    /// The furthest from the sun a reading promotes on its own. Beyond it the
+    /// reading is offered rather than written: "7 hours after sunset" is more
+    /// likely a slip than an alarm, and a person can still accept it.
+    pub const NEAR_MIN: i16 = 6 * 60;
+
+    /// Whether the offset is past [`Sun::NEAR_MIN`].
+    pub fn is_far(self) -> bool {
+        self.offset_min.unsigned_abs() > Self::NEAR_MIN as u16
+    }
 }
 
 /// What a capture was recognised as.
@@ -103,6 +127,15 @@ pub enum Shape {
         rule: RuleSpec,
         /// Minutes past local midnight, where one was given.
         at_minute: Option<u32>,
+    },
+    /// A repeating rule at a sun event: "every day at sunrise". Its own shape
+    /// rather than a field beside `at_minute`, because a series has one or the
+    /// other and never both.
+    SunRecurring {
+        /// The rule itself.
+        rule: RuleSpec,
+        /// Which sun event, and the offset from it.
+        sun: Sun,
     },
 }
 
@@ -275,6 +308,9 @@ mod band {
     pub const TASK_DUE: u32 = 80;
     /// A task verb and no temporal expression.
     pub const TASK_VERB: u32 = 40;
+    /// A sun time more than six hours from the sun: offered, never written
+    /// unasked (alarms-at-sunrise-and-sunset D8).
+    pub const SUN_FAR: u32 = 50;
 }
 
 /// Read a capture.
@@ -486,6 +522,26 @@ fn temporal(
 
 /// `every weekday at 7`, `each tuesday`, `daily`.
 fn recurrence(tokens: &[Token<'_>], unclear: &mut Option<UnclearHour>) -> Option<(Shape, u32)> {
+    // `weekdays at sunrise`: a day set with no head, but only before a sun
+    // phrase. A bare `weekdays` is not a recurrence anywhere else, and widening
+    // that is a separate decision about every capture that says "weekdays".
+    if let Some((d, sun)) = tokens.iter().enumerate().find_map(|(i, t)| {
+        (t.class == Class::DaySet && guarded(tokens, t))
+            .then(|| sun_at(tokens, i + 1).map(|(s, _)| (i, s)))
+            .flatten()
+    }) {
+        let mut rule = RuleSpec {
+            freq: 1,
+            interval: 1,
+            by_day: 0,
+            by_month_day: Vec::new(),
+            count: None,
+            until: None,
+        };
+        rule.by_day = day_set_bits(tokens[d].text);
+        return Some(sun_series(rule, sun));
+    }
+
     let at = tokens
         .iter()
         .position(|t| matches!(t.class, Class::RecHead | Class::FreqWord) && guarded(tokens, t))?;
@@ -533,11 +589,7 @@ fn recurrence(tokens: &[Token<'_>], unclear: &mut Option<UnclearHour>) -> Option
             Some(Class::DaySet) => {
                 let word = tokens[i].text.to_ascii_lowercase();
                 rule.freq = 1;
-                rule.by_day = if word.starts_with("weekend") {
-                    0b0110_0000 // Sat, Sun
-                } else {
-                    0b0001_1111 // Mon..Fri
-                };
+                rule.by_day = day_set_bits(&word);
                 i += 1;
             }
             Some(Class::Weekday) => {
@@ -570,6 +622,10 @@ fn recurrence(tokens: &[Token<'_>], unclear: &mut Option<UnclearHour>) -> Option
         }
     }
 
+    if let Some((sun, _)) = sun_at(tokens, i) {
+        return Some(sun_series(rule, sun));
+    }
+
     Some((
         Shape::Recurring {
             rule,
@@ -577,6 +633,93 @@ fn recurrence(tokens: &[Token<'_>], unclear: &mut Option<UnclearHour>) -> Option
         },
         band::RECURRENCE,
     ))
+}
+
+fn sun_series(rule: RuleSpec, sun: Sun) -> (Shape, u32) {
+    let band = if sun.is_far() {
+        band::SUN_FAR
+    } else {
+        band::RECURRENCE
+    };
+    (Shape::SunRecurring { rule, sun }, band)
+}
+
+fn day_set_bits(word: &str) -> u8 {
+    if word.to_ascii_lowercase().starts_with("weekend") {
+        0b0110_0000 // Sat, Sun
+    } else {
+        0b0001_1111 // Mon..Fri
+    }
+}
+
+/// A sun phrase starting at `i`, and how many tokens it took: `at sunset`, or
+/// `30 min before sunrise`.
+///
+/// Never a bare sun word. "Watched the sunset" and "sunset boulevard" name the
+/// sun rather than a time, and only `at`, `before` or `after` says otherwise.
+/// Needs no guard: the phrase is distinctive on its own, and "walk the dog 30
+/// min before sunset" puts it mid-clause, where people write it.
+fn sun_at(tokens: &[Token<'_>], i: usize) -> Option<(Sun, usize)> {
+    let t = tokens.get(i)?;
+    if t.class == Class::Marker && t.text.eq_ignore_ascii_case("at") {
+        let s = tokens.get(i + 1)?;
+        let event = sun_event(s)?;
+        return Some((
+            Sun {
+                event,
+                offset_min: 0,
+            },
+            2,
+        ));
+    }
+    let Class::Number(n) = t.class else {
+        return None;
+    };
+    let per: u32 = match tokens.get(i + 1)?.text.to_ascii_lowercase().as_str() {
+        "minute" | "minutes" | "min" | "mins" => 1,
+        "hour" | "hours" | "hr" | "hrs" | "h" => 60,
+        _ => return None,
+    };
+    let dir = tokens.get(i + 2)?;
+    let sign: i16 = if dir.text.eq_ignore_ascii_case("before") {
+        -1
+    } else if dir.text.eq_ignore_ascii_case("after") {
+        1
+    } else {
+        return None;
+    };
+    let event = sun_event(tokens.get(i + 3)?)?;
+    // A day either way is the most a sun time can mean. Past it, the number
+    // is something else and nothing is read.
+    let minutes = n.checked_mul(per).filter(|m| *m <= 24 * 60)?;
+    Some((
+        Sun {
+            event,
+            offset_min: sign * minutes as i16,
+        },
+        4,
+    ))
+}
+
+fn sun_event(t: &Token<'_>) -> Option<u8> {
+    if t.class != Class::SunWord {
+        return None;
+    }
+    match t.text.to_ascii_lowercase().as_str() {
+        "sunrise" => Some(capture_core::body::SUN_RISE),
+        "sunset" => Some(capture_core::body::SUN_SET),
+        _ => None,
+    }
+}
+
+/// A point at a sun event, with the day it is on.
+fn sun_point(day: FloatingDate, sun: Sun) -> (Shape, u32) {
+    let band = if sun.is_far() {
+        band::SUN_FAR
+    } else {
+        band::ADJACENT
+    };
+    (Shape::Point(When::Sun(day, sun)), band)
 }
 
 /// A time of day appearing after position `i`, with or without a marker.
@@ -689,6 +832,17 @@ fn point(
     unclear_day: &mut Option<UnclearDay>,
 ) -> Option<(Shape, u32)> {
     for (i, t) in tokens.iter().enumerate() {
+        // `at sunset`, `30 min before sunrise tomorrow`: the sun first, then
+        // the day after it if one is named, else today — as a bare clock is.
+        if let Some((sun, used)) = sun_at(tokens, i) {
+            let day = match tokens.get(i + used) {
+                Some(d) if d.class == Class::DayWord => day_word(now, zone, d.text),
+                Some(d) if d.class == Class::Weekday => next_weekday(now, zone, d.text),
+                _ => None,
+            }
+            .unwrap_or(today(now, zone).1);
+            return Some(sun_point(day, sun));
+        }
         if !guarded(tokens, t) {
             continue;
         }
@@ -811,6 +965,12 @@ fn point(
                 *unclear_day = Some(disagreement(named, anchor, t.start, tokens[w].end)?);
                 return None;
             }
+        }
+
+        // "tomorrow at sunset": a sun time on the day. A moment rather than a
+        // day, so a task verb in front does not make it a due date.
+        if let Some((sun, _)) = sun_at(tokens, i + consumed) {
+            return Some(sun_point(anchor, sun));
         }
 
         // A clock immediately after, or after a marker.

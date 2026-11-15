@@ -70,7 +70,7 @@ mod recognize;
 mod token;
 
 pub use recognize::{
-    Markers, Recognition, Shape, UnclearDay, UnclearHour, When, answer_day, day_in_words,
+    Markers, Recognition, Shape, Sun, UnclearDay, UnclearHour, When, answer_day, day_in_words,
     recognize, unclear_day,
 };
 pub use token::{Class, Token, tokenize};
@@ -146,7 +146,12 @@ pub use token::{Class, Token, tokenize};
 /// different day. "therapy Thursday 2026-10-22 at 4pm" was the coming
 /// Thursday, all day, with the date and the 4pm dropped. "last thursday" read
 /// as the coming one. See [`UnclearDay`].
-pub const GRAMMAR_VERSION: u32 = 9;
+///
+/// Version 10 reads the sun as a time of day: "at sunrise", "30 min before
+/// sunset", after a day word or a recurrence head (alarms-at-sunrise-and-sunset
+/// D8). A backlog note that said "at sunset" becomes a sun event on the sweep,
+/// which is the intended reading; the sweep reports how many.
+pub const GRAMMAR_VERSION: u32 = 10;
 
 /// The hour a capture gave without am or pm, if it gave one.
 ///
@@ -291,6 +296,13 @@ pub const UNITS: &[Word] = &[
     w("quarter"),
     w("quarters"),
 ];
+
+/// The sun, as a time of day (alarms-at-sunrise-and-sunset D8).
+///
+/// Only ever a time behind `at`, `before` or `after`: "watched the sunset" and
+/// "sunset boulevard" stay prose. A word of its own class rather than a time
+/// word, because it has no fixed clock — where the phone is decides that.
+pub const SUN_WORDS: &[Word] = &[w("sunrise"), w("sunset")];
 
 /// Words that are a recurrence all by themselves.
 pub const FREQ_WORDS: &[Word] = &[
@@ -466,6 +478,7 @@ pub const CLASSES: &[(&str, &[Word])] = &[
     ("interval", INTERVALS),
     ("task_verb", TASK_VERBS),
     ("blocker", BLOCKERS),
+    ("sun_word", SUN_WORDS),
 ];
 
 /// The grammar, as specified in `DESIGN.md` §3.1.5.
@@ -908,7 +921,7 @@ mod tests {
     use super::*;
 
     /// Every table, for the checks that apply to all of them.
-    fn tables() -> [(&'static str, &'static [Word]); 15] {
+    fn tables() -> [(&'static str, &'static [Word]); 16] {
         [
             ("WEEKDAYS", WEEKDAYS),
             ("MONTHS", MONTHS),
@@ -925,6 +938,7 @@ mod tests {
             ("INTERVALS", INTERVALS),
             ("TASK_VERBS", TASK_VERBS),
             ("BLOCKERS", BLOCKERS),
+            ("SUN_WORDS", SUN_WORDS),
         ]
     }
 

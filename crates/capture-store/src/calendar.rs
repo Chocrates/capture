@@ -152,6 +152,9 @@ pub struct Item {
     /// The two days the text could mean, of which this is one. Shown on both,
     /// since it is on neither until somebody says (grammar 9).
     pub unclear_day: Option<[capture_time::FloatingDate; 2]>,
+    /// "at sunrise", "30 min before sunset": a day whose time the phone works
+    /// out (alarms-at-sunrise-and-sunset D2). Shown in place of "all day".
+    pub sun: Option<String>,
     pub column: usize,
     pub columns: usize,
 }
@@ -276,6 +279,7 @@ fn day(
             slug: store.slug_of(&tgt)?.unwrap_or_default(),
             unclear_hour: crate::promote::asks_hour(text.as_deref(), promotion.as_ref()),
             unclear_day: None,
+            sun: None,
             series: promotion.as_ref().is_some_and(|p| p.kind == "series"),
             text,
             kind,
@@ -310,6 +314,11 @@ fn day(
         i.done = o.done;
         i.title = o.title;
         i.shift = o.shift;
+        if o.all_day {
+            i.sun = store
+                .sun_anchor(&tgt)?
+                .map(|(event, offset)| crate::descriptor::sun_phrase(event, offset));
+        }
         items.push(i);
     }
 

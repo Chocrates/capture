@@ -67,7 +67,7 @@ fn reading(paths: &StorePaths) -> capture_store::projection::Store {
 }
 
 fn due(paths: &StorePaths, at: i64) -> Vec<capture_store::projection::Due> {
-    reading(paths).due_by(at, at, "UTC").unwrap()
+    reading(paths).due_by_at(at, at, "UTC", None).unwrap()
 }
 
 /// An event at a named instant.
@@ -589,7 +589,9 @@ fn a_look_ahead_does_not_expire_a_mute() {
 
     // Thirty days ahead, which is what arming the next alarm asks.
     let store = reading(&paths);
-    let ahead = store.due_by(now() + 30 * 24 * HOUR, now(), "UTC").unwrap();
+    let ahead = store
+        .due_by_at(now() + 30 * 24 * HOUR, now(), "UTC", None)
+        .unwrap();
     assert!(
         ahead.is_empty(),
         "still muted — the horizon says how far to look, not what time it is: {ahead:?}",
@@ -710,7 +712,7 @@ const LEAD: i64 = 15 * 60 * 1000;
 
 fn announced(paths: &StorePaths, horizon: i64, now: i64) -> Vec<capture_store::projection::Due> {
     reading(paths)
-        .announce_by(horizon, now, "UTC", LEAD)
+        .announce_by_at(horizon, now, "UTC", LEAD, None)
         .unwrap()
 }
 
@@ -786,7 +788,9 @@ fn no_lead_is_no_warning() {
     at(&paths, &slug, start);
     settle(&paths);
 
-    let due = reading(&paths).announce_by(start, start, "UTC", 0).unwrap();
+    let due = reading(&paths)
+        .announce_by_at(start, start, "UTC", 0, None)
+        .unwrap();
     assert_eq!(due.iter().map(|d| d.ahead).collect::<Vec<_>>(), vec![0]);
 }
 

@@ -489,6 +489,26 @@ pub fn status(paths: &StorePaths) -> Result<()> {
             worth_knowing.push(format!("{n} event(s) set aside: {reason}"));
         }
     }
+    // Older notes that now read as sun alarms. A grammar bump turned "at
+    // sunset" in a backlog note into something that rings, and the person
+    // should hear that once rather than discover it at dusk (D8). Shown for a
+    // week after the last one, from local state.
+    if let Some((at, slugs)) = capture_store::promote::sun_reread(&ops)?
+        && !slugs.is_empty()
+        && (now as i64) - at <= capture_store::promote::SUN_REREAD_SHOWN_MS
+    {
+        let shown: Vec<_> = slugs.iter().take(5).map(String::as_str).collect();
+        worth_knowing.push(format!(
+            "{} older note(s) now read as sun times and will ring: {}{}",
+            slugs.len(),
+            shown.join(", "),
+            if slugs.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
     // A cancellation that came too late.
     //
     // §1.1 asks for a cancel arriving after its target has been destroyed to be

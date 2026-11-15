@@ -470,6 +470,12 @@ class Restarted : BroadcastReceiver() {
             Store.of(context).setZone(java.util.TimeZone.getDefault().id)
         }
 
+        // A new zone usually means a trip, and a sun time is worked out from
+        // where the phone is. The last known position, where it may be read.
+        if (intent.action == Intent.ACTION_TIMEZONE_CHANGED) {
+            runCatching { Here.forSun(context) }
+        }
+
         // And the alarm is recomputed, because the instant it was set for was
         // worked out in the old zone. A clock change without this leaves an
         // alarm pointing at a moment that is no longer the moment it named.

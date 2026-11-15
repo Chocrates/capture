@@ -352,7 +352,16 @@ pub fn suggestion_for(text: &str, tz: Option<&str>, now: i64) -> Option<String> 
         capture_parse::Shape::Range { from, to } => {
             format!("something from {} to {}", day(*from), day(*to))
         }
+        capture_parse::Shape::Point(capture_parse::When::Sun(d, sun)) => format!(
+            "something on {} {}",
+            day(*d),
+            crate::descriptor::sun_phrase(sun.event, sun.offset_min)
+        ),
         capture_parse::Shape::Recurring { .. } => String::from("something recurring"),
+        capture_parse::Shape::SunRecurring { sun, .. } => format!(
+            "something recurring {}",
+            crate::descriptor::sun_phrase(sun.event, sun.offset_min)
+        ),
         capture_parse::Shape::Nothing => return None,
     };
 
@@ -360,7 +369,8 @@ pub fn suggestion_for(text: &str, tz: Option<&str>, now: i64) -> Option<String> 
     // it, and the person should know that before saying yes.
     let timed = matches!(
         r.shape,
-        capture_parse::Shape::Point(capture_parse::When::Moment(_))
+        capture_parse::Shape::Point(capture_parse::When::Moment(_) | capture_parse::When::Sun(..))
+            | capture_parse::Shape::SunRecurring { .. }
             | capture_parse::Shape::Recurring {
                 at_minute: Some(_),
                 ..

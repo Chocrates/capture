@@ -122,7 +122,9 @@ use crate::{Result, db};
 ///
 /// 18: `note_origins` and `agents`, so a note an agent wrote can be kept out of
 /// the timeline, review and the reading queue (an-agent-keeps-notes-through-the-cli D2).
-pub const PROJECTION_SCHEMA: u32 = 18;
+///
+/// 19: `sun_anchors`, for times set by the sun (alarms-at-sunrise-and-sunset).
+pub const PROJECTION_SCHEMA: u32 = 19;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -565,6 +567,18 @@ CREATE TABLE IF NOT EXISTS occurrences (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS occurrences_start ON occurrences(start_ms);
+
+-- Notes whose time is set by the sun: which crossing, and how far from it.
+-- Their occurrences are rows at local midnight of each date, `all_day` set —
+-- that midnight is the occurrence's name and never changes (D3) — and the
+-- clock time is worked out at due time from where the phone last was, which
+-- is never in the log. A moved occurrence is an ordinary timed row.
+CREATE TABLE IF NOT EXISTS sun_anchors (
+  tgt        BLOB PRIMARY KEY,
+  event      INTEGER NOT NULL,
+  offset_min INTEGER NOT NULL,
+  tz         TEXT NOT NULL
+) STRICT;
 
 -- The items a list capture names. §3.6: lists are just tags with a display
 -- order.
@@ -1215,7 +1229,7 @@ impl Store {
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences; DELETE FROM note_origins;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM promotion_at; DELETE FROM held;
              DELETE FROM note_words; DELETE FROM fts_map; DELETE FROM promotions;
-             DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;
+             DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents; DELETE FROM sun_anchors;
              DELETE FROM entities; DELETE FROM entity_names;",
         )?;
         write_into(&tx, p, now)?;
@@ -1247,6 +1261,7 @@ impl Store {
             tx.execute("DELETE FROM redact_queue WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM promotions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM sun_anchors WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM review WHERE tgt = ?1", params![t])?;
             if let Some(row) = fts_row(&tx, tgt)? {
                 tx.execute("DELETE FROM note_words WHERE rowid = ?1", params![row])?;
@@ -1530,7 +1545,10 @@ impl Store {
         let mut st = self.conn.prepare(
             "SELECT tgt FROM promotions
              WHERE kind = 'event' AND start_date IS NOT NULL
-               AND start_date <= ?1 AND end_date >= ?1",
+               AND start_date <= ?1 AND end_date >= ?1
+               -- A sun time's day is drawn from its occurrence row, which
+               -- carries its done mark and its move.
+               AND tgt NOT IN (SELECT tgt FROM sun_anchors)",
         )?;
         let rows = st.query_map(params![date], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = Vec::new();
@@ -1961,6 +1979,67 @@ impl Store {
                 |r| Ok([r.get::<_, String>(0)?, r.get::<_, String>(1)?]),
             )
             .optional()?)
+    }
+
+    /// Which sun event and offset a note's time hangs from, if it does.
+    pub fn sun_anchor(&self, tgt: &EventId) -> Result<Option<(u8, i16)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT event, offset_min FROM sun_anchors WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| Ok((r.get::<_, i64>(0)? as u8, r.get::<_, i64>(1)? as i16)),
+            )
+            .optional()?)
+    }
+
+    /// When a sun occurrence comes, at `here`.
+    ///
+    /// `None` when the note's time does not hang from the sun. `Some(None)`
+    /// when it does and the sun does not rise or set there that day.
+    pub fn sun_at(
+        &self,
+        tgt: &EventId,
+        occ: i64,
+        here: crate::here::Here,
+    ) -> Result<Option<Option<i64>>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT event, offset_min, tz FROM sun_anchors WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(event, offset, tz)| sun_moment(occ, event, offset, &tz, here)))
+    }
+
+    /// How many notes have a time set by the sun.
+    pub fn sun_anchor_count(&self) -> Result<u64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sun_anchors", [], |r| {
+                r.get::<_, i64>(0)
+            })? as u64)
+    }
+
+    /// The grammar the sweep last read this note under, if it has read it.
+    pub fn read_grammar(&self, tgt: &EventId) -> Result<Option<u32>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT grammar FROM read_by WHERE tgt = ?1",
+                params![tgt.0.to_vec()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|g| g as u32))
     }
 
     pub fn mark_read(&self, tgt: &EventId, grammar: u32, at: (u64, u32)) -> Result<()> {
@@ -2422,7 +2501,20 @@ impl Store {
     /// for a week came back as due. §2.6 makes muting the cheap way to stop
     /// something resurfacing, and a horizon that expires mutes early is that
     /// gesture quietly not working.
-    pub fn due_by(&self, horizon: i64, now: i64, zone: &str) -> Result<Vec<Due>> {
+    ///
+    /// `here` is where this device is, and it what turns a sun occurrence into a moment: that date's sunrise
+    /// or sunset at that place, plus the offset (alarms-at-sunrise-and-sunset
+    /// D2). Without it a sun occurrence is not due at all — nothing is guessed —
+    /// and on a day the sun does not cross the horizon there, nothing rings.
+    /// A sun time names a time of day, so it is delivered as a timed moment:
+    /// the time-critical path, warning ahead and all (D7).
+    pub fn due_by_at(
+        &self,
+        horizon: i64,
+        now: i64,
+        zone: &str,
+        here: Option<crate::here::Here>,
+    ) -> Result<Vec<Due>> {
         let mut out = Vec::new();
 
         // Events, which named an instant.
@@ -2490,15 +2582,35 @@ impl Store {
         // would be the guess the recognizer refused to make. Found on a phone
         // where "gym every monday at 2", captured on a Monday afternoon,
         // announced "was due earlier" at once.
+        //
+        // A sun occurrence's row sits at its date's local midnight; its moment
+        // is later that day, so its rows are read a day further ahead and
+        // placed below.
         let mut st = self.conn.prepare(&format!(
-            "SELECT o.tgt, o.occ, o.start_ms, n.text, o.all_day, COALESCE(p.pinned, 0)
+            "SELECT o.tgt, o.occ, o.start_ms, n.text, o.all_day, COALESCE(p.pinned, 0),
+                    sa.event, sa.offset_min, sa.tz
                FROM occurrences o JOIN notes n ON n.tgt = o.tgt
                LEFT JOIN promotions p ON p.tgt = o.tgt
-              WHERE o.start_ms <= ?1
+               LEFT JOIN sun_anchors sa ON sa.tgt = o.tgt AND o.all_day = 1
+              WHERE (o.start_ms <= ?1
+                     OR (sa.tgt IS NOT NULL AND o.start_ms <= ?1 + 86400000))
                 AND o.cancelled = 0 AND o.done = 0
                 AND {ALERTABLE}",
         ))?;
-        for r in st.query_map(params![horizon, now], |r| {
+        type Row = (
+            Vec<u8>,
+            i64,
+            i64,
+            String,
+            bool,
+            bool,
+            Option<(i64, i64, String)>,
+        );
+        for r in st.query_map(params![horizon, now], |r| -> rusqlite::Result<Row> {
+            let sun = match r.get::<_, Option<i64>>(6)? {
+                Some(event) => Some((event, r.get::<_, i64>(7)?, r.get::<_, String>(8)?)),
+                None => None,
+            };
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, i64>(1)?,
@@ -2506,19 +2618,32 @@ impl Store {
                 r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)? != 0,
                 r.get::<_, i64>(5)? != 0,
+                sun,
             ))
         })? {
-            let (tgt, occ, at, text, all_day, pinned) = r?;
+            let (tgt, occ, at, text, all_day, pinned, sun) = r?;
             if !pinned && capture_parse::unclear_hour(&text).is_some() {
                 continue;
             }
+            let (at, timed) = match sun {
+                None => (at, !all_day),
+                Some((event, offset, tz)) => {
+                    let Some(at) = here.and_then(|h| sun_moment(occ, event, offset, &tz, h)) else {
+                        continue;
+                    };
+                    if at > horizon {
+                        continue;
+                    }
+                    (at, true)
+                }
+            };
             if let Some(tgt) = id_from(tgt) {
                 out.push(Due {
                     tgt,
                     at,
                     occ: Some(occ),
                     text,
-                    timed: !all_day,
+                    timed,
                     ahead: 0,
                 });
             }
@@ -2572,23 +2697,26 @@ impl Store {
         Ok(out)
     }
 
-    /// What is to be said by `horizon`: every moment [`Store::due_by`] names,
+    /// What is to be said by `horizon`: every moment [`Store::due_by_at`] names,
     /// and a warning `lead_ms` before each one that names a time of day.
     ///
     /// The warning is asked for as far ahead as the lead, so the ring that
     /// asks "what has come due by now" finds the warning for a moment that has
     /// not. None for a moment already begun — "in 15 min" for something
     /// underway is wrong twice — and none for a day, which has no before.
-    pub fn announce_by(
+    ///
+    /// `here` as for [`Store::due_by_at`].
+    pub fn announce_by_at(
         &self,
         horizon: i64,
         now: i64,
         zone: &str,
         lead_ms: i64,
+        here: Option<crate::here::Here>,
     ) -> Result<Vec<Due>> {
         let lead = lead_ms.max(0);
         let mut out = Vec::new();
-        for d in self.due_by(horizon.saturating_add(lead), now, zone)? {
+        for d in self.due_by_at(horizon.saturating_add(lead), now, zone, here)? {
             if lead > 0 && d.timed && d.at > now && d.at - lead <= horizon {
                 out.push(Due {
                     at: d.at - lead,
@@ -3119,6 +3247,9 @@ impl Store {
         // guard caught rather than a person: its fixture had been a one-off
         // capture, so `occurrences` was empty and counted clean.
         tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
+        // Which sun event its schedule hangs from. Part of the same schedule,
+        // and found by the guard the day the table was added.
+        tx.execute("DELETE FROM sun_anchors WHERE tgt = ?1", params![t])?;
         // The tags put on it, and the events that put them there.
         //
         // The eighth and ninth, and the argument is the one directly above
@@ -3670,9 +3801,37 @@ fn write_promotion(
                 None,
                 None,
             ),
+            // A day, here: the time is the phone's to work out.
+            When::Solar { date, .. } => (
+                "event",
+                None,
+                None,
+                Some(date.clone()),
+                Some(date.clone()),
+                None,
+                None,
+            ),
         },
         Promoted::Series(_) => ("series", None, None, None, None, None, None),
     };
+
+    let solar = match &p.as_ {
+        Promoted::Event(e) => Some(&e.when),
+        Promoted::Series(sf) => Some(&sf.when),
+        _ => None,
+    };
+    if let Some(When::Solar {
+        event,
+        offset_min,
+        tz,
+        ..
+    }) = solar
+    {
+        tx.execute(
+            "INSERT OR REPLACE INTO sun_anchors (tgt, event, offset_min, tz) VALUES (?1,?2,?3,?4)",
+            params![tgt.0.to_vec(), *event as i64, *offset_min as i64, tz],
+        )?;
+    }
 
     let mut fields = Vec::new();
     minicbor::encode(&p.as_, &mut fields)
@@ -3746,7 +3905,15 @@ fn expand_occurrences(
                 true,
                 note.tz.clone().unwrap_or_else(|| String::from("UTC")),
             ),
+            // Each date at local midnight: the name of that day's occurrence.
+            When::Solar { date, tz, .. } => (
+                capture_time::FloatingDate::parse(date)
+                    .and_then(|d| capture_time::at_local(d, 0, 0, capture_time::Zone::new(tz)?)),
+                true,
+                tz.clone(),
+            ),
         };
+        let solar = matches!(sf.when, When::Solar { .. });
 
         if let (Some(start_ms), Some(zone)) = (start_ms, capture_time::Zone::new(&tz)) {
             let rule = to_rule(&sf.rule);
@@ -3781,6 +3948,10 @@ fn expand_occurrences(
                     // written once, for all of them.
                     None => (o.start, length.map(|l| o.start + l)),
                 };
+                // A moved sun occurrence is the time it was moved to (D3):
+                // "tomorrow's sunrise, but 07:30" means 07:30.
+                let moved = ex.and_then(|e| e.moved_to).is_some();
+                let row_all_day = all_day && !(solar && moved);
                 tx.execute(
                     "INSERT OR REPLACE INTO occurrences
                        (tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done,
@@ -3791,7 +3962,7 @@ fn expand_occurrences(
                         o.start,
                         shown,
                         end,
-                        all_day as i64,
+                        row_all_day as i64,
                         o.shift.map(|s| match s {
                             capture_time::Shift::Gap => "gap",
                             capture_time::Shift::Ambiguous => "ambiguous",
@@ -3817,6 +3988,36 @@ fn expand_occurrences(
                 written.insert(o.start);
             }
         }
+    }
+
+    // A one-off sun moment ("tomorrow at sunset") is one occurrence, named by
+    // its date like a sun series' and resolved the same way at due time.
+    if let Promoted::Event(e) = &promotion.as_
+        && let When::Solar { date, tz, .. } = &e.when
+        && let Some(occ) = capture_time::FloatingDate::parse(date)
+            .and_then(|d| capture_time::at_local(d, 0, 0, capture_time::Zone::new(tz)?))
+    {
+        let ex = note.occurrences.get(&occ);
+        let moved = ex.and_then(|e| e.moved_to);
+        let (shown, end) = moved.unwrap_or((occ, None));
+        tx.execute(
+            "INSERT OR REPLACE INTO occurrences
+               (tgt, occ, start_ms, end_ms, all_day, shift, cancelled, done, title, location, notes)
+             VALUES (?1,?2,?3,?4,?5,NULL,?6,?7,?8,?9,?10)",
+            params![
+                tgt.0.to_vec(),
+                occ,
+                shown,
+                end,
+                moved.is_none() as i64,
+                ex.map(|e| !e.visible()).unwrap_or(false) as i64,
+                ex.map(|e| e.done).unwrap_or(false) as i64,
+                ex.and_then(|e| e.title.clone()),
+                ex.and_then(|e| e.location.clone()),
+                ex.and_then(|e| e.notes.clone()),
+            ],
+        )?;
+        written.insert(occ);
     }
 
     // Exceptions the expansion did not reach. Kept rather than dropped: the
@@ -3872,6 +4073,29 @@ fn expand_occurrences(
     }
 
     Ok(())
+}
+
+/// When a sun occurrence happens, at a place: its date's sunrise or sunset
+/// plus the offset. `None` on a day the sun does not cross there, or for a
+/// zone or date that cannot be read — never a guess.
+///
+/// `occ` is the occurrence's name, its date's local midnight in `tz`.
+pub fn sun_moment(
+    occ: i64,
+    event: i64,
+    offset_min: i64,
+    tz: &str,
+    here: crate::here::Here,
+) -> Option<i64> {
+    let zone = capture_time::Zone::new(tz)?;
+    let date = capture_time::civil_date(occ, zone);
+    let which = if event == i64::from(capture_core::body::SUN_SET) {
+        capture_time::SunEvent::Set
+    } else {
+        capture_time::SunEvent::Rise
+    };
+    let at = capture_time::sun(date, zone, here.lat_e6, here.lon_e6, which).ok()?;
+    Some(at + offset_min * 60_000)
 }
 
 /// The stored rule, as `capture-time` expands it.

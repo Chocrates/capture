@@ -314,6 +314,8 @@ private fun EntryRow(
             )
         }
         entry.movedLabel?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+        // What a sun time hangs from, and whether the phone knows where it is.
+        entry.sun?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
         if (entry.done) Text("done", style = MaterialTheme.typography.labelSmall)
         // Why this has no time, asked where it is seen. Each button says what
         // it will write, because the answer goes into the text.
@@ -379,6 +381,7 @@ private fun Occurrence(
             Column {
                 Text(entry.at, style = MaterialTheme.typography.labelMedium)
                 entry.movedLabel?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+                entry.sun?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
                 when (mode) {
                     "move" -> {
                         OutlinedTextField(

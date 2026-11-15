@@ -186,6 +186,10 @@ class Arrival : BroadcastReceiver() {
         if (event.hasError()) return
 
         val archive = Store.of(context)
+        // A fix the platform already took: where the phone is, for sun times.
+        event.triggeringLocation?.let { fix ->
+            runCatching { archive.setHere(fix.latitude, fix.longitude, fix.time) }
+        }
         for (fence in event.triggeringGeofences.orEmpty()) {
             val say = archive.arrived(fence.requestId) ?: continue
             // Spent only if it was heard. `arrived` no longer marks the cue

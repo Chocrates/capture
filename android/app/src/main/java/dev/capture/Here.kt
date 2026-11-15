@@ -19,6 +19,53 @@ import com.google.android.gms.tasks.CancellationTokenSource
  * record of where they have been.
  */
 object Here {
+    /** Whether a rough position can be read, which is all a sun time needs. */
+    fun roughlyPermitted(context: Context): Boolean =
+        listOf(
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+        ).any {
+            androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+
+    /**
+     * Tell the archive where this phone is, for sunrise and sunset
+     * (alarms-at-sunrise-and-sunset D5).
+     *
+     * The last known position first, which costs nothing; a fresh low-power
+     * one only where there is none. Handed over exactly as the platform gave
+     * it: the archive rounds it and decides what it means. Then the alarm is
+     * re-armed, because a sun time may have moved.
+     *
+     * Quiet on failure. Without a position the archive says, on the alarm
+     * itself, that it cannot ring until it knows where it is.
+     */
+    @SuppressLint("MissingPermission")
+    fun forSun(context: Context) {
+        if (!roughlyPermitted(context)) return
+        val archive = Store.of(context)
+        if (!runCatching { archive.hasSunTimes() }.getOrDefault(false)) return
+        val tell = { fix: android.location.Location ->
+            runCatching { archive.setHere(fix.latitude, fix.longitude, fix.time) }
+            Alarms.rearm(context)
+        }
+        val client = LocationServices.getFusedLocationProviderClient(context)
+        runCatching {
+            client.lastLocation
+                .addOnSuccessListener { last ->
+                    if (last != null) {
+                        tell(last)
+                    } else {
+                        client.getCurrentLocation(
+                            Priority.PRIORITY_BALANCED_POWER_ACCURACY,
+                            CancellationTokenSource().token,
+                        ).addOnSuccessListener { fresh -> if (fresh != null) tell(fresh) }
+                    }
+                }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun once(context: Context, then: (Int, Int) -> Unit, otherwise: (String) -> Unit) {
         if (!Places.permitted(context)) {

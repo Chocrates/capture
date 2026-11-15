@@ -601,6 +601,63 @@ pub struct AgendaEntry {
     pub at: String,
     /// "moved from Mon 12 Oct 14:00", when it was.
     pub moved_label: Option<String>,
+    /// For a time set by the sun, what it is set by and how sure the time is:
+    /// "30 min before sunset", "sunrise (where you were 3 days ago)", "can't
+    /// ring until it knows where you are", "no sunrise that day".
+    pub sun: Option<String>,
+}
+
+/// Where this phone last said it was.
+fn held_here(paths: &capture_store::StorePaths) -> Result<Option<capture_store::here::Here>> {
+    let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
+    Ok(capture_store::here::get(&ops)?)
+}
+
+/// What the phone says about a sun occurrence: the clock to show in place of
+/// "all day" where it can work one out, and a line saying what it hangs from.
+///
+/// `None` for anything not set by the sun.
+fn sun_label(
+    store: &capture_store::projection::Store,
+    i: &capture_store::calendar::Item,
+    here: Option<capture_store::here::Here>,
+    now: i64,
+    zone: capture_time::Zone,
+) -> Result<Option<(Option<String>, String)>> {
+    let (Some(phrase), Some(occ)) = (i.sun.clone(), i.occ) else {
+        return Ok(None);
+    };
+    let Some(h) = here else {
+        return Ok(Some((
+            Some(phrase),
+            String::from("can't ring until it knows where you are"),
+        )));
+    };
+    let which = if phrase.ends_with("sunrise") {
+        "sunrise"
+    } else {
+        "sunset"
+    };
+    Ok(match store.sun_at(&i.tgt, occ, h)? {
+        None => None,
+        Some(None) => Some((Some(phrase), format!("no {which} that day"))),
+        Some(Some(ms)) => {
+            let stale = if h.is_stale(now) {
+                let days = h.age_ms(now) / 86_400_000;
+                if days >= 1 {
+                    format!(
+                        " (where you were {days} day{} ago)",
+                        if days == 1 { "" } else { "s" }
+                    )
+                } else {
+                    String::from(" (where you were yesterday)")
+                }
+            } else {
+                String::new()
+            };
+            Some((Some(clock(ms, zone)), format!("{phrase}{stale}")))
+        }
+    })
 }
 
 /// "14:00", in a zone.
@@ -619,9 +676,18 @@ fn moment(ms: i64, zone: capture_time::Zone) -> String {
 }
 
 impl AgendaEntry {
-    fn of(i: capture_store::calendar::Item, zone: capture_time::Zone) -> AgendaEntry {
+    fn of(
+        i: capture_store::calendar::Item,
+        zone: capture_time::Zone,
+        sun: Option<(Option<String>, String)>,
+    ) -> AgendaEntry {
         use capture_store::calendar::ItemKind;
+        let (sun_at, sun) = match sun {
+            Some((at, note)) => (at, Some(note)),
+            None => (None, None),
+        };
         let at = match i.kind {
+            _ if sun_at.is_some() => sun_at.unwrap_or_default(),
             ItemKind::AllDay if i.unclear_day.is_some() => String::from("which day?"),
             ItemKind::AllDay => String::from("all day"),
             ItemKind::Due => String::from("due"),
@@ -635,6 +701,7 @@ impl AgendaEntry {
             moved_label: i
                 .moved_from
                 .map(|f| format!("moved from {}", moment(f, zone))),
+            sun,
             slug: i.slug,
             text: i.text,
             start_ms: i.start_ms,
@@ -1089,7 +1156,13 @@ impl Archive {
         // Warnings included: a timed moment also comes due its lead before.
         let lead = capture_store::notifier::lead_ms(&ops)?;
         store
-            .announce_by(now + within_ms, now, &self.zone_name(), lead)?
+            .announce_by_at(
+                now + within_ms,
+                now,
+                &self.zone_name(),
+                lead,
+                capture_store::here::get(&ops)?,
+            )?
             .into_iter()
             .map(|d| {
                 Ok(Alert {
@@ -1317,6 +1390,36 @@ impl Archive {
         Ok(())
     }
 
+    /// Say where this device is, for sun times (alarms-at-sunrise-and-sunset
+    /// D1, D5).
+    ///
+    /// Whatever the platform reported, unrounded: it is rounded to 0.01° here,
+    /// so the phone decides nothing and no finer position is kept. Held in this
+    /// device's own state and never written to the log or synced. A fix older
+    /// than the one held is ignored, so a late callback cannot move it back.
+    pub fn set_here(&self, lat: f64, lon: f64, fix_ms: i64) -> Result<()> {
+        let here = capture_store::here::Here::from_degrees(lat, lon, fix_ms)?;
+        capture_store::here::set(&capture_store::ops::Ops::open(&self.paths.ops)?, here)?;
+        Ok(())
+    }
+
+    /// How old the held position is, in milliseconds; absent if this device
+    /// has never said where it is. Older than a day, a sun time says so.
+    pub fn here_age_ms(&self) -> Result<Option<i64>> {
+        let ops = capture_store::ops::Ops::open_read(&self.paths.ops)?;
+        Ok(capture_store::here::get(&ops)?.map(|h| h.age_ms(self.now_ms() as i64)))
+    }
+
+    /// Whether anything in the archive is set by the sun, so the phone asks
+    /// for coarse location when the first one is written and not before.
+    ///
+    /// Settles first, as [`Archive::due`] does: asked right after a capture,
+    /// the capture is not yet a promotion and would answer no.
+    pub fn has_sun_times(&self) -> Result<bool> {
+        self.settle()?;
+        Ok(self.read()?.sun_anchor_count()? > 0)
+    }
+
     /// Today, in this device's own zone.
     ///
     /// Asked for rather than computed by the caller, for the same reason the
@@ -1367,18 +1470,23 @@ impl Archive {
         };
         let now = jiff::Timestamp::now().as_millisecond();
         let days = capture_store::calendar::days(&store, date(&from)?, date(&to)?, zone, now)?;
-        Ok(days
-            .into_iter()
-            .map(|d| CalendarDay {
-                date: d.date.to_string(),
-                busy: d.busy(),
-                items: d
-                    .items
-                    .into_iter()
-                    .map(|i| AgendaEntry::of(i, zone))
-                    .collect(),
+        let here = held_here(&self.paths)?;
+        days.into_iter()
+            .map(|d| {
+                Ok(CalendarDay {
+                    date: d.date.to_string(),
+                    busy: d.busy(),
+                    items: d
+                        .items
+                        .into_iter()
+                        .map(|i| {
+                            let sun = sun_label(&store, &i, here, now, zone)?;
+                            Ok(AgendaEntry::of(i, zone, sun))
+                        })
+                        .collect::<Result<_>>()?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// A month grid or a week strip around `day`, ready to draw.
@@ -1401,6 +1509,7 @@ impl Archive {
         let now = jiff::Timestamp::now().as_millisecond();
         let today = capture_time::civil_date(now, zone);
         let days = capture_store::calendar::days(&store, s.from, s.to, zone, now)?;
+        let held = held_here(&self.paths)?;
         Ok(CalendarView {
             title: s.title,
             previous: s.previous.to_string(),
@@ -1408,20 +1517,25 @@ impl Archive {
             today: today.to_string(),
             days: days
                 .into_iter()
-                .map(|d| GridDay {
-                    date: d.date.to_string(),
-                    day_of_month: d.date.day as u32,
-                    in_period: d.date >= s.first && d.date <= s.last,
-                    today: d.date == today,
-                    busy: d.busy(),
-                    label: day_label(d.date),
-                    items: d
-                        .items
-                        .into_iter()
-                        .map(|i| AgendaEntry::of(i, zone))
-                        .collect(),
+                .map(|d| -> Result<GridDay> {
+                    Ok(GridDay {
+                        date: d.date.to_string(),
+                        day_of_month: d.date.day as u32,
+                        in_period: d.date >= s.first && d.date <= s.last,
+                        today: d.date == today,
+                        busy: d.busy(),
+                        label: day_label(d.date),
+                        items: d
+                            .items
+                            .into_iter()
+                            .map(|i| {
+                                let sun = sun_label(&store, &i, held, now, zone)?;
+                                Ok(AgendaEntry::of(i, zone, sun))
+                            })
+                            .collect::<Result<_>>()?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_>>()?,
         })
     }
 

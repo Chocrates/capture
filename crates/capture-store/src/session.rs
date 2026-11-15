@@ -139,7 +139,7 @@ impl Session {
     /// One reader, so a frozen session cannot be frozen for some of its work
     /// and live for the rest — which would be worse than not freezing it, in
     /// the way a clock that is right twice a day is worse than a stopped one.
-    fn now(&self) -> u64 {
+    pub(crate) fn now(&self) -> u64 {
         self.at.unwrap_or_else(now_ms)
     }
 
@@ -590,8 +590,10 @@ impl Session {
         };
         let hour = capture_time::civil_clock(now, zone).0;
 
-        let due = self.state.due_by(now, now, &zone_name)?;
         let ops = crate::ops::Ops::open(&self.paths.ops)?;
+        let due = self
+            .state
+            .due_by_at(now, now, &zone_name, crate::here::get(&ops)?)?;
         let mut said = 0;
 
         for d in due {

@@ -23,12 +23,8 @@ fn zone() -> Zone {
     Zone::new(ZONE).unwrap()
 }
 
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
+mod common;
+use common::now;
 
 struct Scratch(std::path::PathBuf);
 

@@ -125,6 +125,19 @@ pub fn shape_as(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
             attendees: Vec::new(),
         })),
 
+        // A sun time: the day and the event, never an instant or a place
+        // (alarms-at-sunrise-and-sunset D2). The phone works out the clock.
+        Shape::Point(When::Sun(d, sun)) => Some(Promoted::Event(EventFields {
+            when: BodyWhen::Solar {
+                date: format!("{d}"),
+                event: sun.event,
+                offset_min: sun.offset_min,
+                tz: String::from(zone.name()),
+            },
+            location: None,
+            attendees: Vec::new(),
+        })),
+
         Shape::Range { from, to } => Some(Promoted::Event(EventFields {
             when: BodyWhen::AllDay {
                 start_date: format!("{from}"),
@@ -132,6 +145,21 @@ pub fn shape_as(r: &Recognition, zone: Zone, now: i64) -> Option<Promoted> {
             },
             location: None,
             attendees: Vec::new(),
+        })),
+
+        // A series at the sun, starting the day it was written, as a timed
+        // series does. A `Series` with a solar `when` rather than a shape of
+        // its own: an older build already holds a `when` it cannot decode.
+        Shape::SunRecurring { rule, sun } => Some(Promoted::Series(SeriesFields {
+            when: BodyWhen::Solar {
+                date: format!("{}", capture_time::civil_date(now, zone)),
+                event: sun.event,
+                offset_min: sun.offset_min,
+                tz: String::from(zone.name()),
+            },
+            rule: rule.clone(),
+            carries_forward: false,
+            split_from: None,
         })),
 
         Shape::Recurring { rule, at_minute } => Some(Promoted::Series(SeriesFields {
@@ -246,9 +274,21 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
     // to finish, and the alternative is a capture that waits behind a reparse.
     const PER_SWEEP: usize = 200;
 
+    // Notes an older grammar had already read that this one reads as sun
+    // times: a backlog "at sunset" becoming an alarm (D8). Said once, below.
+    let mut became_sun = Vec::new();
+
     for note in s.state.needing_parse(grammar, PER_SWEEP)? {
         let Some(text) = note.text.as_deref() else {
             continue;
+        };
+        let read_before = match s.state.read_grammar(&note.tgt)? {
+            Some(g) => g < grammar,
+            None => s
+                .state
+                .promotion_of(&note.tgt)?
+                .and_then(|p| p.grammar)
+                .is_some_and(|g| g < grammar),
         };
         let zone = zone_of(note.tz.as_deref());
 
@@ -303,6 +343,10 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
             None => continue,
         };
 
+        if read_before && is_solar(&as_) {
+            became_sun.push(note.slug.clone());
+        }
+
         s.append(Kind::PROMOTE, Some(note.tgt), None, |nonce| {
             encode(&PromoteBody {
                 nonce,
@@ -323,7 +367,57 @@ pub fn sweep(s: &mut Session) -> Result<usize> {
     // `Store::unread_count`, or "3 captures have not been read" is followed by
     // "read 1 capture" and neither statement explains the other.
     s.read_at_open = read;
+    if !became_sun.is_empty() {
+        let ops = crate::ops::Ops::open(&s.paths.ops)?;
+        record_sun_reread(&ops, &became_sun, s.now() as i64)?;
+        tracing::info!(n = became_sun.len(), "notes newly read as sun times");
+    }
     Ok(written)
+}
+
+fn is_solar(p: &Promoted) -> bool {
+    matches!(
+        p,
+        Promoted::Event(EventFields {
+            when: BodyWhen::Solar { .. },
+            ..
+        }) | Promoted::Series(SeriesFields {
+            when: BodyWhen::Solar { .. },
+            ..
+        })
+    )
+}
+
+const SUN_REREAD: &str = "sun_reread";
+
+/// How long `status` mentions the notes a grammar bump turned into sun times.
+pub const SUN_REREAD_SHOWN_MS: i64 = 7 * 24 * 3_600_000;
+
+/// Add to the list of notes newly read as sun times, stamped `at`.
+///
+/// Local state: which notes this device's sweep re-read is not a fact about
+/// the archive. A sweep spread over several opens adds to one list.
+fn record_sun_reread(ops: &crate::ops::Ops, slugs: &[String], at: i64) -> Result<()> {
+    let mut held = sun_reread(ops)?.map(|(_, s)| s).unwrap_or_default();
+    for s in slugs {
+        if !held.contains(s) {
+            held.push(s.clone());
+        }
+    }
+    ops.set(SUN_REREAD, &format!("{at}\n{}", held.join("\n")))
+}
+
+/// The notes a grammar bump newly read as sun times, and when that was last
+/// added to. For `status` to say once that a backlog became alarms.
+pub fn sun_reread(ops: &crate::ops::Ops) -> Result<Option<(i64, Vec<String>)>> {
+    let Some(v) = ops.get(SUN_REREAD)? else {
+        return Ok(None);
+    };
+    let mut lines = v.lines();
+    let Some(Ok(at)) = lines.next().map(str::parse::<i64>) else {
+        return Ok(None);
+    };
+    Ok(Some((at, lines.map(String::from).collect())))
 }
 
 /// The zone a capture was written in.
@@ -650,7 +744,7 @@ pub fn split_at(
         .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
 
     let read = capture_parse::recognize(rule_text, now, zone);
-    let Shape::Recurring { rule, .. } = read.shape else {
+    let (Shape::Recurring { rule, .. } | Shape::SunRecurring { rule, .. }) = read.shape else {
         return Err(Error::Usage(format!(
             "{rule_text:?} is not a repeating rule — try something like \"every tuesday at 9\""
         )));
@@ -781,6 +875,24 @@ pub fn split_series(paths: &StorePaths, name: &str, at_occ: i64, new_rule: RuleS
             end_ms: *end_ms,
             tz: tz.clone(),
         },
+        // A sun series is named by its days' local midnights, so the boundary
+        // occurrence is a midnight and its date is where the new one starts.
+        BodyWhen::Solar {
+            event,
+            offset_min,
+            tz,
+            ..
+        } => {
+            let zone = Zone::new(tz)
+                .or_else(|| Zone::new("UTC"))
+                .ok_or_else(|| Error::Usage("no usable time zone on this machine".into()))?;
+            BodyWhen::Solar {
+                date: format!("{}", capture_time::civil_date(at_occ, zone)),
+                event: *event,
+                offset_min: *offset_min,
+                tz: tz.clone(),
+            }
+        }
         all_day => all_day.clone(),
     };
 

@@ -326,7 +326,8 @@ function agendaRow(r) {
   // What is due and what occurs, in one list and still told apart. A due date
   // has no hour — putting one on it would invent a deadline nobody wrote — so
   // the column that would hold a clock says what the row is instead.
-  const when = r.due ? (r.was_due ? `was due ${r.was_due}` : "due") : r.all_day ? "" : clockOf(r.start_ms);
+  // A sun time says what it hangs from: the clock is the phone's to work out.
+  const when = r.due ? (r.was_due ? `was due ${r.was_due}` : "due") : r.sun ? r.sun : r.all_day ? "" : clockOf(r.start_ms);
   row.append(el("span", r.due ? "when due" : "when", when));
 
   const body = el("span", "what", r.text || "(no readable text)");

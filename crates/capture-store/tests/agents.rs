@@ -57,12 +57,8 @@ fn capture(paths: &StorePaths, text: &str) -> String {
     }
 }
 
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
+mod common;
+use common::now;
 
 fn slugs(rows: Vec<capture_store::projection::NoteRow>) -> Vec<String> {
     rows.into_iter().map(|r| r.slug).collect()

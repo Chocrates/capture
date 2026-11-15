@@ -26,6 +26,12 @@
       right amount of friction for something that watches where you are.
     -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+      Approximate location, for sunrise and sunset alarms
+      (alarms-at-sunrise-and-sunset D5). Rounded to about a kilometre in the
+      archive, kept on this phone, never in the log.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

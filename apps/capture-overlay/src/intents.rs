@@ -108,7 +108,7 @@ fn alerts(paths: &StorePaths, now: i64) -> capture_store::Result<()> {
     let ops = capture_store::ops::Ops::open(&paths.ops)?;
 
     let lead = notifier::lead_ms(&ops)?;
-    for d in state.announce_by(now, now, &zone_name, lead)? {
+    for d in state.announce_by_at(now, now, &zone_name, lead, capture_store::here::get(&ops)?)? {
         if ops.alerted(&d.tgt.0, d.occ, d.at)? {
             continue;
         }

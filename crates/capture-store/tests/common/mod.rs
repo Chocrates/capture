@@ -48,3 +48,17 @@ pub fn tgt_of(paths: &StorePaths, slug: &str) -> capture_core::EventId {
         .unwrap()
         .expect("the note is named")
 }
+
+/// The real now, in UTC milliseconds, for suites whose fixtures expand or
+/// review around it.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "a test asked as of the real now"
+)]
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}

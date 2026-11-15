@@ -134,6 +134,7 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
                 notes: None,
             },
             text: store.text_of(&tgt)?,
+            sun: None,
         });
     }
 
@@ -144,10 +145,16 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
         if o.cancelled && o.end_ms.is_none() && o.start_ms == o.occ {
             continue;
         }
+        let sun = if o.all_day {
+            sun_of(&store, &tgt)?
+        } else {
+            None
+        };
         occurrences.push(Occurrence {
             slug: store.slug_of(&tgt)?.unwrap_or_default(),
             o,
             text: store.text_of(&tgt)?,
+            sun,
         });
     }
 
@@ -194,10 +201,16 @@ pub fn agenda(paths: &StorePaths, day: Option<&str>, json: bool) -> Result<()> {
     let mut owed = Vec::new();
     if today {
         for (tgt, o) in store.outstanding(from)? {
+            let sun = if o.all_day {
+                sun_of(&store, &tgt)?
+            } else {
+                None
+            };
             owed.push(Occurrence {
                 slug: store.slug_of(&tgt)?.unwrap_or_default(),
                 o,
                 text: store.text_of(&tgt)?,
+                sun,
             });
         }
     }
@@ -236,6 +249,8 @@ struct Occurrence {
     slug: String,
     o: projection::OccurrenceRow,
     text: Option<String>,
+    /// "at sunrise" for a day whose time the phone works out.
+    sun: Option<String>,
 }
 
 /// A task due on the day.
@@ -252,6 +267,13 @@ struct Overdue {
     due: String,
 }
 
+/// "at sunrise", "30 min before sunset", where a note's time hangs from the sun.
+fn sun_of(store: &projection::Store, tgt: &capture_core::EventId) -> Result<Option<String>> {
+    Ok(store
+        .sun_anchor(tgt)?
+        .map(|(event, offset)| capture_store::descriptor::sun_phrase(event, offset)))
+}
+
 impl Occurrence {
     /// What the occurrence says about itself, beside what the note says.
     ///
@@ -260,7 +282,7 @@ impl Occurrence {
     /// different title, location, notes" — was visible in a terminal and
     /// invisible to anything reading the JSON.
     fn json(&self) -> Json {
-        let Occurrence { slug, o, text } = self;
+        let Occurrence { slug, o, text, sun } = self;
         let projection::OccurrenceRow {
             occ: _, // the rule's instant; `start_ms` is where it is shown
             start_ms,
@@ -286,6 +308,7 @@ impl Occurrence {
             ("title", title.into()),
             ("location", location.into()),
             ("notes", notes.into()),
+            ("sun", sun.into()),
         ])
     }
 }
@@ -385,7 +408,10 @@ impl View for Agenda {
         // All-day first, in their own band. They have no hour to sort by, and
         // mixing them into the timed list would imply one.
         for r in occurrences.iter().filter(|r| r.o.all_day) {
-            say!("  all day   {}  {}", r.slug, line(r.text.as_deref(), &r.o));
+            match &r.sun {
+                Some(sun) => say!("  {sun}   {}  {}", r.slug, line(r.text.as_deref(), &r.o)),
+                None => say!("  all day   {}  {}", r.slug, line(r.text.as_deref(), &r.o)),
+            }
         }
         for r in occurrences.iter().filter(|r| !r.o.all_day) {
             let (h, m) = capture_time::civil_clock(r.o.start_ms, zone);
@@ -1055,7 +1081,16 @@ pub fn explain(text: &str) -> Result<()> {
                 capture_time::civil_date(*ms, zone)
             )
         }
+        capture_parse::Shape::Point(capture_parse::When::Sun(d, sun)) => format!(
+            "a moment: {d} {}",
+            capture_store::descriptor::sun_phrase(sun.event, sun.offset_min)
+        ),
         capture_parse::Shape::Range { from, to } => format!("a span: {from} to {to}"),
+        capture_parse::Shape::SunRecurring { rule, sun } => format!(
+            "a series: freq {} {}",
+            rule.freq,
+            capture_store::descriptor::sun_phrase(sun.event, sun.offset_min)
+        ),
         capture_parse::Shape::Recurring { rule, at_minute } => match at_minute {
             Some(m) => format!(
                 "a series: freq {} at {:02}:{:02}",
@@ -2042,7 +2077,13 @@ pub fn due(paths: &StorePaths, json: bool) -> Result<()> {
     const AHEAD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
     let ops = capture_store::ops::Ops::open_read(&paths.ops)?;
     let lead = capture_store::notifier::lead_ms(&ops)?;
-    let found = store.announce_by(now + AHEAD_MS, now, &zone, lead)?;
+    let found = store.announce_by_at(
+        now + AHEAD_MS,
+        now,
+        &zone,
+        lead,
+        capture_store::here::get(&ops)?,
+    )?;
 
     let hour = hour_of(now, &zone);
 
@@ -2413,6 +2454,7 @@ impl View for Cal {
                 shift,
                 unclear_hour,
                 unclear_day,
+                sun,
                 column: _, // layout for an hour axis; nothing here draws one
                 columns: _,
             } = i;
@@ -2438,6 +2480,7 @@ impl View for Cal {
                 ("title", title.into()),
                 ("shift", shift.into()),
                 ("unclear_hour", (*unclear_hour).into()),
+                ("sun", sun.into()),
                 (
                     "unclear_day",
                     match unclear_day {
@@ -2512,7 +2555,7 @@ impl View for Cal {
             );
             for i in &d.items {
                 let at = match i.kind {
-                    ItemKind::AllDay => "all day".to_string(),
+                    ItemKind::AllDay => i.sun.clone().unwrap_or_else(|| "all day".to_string()),
                     ItemKind::Due => "due".to_string(),
                     ItemKind::Timed => match i.end_ms {
                         Some(e) => format!("{}–{}", self.clock(i.start_ms), self.clock(e)),

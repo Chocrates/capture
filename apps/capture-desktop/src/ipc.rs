@@ -306,6 +306,9 @@ pub struct Occurrence {
     /// The two days the text could mean, as "Thu 15 Oct"; this row is on
     /// both. Empty otherwise.
     pub unclear_day: Vec<String>,
+    /// "at sunrise", "30 min before sunset": a day whose clock only the phone
+    /// can work out, because only the phone knows where it is.
+    pub sun: Option<String>,
 }
 
 /// "Thu 15 Oct" for each of the two days a note leaves open.
@@ -1329,6 +1332,7 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                 skipped: i.skipped,
                 unclear_hour: i.unclear_hour,
                 unclear_day: day_labels(i.unclear_day.map(|d| d.map(|x| x.to_string()))),
+                sun: i.sun,
             })
             .collect();
 
@@ -1361,6 +1365,7 @@ pub fn agenda(day: String) -> std::result::Result<Vec<Occurrence>, String> {
                     skipped: false,
                     unclear_hour: None,
                     unclear_day: Vec::new(),
+                    sun: None,
                 });
             }
         }
@@ -2229,6 +2234,7 @@ mod tests {
             skipped: false,
             unclear_hour: None,
             unclear_day: Vec::new(),
+            sun: None,
         }
     }
 

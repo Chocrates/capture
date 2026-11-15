@@ -18,6 +18,9 @@ publish.workspace = true
 [dependencies]
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+# Trigonometry without std, for sunrise and sunset (sun.rs). Pure functions of
+# their arguments; no clock is reachable through it.
+libm = "0.2"
 
 [dev-dependencies]
 proptest = { workspace = true }

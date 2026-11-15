@@ -40,8 +40,10 @@
 extern crate alloc;
 
 mod rule;
+mod sun;
 
 pub use rule::{Freq, Occurrence, Rule, Shift, Weekday, expand, horizon};
+pub use sun::{Polar, SunEvent, sun};
 
 use chrono::{Datelike, NaiveDate};
 use chrono_tz::Tz;

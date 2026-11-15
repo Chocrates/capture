@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use crate::{
     BLOCKERS, DAY_SETS, DAY_WORDS, DETERMINERS, FREQ_WORDS, INTERVALS, MARKERS, MERIDIEM, MONTHS,
-    RANGE_OPS, REC_HEADS, SIGILS, TASK_VERBS, TIME_WORDS, UNITS, WEEKDAYS, Word,
+    RANGE_OPS, REC_HEADS, SIGILS, SUN_WORDS, TASK_VERBS, TIME_WORDS, UNITS, WEEKDAYS, Word,
 };
 
 /// What a token turned out to be.
@@ -46,6 +46,8 @@ pub enum Class {
     Meridiem,
     Interval,
     TaskVerb,
+    /// `sunrise`, `sunset`: a time of day only behind `at`, `before`, `after`.
+    SunWord,
     /// `the`, `a`, `an` — the guard that kills a match (§3.1.5).
     Blocker,
     /// A bare number. Never a time on its own: it needs a colon, a meridiem or
@@ -353,6 +355,7 @@ fn classify(s: &str) -> Class {
         (BLOCKERS, Class::Blocker),
         (UNITS, Class::Unit),
         (TASK_VERBS, Class::TaskVerb),
+        (SUN_WORDS, Class::SunWord),
     ] {
         if found(table, s) {
             return class;

@@ -119,6 +119,10 @@ class MainActivity : ComponentActivity() {
             // Background location cannot be granted from a dialog: the
             // platform requires a deliberate trip to Settings.
             Permit.LOCATION_ALWAYS -> openAppSettings()
+            Permit.APPROXIMATE_LOCATION -> {
+                askedAt = System.currentTimeMillis()
+                askOne.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+            }
             Permit.MICROPHONE -> {
                 askedAt = System.currentTimeMillis()
                 askOne.launch(Manifest.permission.RECORD_AUDIO)
@@ -235,9 +239,13 @@ class MainActivity : ComponentActivity() {
         // alarms only decide whether it lands on its moment or within a
         // window. Asking for the optional one in a way that destroys the
         // required one is backwards.
-        if (!askToSpeakIfNeeded()) {
+        if (!askToSpeakIfNeeded() && !askWhereIfNeeded()) {
             askForExactAlarmsIfNeeded()
         }
+
+        // Where the phone is, for sun times. Every open, because opening is
+        // the cheap moment to refresh it (alarms-at-sunrise-and-sunset D5).
+        Here.forSun(this)
 
         // A notification tapped, rather than the app opened.
         intent?.getStringExtra(OPEN_NOTE)?.let { slug ->
@@ -267,6 +275,29 @@ class MainActivity : ComponentActivity() {
         asked = true
         askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         return true
+    }
+
+    /**
+     * Ask for approximate location once a sun time exists, and not before.
+     *
+     * The same reasoning as permission to speak: by the time this is asked,
+     * the person has just written "at sunrise", which is the reason.
+     */
+    private fun askWhereIfNeeded(): Boolean {
+        if (Here.roughlyPermitted(this) || askedWhere) return false
+        if (!runCatching { Store.of(this).hasSunTimes() }.getOrDefault(false)) return false
+        askedWhere = true
+        askWhere.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+        return true
+    }
+
+    private var askedWhere = false
+
+    private val askWhere = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        refreshPermits()
+        if (granted) Here.forSun(this)
     }
 
     /**

@@ -417,6 +417,12 @@ fn a_destroyed_note_leaves_nothing_but_the_fact_of_itself() {
     reached.extend(before);
     survived.extend(after);
 
+    // A series at the sun: its anchor row says which event and offset, which
+    // is the note's schedule and goes with it.
+    let (before, after) = destroy_and_measure("sun", "swim every day at sunrise", |_, _, _| {});
+    reached.extend(before);
+    survived.extend(after);
+
     assert!(
         survived.is_empty(),
         "a destroyed note still has rows in: {}.\n\

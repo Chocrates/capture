@@ -21,6 +21,7 @@ pub mod error;
 pub mod gate;
 pub mod genesis;
 pub mod gesture;
+pub mod here;
 pub mod hotkey;
 pub mod identity;
 pub mod incremental;

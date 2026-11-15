@@ -1137,3 +1137,116 @@ fn an_item_tick_encodes_the_same_way_for_ever() {
     assert_eq!(back.ord, Some(1));
     assert_eq!(back.of, Some(3));
 }
+
+// ---------------------------------------------------------------------------
+// Sun times (alarms-at-sunrise-and-sunset D2). A new `When` variant, so an
+// older build that meets one must refuse the body (and hold the event) rather
+// than read it as something else.
+// ---------------------------------------------------------------------------
+
+fn promote_sunrise_series() -> PromoteBody {
+    PromoteBody {
+        nonce: [0x44; 16],
+        as_: Promoted::Series(SeriesFields {
+            when: When::Solar {
+                date: "2026-11-14".to_string(),
+                event: capture_core::body::SUN_RISE,
+                offset_min: -30,
+                tz: "Europe/London".to_string(),
+            },
+            rule: RuleSpec {
+                freq: 0,
+                interval: 1,
+                by_day: 0,
+                by_month_day: vec![],
+                count: None,
+                until: None,
+            },
+            carries_forward: false,
+            split_from: None,
+        }),
+        pinned: false,
+        grammar: Some(10),
+        confidence: Some(85),
+        released: None,
+    }
+}
+
+fn promote_sunset_once() -> PromoteBody {
+    PromoteBody {
+        nonce: [0x55; 16],
+        as_: Promoted::Event(EventFields {
+            when: When::Solar {
+                date: "2026-12-21".to_string(),
+                event: capture_core::body::SUN_SET,
+                offset_min: 0,
+                tz: "America/Denver".to_string(),
+            },
+            location: None,
+            attendees: vec![],
+        }),
+        pinned: false,
+        grammar: Some(10),
+        confidence: Some(85),
+        released: None,
+    }
+}
+
+#[test]
+fn a_sun_time_encodes_the_same_way_for_ever() {
+    assert_eq!(
+        hex(&canonical_of(&promote_sunrise_series())),
+        // 82 02 84: `When` variant 2 (Solar), four fields: date, 00 sunrise,
+        // 38 1d (-30 minutes), zone. Never a coordinate.
+        "855044444444444444444444444444444444820381838202846a323032362d31312d313400381d6d4575726f70652f4c6f6e646f6e8400010080f4f40a1855"
+    );
+    assert_eq!(
+        hex(&canonical_of(&promote_sunset_once())),
+        "855055555555555555555555555555555555820281838202846a323032362d31322d323101006e416d65726963612f44656e766572f680f40a1855"
+    );
+    for p in [promote_sunrise_series(), promote_sunset_once()] {
+        let back: PromoteBody = minicbor::decode(&canonical_of(&p)).unwrap();
+        assert_eq!(back, p);
+    }
+}
+
+#[test]
+fn an_older_build_refuses_a_sun_time_rather_than_misreading_it() {
+    // `When` as it was before sun times: two variants. Decoding the new one
+    // must fail, so the fold holds the promotion (malformed, kept) instead of
+    // ringing at some time it made up.
+    #[derive(minicbor::Decode, Debug)]
+    #[allow(dead_code)]
+    enum Before {
+        #[n(0)]
+        Timed {
+            #[n(0)]
+            start_ms: i64,
+            #[n(1)]
+            end_ms: Option<i64>,
+            #[n(2)]
+            tz: String,
+        },
+        #[n(1)]
+        AllDay {
+            #[n(0)]
+            start_date: String,
+            #[n(1)]
+            end_date: String,
+        },
+    }
+    let solar = When::Solar {
+        date: "2026-11-14".into(),
+        event: capture_core::body::SUN_SET,
+        offset_min: 15,
+        tz: "Europe/London".into(),
+    };
+    assert!(minicbor::decode::<Before>(&canonical_of(&solar)).is_err());
+    // And the old shapes still read, so the refusal is about the variant.
+    let timed = When::Timed {
+        start_ms: 1,
+        end_ms: None,
+        tz: "UTC".into(),
+    };
+    assert!(minicbor::decode::<Before>(&canonical_of(&timed)).is_ok());
+}
