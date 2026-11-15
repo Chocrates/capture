@@ -291,11 +291,11 @@ fn to_cbor<T: Encode<()>>(v: &T) -> Vec<u8> {
 /// Write a file that must not be world-readable, creating it 0600 from the
 /// start rather than fixing the mode afterwards — the gap between create and
 /// chmod is a window where the key is readable.
-fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
     atomically(path, bytes, Some(0o600))
 }
 
-fn write_plain(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_plain(path: &Path, bytes: &[u8]) -> Result<()> {
     atomically(path, bytes, None)
 }
 

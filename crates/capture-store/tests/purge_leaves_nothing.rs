@@ -104,6 +104,11 @@ const MAY_SURVIVE: &[(&str, &str)] = &[
         "divergences",
         "event ids of versions that diverged. No text.",
     ),
+    (
+        "note_origins",
+        "which origin wrote the first capture — a key's name, the same fact \
+         every event's header carries and keeps after destruction. No text.",
+    ),
 ];
 
 /// Tables that hold no note id at all, and why.
@@ -113,6 +118,10 @@ const MAY_SURVIVE: &[(&str, &str)] = &[
 /// a row that may *remain*: a reason for one must not excuse the other.
 const NOT_KEYED_BY_A_NOTE: &[(&str, &str)] = &[
     ("meta", "the schema version, one row, no note."),
+    (
+        "agents",
+        "which origins sign for an agent, and its name. Keyed by origin.",
+    ),
     (
         "entities",
         "a person or project, which outlives any note naming it.",

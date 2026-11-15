@@ -146,12 +146,23 @@ pub fn retire(paths: StorePaths, key: &str, force: bool) -> Result<()> {
     let roster = capture_core::roster::build(&log.all()?);
 
     let wanted = key.to_ascii_lowercase();
-    let matches: Vec<[u8; 32]> = roster
-        .keys
+    // An agent by the name it was enrolled under, as well as by its key.
+    let by_name: Vec<[u8; 32]> = roster
+        .agents
         .iter()
-        .copied()
-        .filter(|k| short(k).starts_with(&wanted))
+        .filter(|(_, n)| **n == wanted)
+        .map(|(k, _)| *k)
         .collect();
+    let matches: Vec<[u8; 32]> = if by_name.is_empty() {
+        roster
+            .keys
+            .iter()
+            .copied()
+            .filter(|k| short(k).starts_with(&wanted))
+            .collect()
+    } else {
+        by_name
+    };
 
     let subject = match matches.as_slice() {
         [] => {
@@ -176,7 +187,7 @@ pub fn retire(paths: StorePaths, key: &str, force: bool) -> Result<()> {
         say!("Retiring it stops every *other* device accepting what this one");
         say!("writes from now on. This device will go on working locally.");
     }
-    if roster.keys.len() == 1 {
+    if roster.devices().count() == 1 && !roster.agents.contains_key(&subject) {
         return Err(Error::Usage(
             "this is the only device in the roster, and a roster with nobody in it can never \
              admit anyone again"

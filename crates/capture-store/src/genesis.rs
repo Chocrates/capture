@@ -58,6 +58,8 @@ pub fn roster_root(
         // The key a peer opens a Noise session with. Published here because a
         // membership event is where a device states what it is.
         noise: Some(noise),
+        role: None,
+        name: None,
     };
     let body_bytes = encode(&body);
 
@@ -116,6 +118,8 @@ pub fn origin_claim(
         // The key a peer opens a Noise session with. Published here because a
         // membership event is where a device states what it is.
         noise: Some(noise),
+        role: None,
+        name: None,
     };
     let body_bytes = encode(&body);
 

@@ -253,6 +253,11 @@ pub struct NoteSummary {
     /// than on the phone, which would otherwise need its own copy of which
     /// lines are checklist lines.
     pub parts: Vec<PagePart>,
+    /// The agent that wrote it, when the person did not.
+    ///
+    /// Agents write only from the desktop's command line; the phone draws the
+    /// label so a note it syncs is never taken for one the person wrote.
+    pub by: Option<String>,
 }
 
 /// One stretch of a page as it is drawn.
@@ -1849,7 +1854,8 @@ impl Archive {
     /// Replace a note's text. The old version stays in the log.
     pub fn edit(&self, name: String, text: String) -> Result<()> {
         let _w = self.write_lock()?;
-        Ok(capture_store::mutate::edit(&self.paths, &name, &text)?)
+        capture_store::mutate::edit(&self.paths, &name, &text)?;
+        Ok(())
     }
 
     /// Start a page with a title, optionally under another page.
@@ -2461,7 +2467,7 @@ impl Archive {
         // A roster with nobody in it can never admit anyone again, and there
         // is no way back from that: readmission needs a signature from a
         // member, and there would be none.
-        if roster.keys.len() == 1 {
+        if roster.devices().count() == 1 && !roster.agents.contains_key(&subject) {
             return Err(CaptureError::Refused {
                 reason: "this is the only device in the roster, and a roster with nobody in \
                          it can never admit anyone again"
@@ -3468,6 +3474,7 @@ fn summarise(n: capture_store::projection::NoteRow, now: u64) -> NoteSummary {
         descriptor: String::new(),
         items: Vec::new(),
         parts: Vec::new(),
+        by: n.by,
     }
 }
 

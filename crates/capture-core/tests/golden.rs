@@ -566,6 +566,8 @@ fn a_membership_claim_encodes_the_same_way_for_ever() {
         pubkey: [0x22; 32],
         incarnation: [0x33; 16],
         noise: None,
+        role: None,
+        name: None,
     };
 
     // Three fields, not four. A trailing `None` is elided entirely, which is
@@ -594,6 +596,45 @@ fn a_membership_claim_encodes_the_same_way_for_ever() {
     let back: OriginClaimBody = minicbor::decode(&canonical_of(&old)).unwrap();
     assert_eq!(back.noise, None);
     assert_eq!(back.pubkey, [0x22; 32]);
+}
+
+#[test]
+fn an_agent_admission_is_a_suffix_an_older_build_reads_past() {
+    let agent = OriginClaimBody {
+        nonce: [0x11; 16],
+        pubkey: [0x22; 32],
+        incarnation: [0x33; 16],
+        noise: None,
+        role: Some(capture_core::body::ROLE_AGENT),
+        name: Some("claude".into()),
+    };
+    let bytes = canonical_of(&agent);
+    // 86 array(6): the three it always had, f6 (no noise key: an agent is
+    // never dialled), 01 the role, 66 "claude".
+    assert_eq!(
+        hex(&bytes),
+        "865011111111111111111111111111111111582022222222222222222222222222222222222222222222222222222222222222225033333333333333333333333333333333f60166636c61756465"
+    );
+    let back: OriginClaimBody = minicbor::decode(&bytes).unwrap();
+    assert_eq!(back, agent);
+
+    // The claim as a build before agents knew it: four fields. It must decode
+    // the new bytes rather than refuse them, or an older peer would hold every
+    // event the agent wrote.
+    #[derive(minicbor::Decode)]
+    struct Before {
+        #[cbor(n(0), with = "minicbor::bytes")]
+        _nonce: [u8; 16],
+        #[cbor(n(1), with = "minicbor::bytes")]
+        pubkey: [u8; 32],
+        #[cbor(n(2), with = "minicbor::bytes")]
+        _incarnation: [u8; 16],
+        #[cbor(n(3), with = "minicbor::bytes")]
+        noise: Option<[u8; 32]>,
+    }
+    let old: Before = minicbor::decode(&bytes).expect("an older build reads past the role");
+    assert_eq!(old.pubkey, [0x22; 32]);
+    assert_eq!(old.noise, None);
 }
 
 // ---------------------------------------------------------------------------

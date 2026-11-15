@@ -75,6 +75,9 @@ pub struct Session {
     /// *store's* clock at open (§8.7, "startup is the floor"), where the
     /// command line's `CAPTURE_NOW_MS` cannot reach.
     at: Option<u64>,
+    /// The agent this session signs as, when it is not the device
+    /// (`StorePaths::acting`). Checked against the roster at open.
+    agent: Option<crate::agents::AgentKey>,
 }
 
 /// What a pairing learned about the device being admitted.
@@ -149,6 +152,10 @@ impl Session {
         };
 
         let log = Log::open(&paths.events)?;
+        let agent = match &paths.acting {
+            Some(name) => Some(crate::agents::signer(&paths, name, &log)?),
+            None => None,
+        };
         let generation = Ops::open(&paths.ops)?.generation()?;
         let projection_store = Store::open(&projection::generation_path(&paths.state, generation))?;
 
@@ -182,6 +189,10 @@ impl Session {
             read_at_open: 0,
             _writer: writer,
             at,
+            // Attached once the opening work is done, below. Everything a
+            // store does on opening — reading captures, destroying what is
+            // due, ringing — is the device's work, whoever opened it.
+            agent: None,
         };
 
         // A store that went backwards gets a fresh origin before anything is
@@ -334,6 +345,7 @@ impl Session {
             // spool keeps everything until it does.
             Err(e) => tracing::warn!(%e, "spool could not be drained"),
         }
+        s.agent = agent;
         Ok(s)
     }
 
@@ -795,6 +807,7 @@ impl Session {
     /// refusal protects a replica from a peer; this one tells the person
     /// standing here why nothing happened, which the fold cannot.
     pub fn redact_all(&mut self, tgts: &[capture_core::EventId]) -> Result<capture_core::EventId> {
+        self.device_only("redact")?;
         let Some(first) = tgts.first().copied() else {
             return Err(Error::Usage("a redaction names at least one note".into()));
         };
@@ -830,8 +843,8 @@ impl Session {
         // the redaction as owed to nobody.
         let me = self.identity.public().to_bytes();
         let members: Vec<[u8; 32]> = capture_core::roster::build(&self.log.all()?)
-            .keys
-            .into_iter()
+            .devices()
+            .copied()
             .filter(|k| k != &me)
             .collect();
 
@@ -857,6 +870,7 @@ impl Session {
         key: &[u8; 32],
         supersedes: Option<capture_core::EventId>,
     ) -> Result<capture_core::EventId> {
+        self.device_only("retire a device")?;
         let roster = capture_core::roster::build(&self.log.all()?);
 
         // Where each of that key's origins stops, as this device sees it. Read
@@ -935,6 +949,7 @@ impl Session {
         cosign: &[u8; 64],
         nonce: [u8; 16],
     ) -> Result<capture_core::EventId> {
+        self.device_only("re-admit a device")?;
         if cosigner == &subject.pubkey {
             return Err(crate::Error::Usage(
                 "a re-admission needs two different keys — the subject cannot vouch for itself"
@@ -972,6 +987,7 @@ impl Session {
     /// incarnation — so an admission cannot claim an origin the subject does
     /// not own, including one another device is already using.
     pub fn admit(&mut self, subject: &Admitted) -> Result<capture_core::EventId> {
+        self.device_only("admit a device")?;
         let (pubkey, incarnation, noise) = (subject.pubkey, subject.incarnation, subject.noise);
         self.append(Kind::DEVICE_ADD, None, None, move |nonce| {
             let body = capture_core::body::OriginClaimBody {
@@ -980,6 +996,8 @@ impl Session {
                 incarnation,
                 // Without it the newcomer is a member nobody can dial.
                 noise: Some(noise),
+                role: None,
+                name: None,
             };
             let mut b = Vec::new();
             minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
@@ -1074,7 +1092,10 @@ impl Session {
         prev: Option<capture_core::EventId>,
         body: Vec<u8>,
     ) -> Result<Envelope> {
-        let dev = self.identity.dev();
+        if let Some(agent) = &self.agent {
+            refuse_agent_credential(&agent.name, kind, &body)?;
+        }
+        let dev = self.signer_dev();
         let seq = self.next_seq()?;
         let hlc = self.clock.issue(self.now(), dev);
 
@@ -1090,11 +1111,62 @@ impl Session {
             chain: self.chain_tip()?,
             bhash: BodyHash::of(&body),
         };
-        let sig = self.identity.signing().sign(&header.id().0).to_bytes();
+        let sig = match &self.agent {
+            Some(a) => a.signing().sign(&header.id().0).to_bytes(),
+            None => self.identity.signing().sign(&header.id().0).to_bytes(),
+        };
         Ok(Envelope {
             header,
             body: Some(body),
             sig,
+        })
+    }
+
+    /// The origin this session's own writes are signed under.
+    fn signer_dev(&self) -> capture_core::Dev {
+        self.agent
+            .as_ref()
+            .map_or_else(|| self.identity.dev(), |a| a.dev())
+    }
+
+    /// Refuse an act that is the person's or the device's to take.
+    ///
+    /// The roster already refuses membership changes signed by an agent; this
+    /// stops them, and redaction, before anything is written at all.
+    fn device_only(&self, what: &str) -> Result<()> {
+        match &self.agent {
+            Some(a) => Err(Error::Refused(format!(
+                "{} is an agent, and an agent cannot {what}; nothing was written",
+                a.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The agent this session writes as, if it is not the device.
+    pub fn acting(&self) -> Option<&str> {
+        self.agent.as_ref().map(|a| a.name.as_str())
+    }
+
+    /// Enrol an agent: this device admits its key with the role `agent`.
+    pub fn admit_agent(&mut self, key: &crate::agents::AgentKey) -> Result<capture_core::EventId> {
+        if self.agent.is_some() {
+            return Err(Error::Refused("an agent cannot enrol another agent".into()));
+        }
+        let (pubkey, incarnation, name) = (key.public(), key.incarnation().0, key.name.clone());
+        self.append(Kind::DEVICE_ADD, None, None, move |nonce| {
+            let body = capture_core::body::OriginClaimBody {
+                nonce,
+                pubkey,
+                incarnation,
+                // An agent is never dialled: it has no sync endpoint.
+                noise: None,
+                role: Some(capture_core::body::ROLE_AGENT),
+                name: Some(name),
+            };
+            let mut b = Vec::new();
+            minicbor::encode(&body, &mut b).expect("encoding into Vec is infallible");
+            b
         })
     }
 
@@ -1122,11 +1194,42 @@ impl Session {
         let moment = self.now();
         incremental::apply(&mut self.state, &self.log, events, moment as i64)?;
         crate::projection::note_folded(&self.state, events)?;
+        if events
+            .iter()
+            .any(|e| matches!(e.header.kind, Kind::DEVICE_ADD | Kind::ORIGIN_CLAIM))
+        {
+            // A local enrolment opens no gate, and the gate is what writes the
+            // roster tables; without this an agent's first notes would sit in
+            // the timeline until the next sync.
+            self.state
+                .write_agents(&capture_core::roster::build(&self.log.all()?))?;
+        }
 
-        if let Some(last) = events.last() {
+        if !events.is_empty() {
+            // Each origin's watermark from its own events only. An agent's
+            // sequence numbers are its own; handing one to the device's
+            // watermark would make the next open think the log had lost the
+            // device's events and mint it a new origin.
             let (wall, counter) = self.clock.persist();
-            self.identity
-                .advance(&self.paths, last.header.seq, wall, counter)?;
+            let me = self.identity.dev();
+            let mine = events
+                .iter()
+                .filter(|e| e.header.dev == me)
+                .map(|e| e.header.seq)
+                .max();
+            let seq = mine.unwrap_or(self.identity.watermark().highest_seq);
+            self.identity.advance(&self.paths, seq, wall, counter)?;
+            if let Some(a) = &self.agent {
+                let dev = a.dev();
+                if let Some(seq) = events
+                    .iter()
+                    .filter(|e| e.header.dev == dev)
+                    .map(|e| e.header.seq)
+                    .max()
+                {
+                    crate::agents::advance(&self.paths, &a.name, seq)?;
+                }
+            }
         }
 
         // Nothing records "the device was used" here any more.
@@ -1141,12 +1244,40 @@ impl Session {
     }
 
     fn next_seq(&self) -> Result<u64> {
-        next_seq(&self.log, &self.identity.dev())
+        next_seq(&self.log, &self.signer_dev())
     }
 
     fn chain_tip(&self) -> Result<Option<capture_core::EventId>> {
-        chain_tip(&self.log, &self.identity.dev())
+        chain_tip(&self.log, &self.signer_dev())
     }
+}
+
+/// Refuse an agent's text that looks like it holds a credential (D3).
+///
+/// A person's text is flagged and kept; an agent's is refused, because an
+/// agent has no reason to store a secret and nothing it is refused costs the
+/// person anything. Checked on every kind that carries free text a note is
+/// made of, before anything is signed.
+fn refuse_agent_credential(name: &str, kind: Kind, body: &[u8]) -> Result<()> {
+    let text = match kind {
+        Kind::CAPTURE => minicbor::decode::<capture_core::body::CaptureBody>(body)
+            .ok()
+            .map(|b| b.text),
+        Kind::EDIT => minicbor::decode::<capture_core::body::EditBody>(body)
+            .ok()
+            .map(|b| b.text),
+        _ => None,
+    };
+    if text
+        .as_deref()
+        .is_some_and(capture_core::slug::looks_like_credential)
+    {
+        return Err(Error::Refused(format!(
+            "refused: this text looks like it holds a credential, and {name} is an agent. \
+             Nothing was written. Agents do not store secrets; leave them where they are kept."
+        )));
+    }
+    Ok(())
 }
 
 /// The next free position in an origin's sequence.
@@ -1266,7 +1397,7 @@ pub(crate) fn encode<T: minicbor::Encode<()>>(v: &T) -> Vec<u8> {
     b
 }
 
-fn dev_hex(d: &capture_core::Dev) -> String {
+pub(crate) fn dev_hex(d: &capture_core::Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -1307,6 +1438,10 @@ pub fn capture(paths: &StorePaths, text: &str) -> Result<Committed> {
 pub fn commit_body(paths: &StorePaths, body: &[u8]) -> Result<Committed> {
     match Session::open_for_capture(paths.clone()).and_then(|mut s| s.capture(body)) {
         Ok(c) => Ok(Committed::Stored(c.slug)),
+        // Never spooled. The spool holds bodies, not signatures, and is
+        // drained under the device's key: an agent's capture parked there
+        // would come back out as the person's.
+        Err(e) if paths.acting.is_some() => Err(e),
         Err(store_failed) => {
             spool::push(&paths.spool, body).map_err(|spool_failed| {
                 // Both places gone. The only case where a capture is genuinely

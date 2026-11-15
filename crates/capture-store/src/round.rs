@@ -119,7 +119,7 @@ fn tick_once(
     // members would never make the first connection and would never receive
     // the log that would put it in the roster. That deadlock is why the
     // pairing record is consulted here rather than only in the surfaces.
-    let mut members: Vec<[u8; 32]> = roster.keys.iter().copied().filter(|k| k != &me).collect();
+    let mut members: Vec<[u8; 32]> = roster.devices().copied().filter(|k| k != &me).collect();
     for k in ops.dialable()? {
         if may_dial(&roster, &me, &k) && !members.contains(&k) {
             members.push(k);

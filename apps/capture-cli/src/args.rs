@@ -310,7 +310,28 @@ pub enum Command {
     /// Replace a note's text with a new version.
     Edit {
         name: String,
-        text: String,
+        /// The new text: the words given, or standard input with `--stdin`.
+        text: Source,
+        /// The version it replaces, as `show --json` gives it. Refused, with
+        /// nothing written, when the note has moved on.
+        expect: Option<String>,
+    },
+    /// Add lines to the end of a note, losing nothing written before.
+    Append {
+        name: String,
+        text: Source,
+    },
+    /// Enrol an agent on this device.
+    AgentAdd {
+        name: String,
+    },
+    /// Every agent the roster knows.
+    AgentList {
+        json: bool,
+    },
+    /// Print a skill and a permission allowlist for a harness.
+    AgentInstructions {
+        name: String,
     },
     /// Add a tag.
     Tag {
@@ -993,10 +1014,42 @@ where
                 json,
             })
         }
-        "edit" => name_and_rest(&args[1..], "edit", |name, rest| Command::Edit {
-            name,
-            text: rest.join(" "),
-        }),
+        "edit" => {
+            let (name, text, expect) = text_command("edit", &args[1..], true)?;
+            Ok(Command::Edit { name, text, expect })
+        }
+        "append" => {
+            let (name, text, _) = text_command("append", &args[1..], false)?;
+            Ok(Command::Append { name, text })
+        }
+        "agent" => match &args[1..] {
+            [add, name] if add == "add" => Ok(Command::AgentAdd { name: name.clone() }),
+            [list, rest @ ..] if list == "list" => match rest {
+                [] => Ok(Command::AgentList { json: false }),
+                [j] if j == "--json" => Ok(Command::AgentList { json: true }),
+                [other, ..] => Err(Bad::UnknownFlag {
+                    command: "agent list".into(),
+                    flag: other.clone(),
+                }),
+            },
+            [ins, rest @ ..] if ins == "instructions" => match rest {
+                [] => Ok(Command::AgentInstructions {
+                    name: "claude".into(),
+                }),
+                [flag, name] if flag == "--name" => Ok(Command::AgentInstructions {
+                    name: name.clone(),
+                }),
+                [other, ..] => Err(Bad::UnknownFlag {
+                    command: "agent instructions".into(),
+                    flag: other.clone(),
+                }),
+            },
+            _ => Err(Bad::Value {
+                command: "agent".into(),
+                problem: "agent add <name> | agent list | agent instructions [--name <name>]"
+                    .into(),
+            }),
+        },
         "tag" => name_and_rest(&args[1..], "tag", |name, rest| Command::Tag {
             name,
             tag: rest.join(" "),
@@ -1571,6 +1624,64 @@ fn one_name(
 /// The remainder is joined rather than parsed, for the same reason capture text
 /// is: an edit may legitimately begin with a dash, and a parser that inspects
 /// it first would either consume it or refuse the line.
+/// `edit` and `append`: a name, then the text as words or `--stdin`, and for
+/// `edit` an optional `--expect VERSION`.
+///
+/// Flags are read only before `--`; after it every word is text, so a line
+/// that starts with a dash can still be written.
+fn text_command(
+    verb: &str,
+    rest: &[String],
+    takes_expect: bool,
+) -> Result<(String, Source, Option<String>), Bad> {
+    let Some((name, tail)) = rest.split_first() else {
+        return Err(Bad::Value {
+            command: verb.into(),
+            problem: "no note name".into(),
+        });
+    };
+    let mut expect = None;
+    let mut stdin = false;
+    let mut words: Vec<String> = Vec::new();
+    let mut it = tail.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--" => {
+                words.extend(it.by_ref().cloned());
+                break;
+            }
+            "--stdin" if words.is_empty() => stdin = true,
+            "--expect" if takes_expect => match it.next() {
+                Some(v) => expect = Some(v.clone()),
+                None => {
+                    return Err(Bad::Value {
+                        command: verb.into(),
+                        problem: "--expect needs the version, as show --json gives it".into(),
+                    });
+                }
+            },
+            _ => words.push(a.clone()),
+        }
+    }
+    let text = match (stdin, words.is_empty()) {
+        (true, true) => Source::Stdin,
+        (false, false) => Source::Words(words.join(" ")),
+        (true, false) => {
+            return Err(Bad::Value {
+                command: verb.into(),
+                problem: "text from --stdin or from the command line, not both".into(),
+            });
+        }
+        (false, true) => {
+            return Err(Bad::UnknownFlag {
+                command: verb.into(),
+                flag: format!("nothing to {verb}"),
+            });
+        }
+    };
+    Ok((name.clone(), text, expect))
+}
+
 fn name_and_rest(
     rest: &[String],
     verb: &str,
@@ -1692,6 +1803,10 @@ TIME AND TASKS
 
 CHANGING A NOTE
   capture edit <name> <text>     replace the text; the old version is kept
+  capture edit <name> --stdin    the same, reading the text from standard input
+  capture edit <name> --expect <version> ...
+                               refused, writing nothing, if it has moved on
+  capture append <name> <text>   add lines at the end (or --stdin); loses nothing
   capture tag <name> <tag>       add a tag
   capture untag <name> <tag>     retract it
   capture alias <name> [new]     give it a chosen name, or clear it
@@ -1751,6 +1866,17 @@ OPERATING
   restore takes --ignore-redactions-after <time> to undo a mistaken redaction.
   It is not the default: an ordinary restore applies every redaction.
   capture set <key> [value] record a preference, or restore its default
+
+AGENTS
+  capture agent add <name>  enrol a program that writes as itself, not as you
+  capture agent list        every agent, and whether it can still write
+  capture agent instructions [--name <name>]
+                          print a skill and a permission allowlist for it
+
+  CAPTURE_AS=<name> before a command signs what it writes as that agent.
+  Its notes stay out of the timeline and review, and say who wrote them.
+  An agent's key is retired like a device's:  capture retire <name>
+  Writes take --json: one object on stdout naming what was written.
 
 COMMANDS
   capture init              create the store

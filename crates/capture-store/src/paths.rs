@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 /// Set by the test harness; also useful for running a second isolated store.
 pub const STORE_ENV: &str = "CAPTURE_HOME";
 
+/// The agent the command line writes as, when set.
+pub const AS_ENV: &str = "CAPTURE_AS";
+
 /// Resolved locations of everything the store owns.
 ///
 /// The three databases are separate files on purpose (`DESIGN.md` D8), split by
@@ -42,6 +45,13 @@ pub struct StorePaths {
     pub export: PathBuf,
     /// Device keypair and incarnation. Mode 0600.
     pub identity: PathBuf,
+    /// The agent writes are signed as, if not this device (`CAPTURE_AS`).
+    ///
+    /// Carried here because every write already takes the paths and opens its
+    /// own session from them, so this reaches the one place that signs without
+    /// a parameter threaded through each of them — and a write that forgot to
+    /// pass it on would sign as the person, which is the mistake that matters.
+    pub acting: Option<String>,
 }
 
 impl StorePaths {
@@ -68,8 +78,25 @@ impl StorePaths {
             blobs: root.join("blobs"),
             export: root.join("export"),
             identity: root.join("config").join("identity.key"),
+            acting: None,
             root,
         }
+    }
+
+    /// The same store, with writes signed as the agent `name`.
+    ///
+    /// Not read from the environment by [`StorePaths::resolve`]: the overlay
+    /// and the sync daemon resolve too, and a stray `CAPTURE_AS` in the shell
+    /// that started one must not turn the person's own captures into an
+    /// agent's. Only the command line reads [`AS_ENV`].
+    pub fn acting_as(mut self, name: Option<String>) -> Self {
+        self.acting = name;
+        self
+    }
+
+    /// Where agent keys live: `config/agents/`.
+    pub fn agents_dir(&self) -> PathBuf {
+        self.identity.parent().unwrap_or(&self.root).join("agents")
     }
 
     /// Directories that must exist before anything is written.

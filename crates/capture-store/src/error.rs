@@ -27,6 +27,10 @@ pub enum ExitCode {
     /// it again and decide. Separate so a script can tell "retry with what is
     /// there now" from "you asked wrongly".
     Conflict = 4,
+    /// The write was understood and deliberately not made: an agent tried to
+    /// store something shaped like a credential, or wrote as an agent that is
+    /// not enrolled or has been retired. Nothing was written.
+    Refused = 5,
 }
 
 /// Anything that can go wrong below the interface layer.
@@ -73,6 +77,10 @@ pub enum Error {
     #[error("{0}")]
     Conflict(String),
 
+    /// Understood, and not done on purpose. See [`ExitCode::Refused`].
+    #[error("{0}")]
+    Refused(String),
+
     /// The projection was built by an older build and is the wrong shape to
     /// read. Not damage: it is derived, and anything that opens the archive
     /// for writing rebuilds it.
@@ -101,6 +109,7 @@ impl Error {
             // The environment again, and fixed by running something.
             Error::Stale { .. } => ExitCode::Usage,
             Error::Conflict(_) => ExitCode::Conflict,
+            Error::Refused(_) => ExitCode::Refused,
         }
     }
 }

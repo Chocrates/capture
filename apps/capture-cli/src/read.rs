@@ -1947,6 +1947,7 @@ fn note(n: &NoteRow, now: u64) -> Json {
         tags,
         parent: _, // no listing or page draws it yet
         divergences,
+        by,
     } = n;
     // `slug` first: `tools/converge.sh` reads it as the first field.
     obj([
@@ -1972,6 +1973,8 @@ fn note(n: &NoteRow, now: u64) -> Json {
         ("redaction_queued", (*redaction_queued).into()),
         ("credential", (*credential).into()),
         ("divergences", divergences.into()),
+        // The agent that wrote it; null when the person did.
+        ("by", by.into()),
     ])
 }
 

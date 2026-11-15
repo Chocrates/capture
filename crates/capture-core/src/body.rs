@@ -422,7 +422,28 @@ pub struct OriginClaimBody {
     /// deriving one from the other would have saved a field and spent that.
     #[cbor(n(3), with = "minicbor::bytes")]
     pub noise: Option<[u8; 32]>,
+    /// What the admitted key is: absent for a device, [`ROLE_AGENT`] for a
+    /// program writing on the person's behalf.
+    ///
+    /// Appended like `noise`, so every claim already written encodes as it
+    /// did. An older build reads past it and takes an agent for a device: it
+    /// verifies the agent's events (they are signed by a member) and shows
+    /// its notes as the person's until it is updated. That is the degradation
+    /// chosen over a new event kind, which an older build would hold — and
+    /// with it every event the agent ever wrote.
+    ///
+    /// A number, not an enum, so a role this build has never heard of still
+    /// decodes and is read as "not a device it knows how to treat specially".
+    #[n(4)]
+    pub role: Option<u8>,
+    /// The name an agent was enrolled under, shown as "written by NAME".
+    #[n(5)]
+    pub name: Option<String>,
 }
+
+/// [`OriginClaimBody::role`] for an agent: a key that writes notes and may
+/// not change who is a member.
+pub const ROLE_AGENT: u8 = 1;
 
 /// Helper: build a body prefix from a supplied nonce.
 ///

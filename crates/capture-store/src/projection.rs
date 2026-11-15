@@ -119,7 +119,10 @@ use crate::{Result, db};
 /// Version 17 indexes a note's first line apart from the rest (`note_words`),
 /// so a page titled with the words outranks one that mentions them. The old
 /// index had one column and cannot be weighted, so it is rebuilt.
-pub const PROJECTION_SCHEMA: u32 = 17;
+///
+/// 18: `note_origins` and `agents`, so a note an agent wrote can be kept out of
+/// the timeline, review and the reading queue (an-agent-keeps-notes-through-the-cli D2).
+pub const PROJECTION_SCHEMA: u32 = 18;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -165,6 +168,26 @@ CREATE TABLE IF NOT EXISTS notes (
 -- columns.** Rebuild-not-migrate (§1.3) depends on an old projection still
 -- being openable long enough to be found stale, and altering a table it already
 -- has takes that away.
+-- Which origin wrote each note's first capture. Not content — an origin is a
+-- key's name — and kept so whether an agent wrote it is a join against the
+-- current roster rather than a fact frozen at fold time: an admission can
+-- arrive after the notes it explains.
+CREATE TABLE IF NOT EXISTS note_origins (
+  tgt BLOB PRIMARY KEY,
+  dev TEXT NOT NULL
+) STRICT;
+
+-- The origins that sign for an agent, and the name it was enrolled under.
+-- Replaced wholesale from the roster, like the roster tables.
+CREATE TABLE IF NOT EXISTS agents (
+  dev  TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+) STRICT;
+
+CREATE VIEW IF NOT EXISTS agent_notes AS
+  SELECT o.tgt AS tgt, a.name AS name
+  FROM note_origins o JOIN agents a ON a.dev = o.dev;
+
 CREATE TABLE IF NOT EXISTS parents (
   tgt    BLOB PRIMARY KEY,
   parent BLOB NOT NULL
@@ -657,6 +680,9 @@ const UNREAD_FROM_WHERE: &str = "FROM notes n
      LEFT JOIN promotion_at pa ON pa.tgt = n.tgt
      LEFT JOIN read_by rb ON rb.tgt = n.tgt
      WHERE n.text IS NOT NULL
+       -- An agent's notes are not read for dates and tasks: what it writes
+       -- must not ring, or wait to be settled (an-agent-keeps-notes D2).
+       AND NOT EXISTS (SELECT 1 FROM agent_notes an_x WHERE an_x.tgt = n.tgt)
        -- A pinned promotion is somebody's correction and no later parse
        -- displaces it (§6), so there is nothing to re-read it for.
        AND (p.tgt IS NULL OR p.pinned = 0)
@@ -708,7 +734,17 @@ const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias,
      n.redacted_at, n.credential,
      EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0),
      (SELECT p.parent FROM parents p JOIN notes up ON up.tgt = p.parent
-       WHERE p.tgt = n.tgt AND up.redacted_at IS NULL)";
+       WHERE p.tgt = n.tgt AND up.redacted_at IS NULL),
+     (SELECT an.name FROM agent_notes an WHERE an.tgt = n.tgt)";
+
+/// Leaves out the notes an agent wrote (D2 of an-agent-keeps-notes-through-the-cli).
+///
+/// For the surfaces that put things in front of the person — the timeline,
+/// review, the reading queue. An agent writing fifty pages must add nothing a
+/// person is asked to look at. Search, pages, links and entity pages do not use
+/// this: there the notes are found, and say who wrote them.
+pub(crate) const NOT_AN_AGENTS: &str =
+    "NOT EXISTS (SELECT 1 FROM agent_notes an_x WHERE an_x.tgt = n.tgt)";
 
 /// What may never produce an alert.
 ///
@@ -782,6 +818,7 @@ fn review_eligible() -> String {
         //
         // `?1` is already the clock, for the backoff ladder below.
         "n.text IS NOT NULL
+       AND {NOT_AN_AGENTS}
        AND NOT muted(n.muted_until, ?1)
        AND n.redacted_at IS NULL
        AND COALESCE(r.deferred, 0) < {declined}
@@ -987,6 +1024,8 @@ pub struct NoteRow {
     pub parent: Option<EventId>,
     /// How many unreconciled branches the note has.
     pub divergences: u64,
+    /// The agent that wrote it, when it was not the person.
+    pub by: Option<String>,
 }
 
 impl NoteRow {
@@ -1173,7 +1212,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
             "DELETE FROM settings;
-             DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
+             DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences; DELETE FROM note_origins;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM promotion_at; DELETE FROM held;
              DELETE FROM note_words; DELETE FROM fts_map; DELETE FROM promotions;
              DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;
@@ -1195,6 +1234,7 @@ impl Store {
         for tgt in p.notes.keys() {
             let t = tgt.0.to_vec();
             tx.execute("DELETE FROM notes WHERE tgt = ?1", params![t])?;
+            tx.execute("DELETE FROM note_origins WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM note_versions WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM divergences WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM ambient WHERE tgt = ?1", params![t])?;
@@ -2951,6 +2991,7 @@ impl Store {
         let sql = format!(
             "SELECT {NOTE_COLUMNS}
              FROM notes n
+             WHERE {NOT_AN_AGENTS}
              ORDER BY n.created_wall DESC, n.created_counter DESC
              LIMIT ?1"
         );
@@ -3412,6 +3453,25 @@ impl Store {
                 "INSERT INTO roster_refused (event_id, reason) VALUES (?1, ?2)",
                 params![id.0.to_vec(), format!("{why:?}")],
             )?;
+        }
+        tx.commit()?;
+        self.write_agents(r)
+    }
+
+    /// Replace the record of which origins are agents.
+    ///
+    /// Separate from [`Store::write_roster`] because a local enrolment has to
+    /// reach it too, and the roster tables are only written when a gate opens.
+    pub fn write_agents(&mut self, r: &Roster) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM agents", [])?;
+        for (dev, key) in &r.origins {
+            if let Some(name) = r.agents.get(key) {
+                tx.execute(
+                    "INSERT INTO agents (dev, name) VALUES (?1, ?2)",
+                    params![dev_hex(dev), name],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -4286,6 +4346,10 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 n.credential as i64,
             ],
         )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO note_origins (tgt, dev) VALUES (?1, ?2)",
+            params![t, dev_hex(&n.created.origin)],
+        )?;
 
         for v in &n.versions {
             tx.execute(
@@ -4558,6 +4622,7 @@ pub fn rebuild(
     let p = capture_core::fold::fold(events);
     let mut store = Store::open(&path)?;
     store.write(&p, now)?;
+    store.write_agents(&capture_core::roster::build(events))?;
 
     // What this device is refusing to use, restored from the log.
     //
@@ -4712,6 +4777,7 @@ fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
         credential: r.get::<_, i64>(12)? != 0,
         redaction_queued: r.get::<_, i64>(13)? != 0,
         parent: r.get::<_, Option<Vec<u8>>>(14)?.and_then(id_from),
+        by: r.get(15)?,
         tags: Vec::new(),
         divergences: 0,
     })

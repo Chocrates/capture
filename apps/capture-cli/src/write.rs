@@ -22,9 +22,7 @@
 
 use capture_core::{
     EventId,
-    body::{
-        AliasBody, EditBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody, UntagBody,
-    },
+    body::{AliasBody, MuteScope, PinBody, RedactCancelBody, ResolveBody, TagBody, UntagBody},
     event::Kind,
 };
 use capture_store::{Error, Result, StorePaths};
@@ -43,45 +41,51 @@ fn find(s: &Session, name: &str) -> Result<EventId> {
         .ok_or_else(|| Error::NotFound(name.to_string()))
 }
 
-/// Replace a note's text with a new version.
+/// Replace a note's text, optionally only if it is still at `expect`.
 ///
-/// The previous version is not discarded — it stays in the log and in the
-/// version list, which is what lets a divergence show both sides rather than
-/// picking one and hoping.
-pub fn edit(paths: StorePaths, name: &str, text: &str) -> Result<()> {
-    if text.trim().is_empty() {
-        return Err(Error::Usage(
-            "an edit with no text would leave the note unreadable; redact it if that is what you \
-             mean"
-                .into(),
-        ));
-    }
-    let mut s = crate::read::session(paths)?;
-    let tgt = find(&s, name)?;
-
-    // The version being edited, not the note.
-    //
-    // This read `s.state.note(&tgt)?.map(|n| n.tgt)` — a variable named `head`
-    // holding the note's *root*, because `NoteRow` has no head field and
-    // `n.tgt` is what was there to take. `resolve` calls a version a tip when
-    // nobody names it as `prev`, so every edit after the first was a tip:
-    // three sequential edits on one device, a minute apart, came back as
-    // "3 independent versions, none superseded".
-    //
-    // A conflict signal that fires when nothing conflicts is one somebody
-    // learns to dismiss by the second day, and then it is not a signal — which
-    // matters because §6 rates a genuinely lost edit as the failure worth
-    // avoiding, and this is what was supposed to catch it.
-    let head = s.state.head_of(&tgt)?.or(Some(tgt));
-
-    s.append(Kind::EDIT, Some(tgt), head, |nonce| {
-        encode(&EditBody {
-            nonce,
-            text: text.to_string(),
-        })
-    })?;
+/// The store does the work (`mutate::edit_expecting`): reading the head and
+/// appending under one writer lock, so the version an `--expect` names is the
+/// version replaced or the edit is refused with nothing written.
+pub fn edit(
+    paths: StorePaths,
+    name: &str,
+    text: &crate::args::Source,
+    expect: Option<&str>,
+) -> Result<()> {
+    let text = crate::input::read(text)?;
+    let expect = match expect {
+        Some(v) => Some(version_id(v)?),
+        None => None,
+    };
+    capture_store::mutate::edit_expecting(&paths, name, &text, expect)?;
     say!("{name} edited");
     Ok(())
+}
+
+/// Add lines to the end of a note. Nothing saved before it is lost.
+pub fn append(paths: StorePaths, name: &str, text: &crate::args::Source) -> Result<()> {
+    let text = crate::input::read(text)?;
+    capture_store::mutate::append(&paths, name, &text)?;
+    say!("{name}: added to");
+    Ok(())
+}
+
+/// A version as `show --json` prints it: the full 64-character id.
+fn version_id(v: &str) -> Result<capture_core::EventId> {
+    let v = v.trim();
+    let bytes: Option<Vec<u8>> = (v.len() == 64)
+        .then(|| {
+            (0..32)
+                .map(|i| u8::from_str_radix(&v[i * 2..i * 2 + 2], 16).ok())
+                .collect()
+        })
+        .flatten();
+    match bytes.and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        Some(b) => Ok(capture_core::EventId(b)),
+        None => Err(Error::Usage(format!(
+            "--expect takes the version as show --json gives it (64 hex characters), not {v:?}"
+        ))),
+    }
 }
 
 /// Add a tag.
@@ -1075,9 +1079,11 @@ pub fn new_page_for(paths: StorePaths, title: &str, of: &str) -> Result<()> {
 /// gave no name — why, in the store's one wording.
 fn started(made: &capture_store::pages::Created, of: Option<&str>) {
     let name = made.name.as_deref().unwrap_or(&made.slug);
+    crate::out::wrote(name);
     let whose = of.map(|o| format!(" as {o}'s page")).unwrap_or_default();
     say!("Page [[{name}]] started{whose}. Write it with: capture edit {name}");
     if let Some(notice) = made.notice() {
+        crate::out::notice(&notice);
         say!("{notice}");
     }
 }

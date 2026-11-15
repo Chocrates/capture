@@ -67,6 +67,9 @@ pub struct Note {
     /// a note *is* — and so a state added later cannot be silently missed by a
     /// template that only knew about four.
     pub state: &'static str,
+    /// The agent that wrote it, when the person did not: drawn as
+    /// "written by NAME".
+    pub by: Option<String>,
 }
 
 impl From<NoteRow> for Note {
@@ -113,6 +116,7 @@ impl From<NoteRow> for Note {
             descriptor: String::new(),
             items: Vec::new(),
             state,
+            by: n.by,
         }
     }
 }
@@ -1259,7 +1263,7 @@ pub fn retire_device(key: String) -> std::result::Result<(), String> {
 
         // A roster with nobody in it can never admit anyone again, because
         // `device_add` needs a signature from a current member.
-        if roster.keys.len() == 1 {
+        if roster.devices().count() == 1 && !roster.agents.contains_key(&subject) {
             return Err(Error::Usage(
                 "this is the only device in the roster, and a roster with nobody in it can \
                  never admit anyone again"
@@ -1746,7 +1750,7 @@ pub fn health() -> std::result::Result<Health, String> {
         // Same decision and same words as the phone and the command line, from
         // `capture-store`, because three surfaces answering this separately is
         // how two of them came to be wrong.
-        let others = roster.keys.iter().filter(|k| **k != me).count();
+        let others = roster.devices().filter(|k| **k != me).count();
         if let Some((tier, text)) =
             capture_store::syncstate::sync_state(&ops, others, now)?.message()
         {
@@ -1762,7 +1766,7 @@ pub fn health() -> std::result::Result<Health, String> {
         }
 
         let mut peers = Vec::new();
-        for key in &roster.keys {
+        for key in roster.devices() {
             let seen = known.iter().find(|k| &k.key == key);
             peers.push(Peer {
                 key: short_key(key),
@@ -1856,7 +1860,9 @@ pub fn pending_redactions() -> std::result::Result<Vec<Pending>, String> {
 
 #[tauri::command]
 pub fn edit(name: String, text: String) -> std::result::Result<(), String> {
-    wire((|| capture_store::mutate::edit(&paths()?, &name, &text))())
+    wire((|| {
+        capture_store::mutate::edit(&paths()?, &name, &text).map(drop)
+    })())
 }
 
 #[tauri::command]
@@ -2054,6 +2060,7 @@ mod tests {
             credential: false,
             tags: Vec::new(),
             divergences: 0,
+            by: None,
         }
     }
 

@@ -110,7 +110,7 @@ pub fn candidates(paths: &StorePaths, me: &[u8; 32]) -> Result<Vec<Candidate>> {
     let ops = crate::ops::Ops::open_read(&paths.ops)?;
     let reached = ops.peer_addresses()?;
     let mut out = Vec::new();
-    for key in &roster.keys {
+    for key in roster.devices() {
         let silent = if key == me {
             ops.get("alerts.silenced")?.as_deref() == Some("1")
         } else {

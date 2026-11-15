@@ -302,6 +302,7 @@ fun NotePage(note: NoteSummary?, pending: Pending?, recording: Recording?, model
                 Text("Muted.", style = MaterialTheme.typography.labelMedium)
             }
             if (note.pinned) Text("Pinned.", style = MaterialTheme.typography.labelMedium)
+            note.by?.let { Text("Written by $it.", style = MaterialTheme.typography.labelMedium) }
             // A reading the archive was not confident enough to act on.
             //
             // Offered rather than applied, which is what the confidence floor

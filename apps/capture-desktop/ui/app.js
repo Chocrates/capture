@@ -728,6 +728,9 @@ function noteRow(note, onOpen) {
     head.append(s);
   }
   if (note.pinned) head.append(el("span", "state", "pinned"));
+  // An agent's note is the agent's. Said wherever the note is drawn, so a
+  // search result is never mistaken for something the person wrote.
+  if (note.by) head.append(el("span", "state", `written by ${note.by}`));
   // What the archive made of it, where it made anything.
   //
   // The phone has drawn this since the projection change; this window took the

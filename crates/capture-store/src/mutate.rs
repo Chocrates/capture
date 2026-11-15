@@ -40,7 +40,9 @@ pub(crate) fn find(s: &Session, name: &str) -> Result<EventId> {
 }
 
 /// Replace a note's text with a new version.
-pub fn edit(paths: &StorePaths, name: &str, text: &str) -> Result<()> {
+///
+/// Returns the new version's id: what a later `--expect` names.
+pub fn edit(paths: &StorePaths, name: &str, text: &str) -> Result<EventId> {
     edit_expecting(paths, name, text, None)
 }
 
@@ -61,7 +63,7 @@ pub fn edit_expecting(
     name: &str,
     text: &str,
     expect: Option<EventId>,
-) -> Result<()> {
+) -> Result<EventId> {
     if text.trim().is_empty() {
         return Err(Error::Usage(
             "an edit with no text would leave the note unreadable; redact it if that is what \
@@ -100,8 +102,39 @@ pub fn edit_expecting(
             nonce,
             text: text.to_string(),
         })
-    })?;
-    Ok(())
+    })
+}
+
+/// Add lines to the end of a note's text (an-agent-keeps-notes-through-the-cli D5).
+///
+/// Safe without naming a version: the text appended to is read inside the
+/// session that holds the writer lock, and the edit follows exactly that head,
+/// so whatever anyone saved before it is part of the new version. Nothing
+/// written earlier can be lost by an append — which is what makes it the write
+/// an agent reaches for first, and `edit` with an expected version the one it
+/// reaches for only to rewrite.
+///
+/// Returns the new version's id.
+pub fn append(paths: &StorePaths, name: &str, text: &str) -> Result<EventId> {
+    let added = text.trim_matches('\n');
+    if added.trim().is_empty() {
+        return Err(Error::Usage("nothing to append".into()));
+    }
+    let mut s = Session::open(paths.clone())?;
+    let tgt = find(&s, name)?;
+    let Some(now) = s.state.text_of(&tgt)? else {
+        return Err(Error::Usage(format!(
+            "{name} has no text to add to (it has been destroyed, or is queued to be)"
+        )));
+    };
+    let prev = s.state.head_of(&tgt)?.unwrap_or(tgt);
+    let joined = format!("{}\n{added}", now.trim_end_matches('\n'));
+    s.append(Kind::EDIT, Some(tgt), Some(prev), |nonce| {
+        encode(&EditBody {
+            nonce,
+            text: joined,
+        })
+    })
 }
 
 /// Add a tag.

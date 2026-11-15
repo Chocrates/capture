@@ -522,6 +522,15 @@ smoke: build
 	 $$B rebuild >/dev/null || fail 'rebuild'; \
 	 [ "$$($$B status | awk '/^notes/ {print $$2}')" = "$$before" ] || fail 'rebuild lost notes'; \
 	 $$B show scratch-alias >/dev/null || fail 'rebuild lost an alias'; \
+	 echo '--- an agent writes as itself, and a stale edit is refused'; \
+	 $$B agent add smoke-bot >/dev/null || fail 'agent add'; \
+	 made=$$(CAPTURE_AS=smoke-bot $$B page new "Smoke notes" --json) || fail 'agent page'; \
+	 echo "$$made" | grep -q '"by":"smoke-bot"' || fail "page not attributed: $$made"; \
+	 v=$$(echo "$$made" | sed 's/.*"version":"\([0-9a-f]*\)".*/\1/'); \
+	 $$B timeline | grep -q 'Smoke notes' && fail 'an agent page reached the timeline'; \
+	 $$B edit smoke-notes 'the person edits first' >/dev/null || fail 'person edit'; \
+	 [ "$$(code env CAPTURE_AS=smoke-bot $$B edit smoke-notes --expect $$v -- stale)" = 4 ] || fail 'stale expect not refused'; \
+	 $$B show smoke-notes | grep -q 'the person edits first' || fail 'stale edit wrote'; \
 	 echo; echo 'smoke: passed'
 	@rm -rf $(SCRATCH)
 

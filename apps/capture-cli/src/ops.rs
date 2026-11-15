@@ -651,7 +651,9 @@ pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     // device" row at all — while still writing and syncing as a member.
     let mut roster = roster_now(paths)?;
     roster.honour_self(&me);
-    let members = roster.keys;
+    // Devices only. An agent is listed by `capture agent list`; here it would
+    // be a peer that is never reached, and a reason to worry that is not one.
+    let members: std::collections::BTreeSet<[u8; 32]> = roster.devices().copied().collect();
     let addresses = ops.peer_addresses()?;
     let now = crate::read::now_ms() as u64;
 

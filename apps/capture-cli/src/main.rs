@@ -12,6 +12,8 @@
 //! | 1    | the request was wrong |
 //! | 2    | the thing asked for does not exist |
 //! | 3    | stored data failed verification |
+//! | 4    | the note moved on since the version named; nothing written |
+//! | 5    | refused on purpose (an agent writing a credential); nothing written |
 //!
 //! Three is the one that matters most and fires least. It means the archive
 //! disagrees with itself, which is never the user's mistake and always worth
@@ -22,6 +24,8 @@ mod out;
 
 mod ops;
 mod pair;
+
+mod agent;
 
 mod args;
 mod backup;
@@ -49,21 +53,222 @@ fn main() -> ProcExit {
         .init();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (argv, write_json) = split_write_json(argv);
+    if write_json {
+        out::write_json();
+    }
 
     let command = match args::parse(argv) {
         Ok(c) => c,
         Err(bad) => {
-            eprintln!("{}", bad.message());
+            if write_json {
+                eprintln!("{}", error_json("usage", &bad.message()));
+            } else {
+                eprintln!("{}", bad.message());
+            }
             return ProcExit::from(ExitCode::Usage as u8);
         }
     };
 
-    match run(command) {
+    let touched = touched(&command);
+    let outcome = acting()
+        .map_or(Ok(()), |name| agent_may(&command, &name))
+        .and_then(|()| run(command));
+    let outcome = outcome.and_then(|()| {
+        if write_json {
+            wrote_json(touched.or_else(out::written).as_deref())
+        } else {
+            Ok(())
+        }
+    });
+    match outcome {
         Ok(()) => ProcExit::from(ExitCode::Success as u8),
         Err(e) => {
-            eprintln!("capture: {e}");
+            if write_json {
+                eprintln!("{}", error_json(code_name(e.exit_code()), &e.to_string()));
+            } else {
+                eprintln!("capture: {e}");
+            }
             ProcExit::from(e.exit_code() as u8)
         }
+    }
+}
+
+/// The commands whose `--json` this layer answers, because they write.
+///
+/// Reads parse `--json` themselves and render their own view; a write's view is
+/// the same for every write — what it touched — so it is answered once, here.
+const WRITE_VERBS: &[&str] = &[
+    "edit",
+    "append",
+    "tag",
+    "untag",
+    "alias",
+    "parent",
+    "pin",
+    "unpin",
+    "page",
+    "unpage",
+    "tick-at",
+    "untick-at",
+];
+
+/// Take `--json` off a write command, saying whether it was there.
+///
+/// Before `--` only: after it, every word is the note's. For `+`, only a
+/// leading `capture --json + ...`, because any word after `+` is content.
+/// A leading `--json` before a read is put back after its verb.
+fn split_write_json(mut argv: Vec<String>) -> (Vec<String>, bool) {
+    let leading = argv.first().is_some_and(|a| a == "--json");
+    if leading {
+        argv.remove(0);
+    }
+    let Some(verb) = argv.first().cloned() else {
+        return (argv, leading);
+    };
+    if verb == "+" {
+        return (argv, leading);
+    }
+    if !WRITE_VERBS.contains(&verb.as_str()) {
+        if leading {
+            argv.insert(1, "--json".into());
+        }
+        return (argv, false);
+    }
+    let cut = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    let before = argv[..cut].len();
+    let mut kept: Vec<String> = argv[..cut]
+        .iter()
+        .filter(|a| *a != "--json")
+        .cloned()
+        .collect();
+    let found = leading || kept.len() != before;
+    kept.extend(argv[cut..].iter().cloned());
+    (kept, found)
+}
+
+/// The note a write names on its command line, where it names one.
+fn touched(c: &Command) -> Option<String> {
+    match c {
+        Command::Edit { name, .. }
+        | Command::Append { name, .. }
+        | Command::Tag { name, .. }
+        | Command::Untag { name, .. }
+        | Command::Parent { name, .. }
+        | Command::Pin { name, .. }
+        | Command::MakePage { name }
+        | Command::TickAt { name, .. } => Some(name.clone()),
+        // Renamed: the note answers to the new name now.
+        Command::Alias { name, alias } => Some(alias.clone().unwrap_or_else(|| name.clone())),
+        _ => None,
+    }
+}
+
+/// What a write answers under `--json`: the note as it now stands.
+fn wrote_json(name: Option<&str>) -> Result<()> {
+    use crate::json::obj;
+    let Some(name) = name else {
+        out::answer_line(&obj([("ok", true.into())]).render());
+        return Ok(());
+    };
+    let state = read::open(&paths()?)?;
+    let tgt = state
+        .resolve(name)?
+        .ok_or_else(|| Error::NotFound(name.to_string()))?;
+    let row = state
+        .note(&tgt)?
+        .ok_or_else(|| Error::NotFound(name.to_string()))?;
+    let version = state.head_of(&tgt)?.unwrap_or(tgt);
+    let kind = state
+        .promotion_of(&tgt)?
+        .map_or_else(|| "note".to_string(), |p| p.kind);
+    let shown = row.alias.clone().unwrap_or_else(|| row.slug.clone());
+    out::answer_line(
+        &obj([
+            ("name", shown.into()),
+            ("slug", row.slug.clone().into()),
+            ("version", capture_core::id::hexed(&version.0).into()),
+            ("kind", kind.into()),
+            ("by", row.by.clone().into()),
+            ("notice", out::noticed().into()),
+        ])
+        .render(),
+    );
+    Ok(())
+}
+
+fn error_json(code: &str, message: &str) -> String {
+    use crate::json::obj;
+    obj([("error", code.into()), ("message", message.into())]).render()
+}
+
+fn code_name(c: ExitCode) -> &'static str {
+    match c {
+        ExitCode::Success => "ok",
+        ExitCode::Usage => "usage",
+        ExitCode::NotFound => "not_found",
+        ExitCode::Integrity => "integrity",
+        ExitCode::Conflict => "conflict",
+        ExitCode::Refused => "refused",
+    }
+}
+
+/// The agent this invocation writes as, from `CAPTURE_AS`.
+fn acting() -> Option<String> {
+    std::env::var(capture_store::paths::AS_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// What an agent may run: reading, and writing notes. Nothing else.
+///
+/// An allowlist, so a command added later is refused as an agent until
+/// somebody decides otherwise. Everything left out is the person's: destroying,
+/// membership, settings, the calendar, corrections, review, plans that ring.
+fn agent_may(c: &Command, name: &str) -> Result<()> {
+    let ok = matches!(
+        c,
+        Command::Help
+            | Command::Version
+            | Command::Status
+            | Command::Timeline { .. }
+            | Command::Show { .. }
+            | Command::Cal { .. }
+            | Command::Agenda { .. }
+            | Command::Tasks { .. }
+            | Command::List { .. }
+            | Command::Due { .. }
+            | Command::Mentions { .. }
+            | Command::People { .. }
+            | Command::Projects { .. }
+            | Command::Entity { .. }
+            | Command::Intents { .. }
+            | Command::Read { .. }
+            | Command::Search { .. }
+            | Command::Links { .. }
+            | Command::Log { .. }
+            | Command::AgentList { .. }
+            | Command::AgentInstructions { .. }
+            | Command::Capture(_)
+            | Command::NewPage { .. }
+            | Command::NewPageFor { .. }
+            | Command::MakePage { .. }
+            | Command::Edit { .. }
+            | Command::Append { .. }
+            | Command::Tag { .. }
+            | Command::Untag { .. }
+            | Command::Alias { .. }
+            | Command::Parent { .. }
+            | Command::Pin { .. }
+            | Command::TickAt { .. }
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Refused(format!(
+            "{name} is an agent (CAPTURE_AS), and this command is the person's to run; \
+             nothing was done"
+        )))
     }
 }
 
@@ -130,7 +335,13 @@ fn run(command: Command) -> Result<()> {
         Command::Occurrence { name, occ, done } => write::occurrence(paths()?, &name, &occ, done),
         Command::Search { query, json } => read::search(&paths()?, &query, json),
         Command::Links { name, json } => read::links(&paths()?, &name, json),
-        Command::Edit { name, text } => write::edit(paths()?, &name, &text),
+        Command::Edit { name, text, expect } => {
+            write::edit(paths()?, &name, &text, expect.as_deref())
+        }
+        Command::Append { name, text } => write::append(paths()?, &name, &text),
+        Command::AgentAdd { name } => agent::add(&paths()?, &name),
+        Command::AgentList { json } => agent::list(&paths()?, json),
+        Command::AgentInstructions { name } => agent::instructions(&name),
         Command::Tag { name, tag } => write::tag(paths()?, &name, &tag),
         Command::Untag { name, tag } => write::untag(paths()?, &name, &tag),
         Command::Alias { name, alias } => write::alias(paths()?, &name, alias.as_deref()),
@@ -188,13 +399,15 @@ fn run(command: Command) -> Result<()> {
 }
 
 fn paths() -> Result<StorePaths> {
-    StorePaths::resolve().ok_or_else(|| {
-        Error::Usage(
-            "cannot work out where the store should live: no home directory, and \
+    StorePaths::resolve()
+        .map(|p| p.acting_as(acting()))
+        .ok_or_else(|| {
+            Error::Usage(
+                "cannot work out where the store should live: no home directory, and \
              $CAPTURE_HOME is not set"
-                .into(),
-        )
-    })
+                    .into(),
+            )
+        })
 }
 
 /// Capture text, and say where it went.
@@ -209,6 +422,7 @@ fn capture(source: &Source) -> Result<()> {
 
     match session::capture(&paths, &text)? {
         Committed::Stored(slug) => {
+            out::wrote(&slug);
             say!("{slug}");
             Ok(())
         }

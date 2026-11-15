@@ -175,11 +175,22 @@ impl Origin {
 
     /// Admit another device: the event a pairing produces.
     pub fn admits(&mut self, other: &Origin) -> Envelope {
+        self.admits_as(other, None, None)
+    }
+
+    /// Admit another origin as an agent enrolled under `name`.
+    pub fn admits_agent(&mut self, other: &Origin, name: &str) -> Envelope {
+        self.admits_as(other, Some(crate::body::ROLE_AGENT), Some(name))
+    }
+
+    fn admits_as(&mut self, other: &Origin, role: Option<u8>, name: Option<&str>) -> Envelope {
         let body = OriginClaimBody {
             nonce: [0u8; 16],
             pubkey: other.key.verifying_key().to_bytes(),
             incarnation: other.inc.0,
             noise: None,
+            role,
+            name: name.map(Into::into),
         };
         let mut buf = Vec::new();
         minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");
@@ -278,6 +289,8 @@ impl Origin {
             // be dialled, and giving it a Noise key would let a test pass while
             // asserting nothing about how a real one is published.
             noise: None,
+            role: None,
+            name: None,
         };
         let mut buf = Vec::new();
         minicbor::encode(&body, &mut buf).expect("encoding into Vec is infallible");

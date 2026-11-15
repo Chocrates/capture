@@ -21,12 +21,33 @@ nothing beyond `capture` and its JSON.
 
 `capture agent add NAME` generates a key pair and incarnation, stores them at
 `<store>/config/agents/NAME.key` (0600, like `identity.key`), and has the
-device's own origin write a roster event enrolling it with role `agent`, bound
-to the enrolling device.
+device's own origin write a `device_add` admitting that key with two fields
+appended to the frozen claim body: `role = 1` (agent) and `name`.
 
-A write submitted with `CAPTURE_AS=NAME` is signed by the lock holder with that
-agent's key. Agent origins have their own `seq` and chain, so they sync,
-verify and retire exactly as devices do.
+A command run with `CAPTURE_AS=NAME` opens the session as usual and, once the
+opening work is done, signs its own writes with the agent's key. Agent origins
+have their own `seq` and chain (read from the log, as the device's are), so they
+sync, verify and retire exactly as devices do. A small watermark beside the key
+(`NAME.seq`) refuses a write when the log is older than what the agent last
+wrote, rather than reuse a position.
+
+As built (2026-11-14):
+- There is no socket to a lock holder: the CLI takes the writer lock itself
+  (it always has), so "the holder signs" is the CLI's own session.
+- The opening work — sweep, due work, alerts, spool — stays the device's; the
+  agent key is attached after it.
+- An agent's capture is never spooled: the spool holds bodies, not signatures,
+  and is drained under the device's key.
+- `CAPTURE_AS` is read by the command line only. `StorePaths::resolve` does not
+  read it, so an overlay or sync daemon started from a shell that has it set
+  still writes as the device.
+- The roster refuses any membership change signed by an agent (admit, retire,
+  re-key, re-admit, or co-sign), and a root that names itself an agent. The CLI
+  runs only reads and note writes as an agent (an allowlist in `main.rs`); the
+  store also refuses redact/retire/readmit/admit in an agent session.
+- "Devices" — who a redaction must reach, who is dialled, who may be the
+  notifier, the last member who must not be retired — is `Roster::devices()`,
+  members minus agents.
 
 Rejected:
 - **A trailing `by` field on events.** It would be a self-assertion signed by
@@ -38,12 +59,16 @@ Rejected:
 
 ### D2. The role is read from the roster as it stood when the event was written
 
-The fold already takes only the event set; it learns an origin is an agent from
-the enrolling roster event in the log. A note is *agent-originated* when its
-root capture's origin has role `agent`.
+A note is *agent-originated* when its root capture's origin is an agent. As
+built, the projection records each note's root origin (`note_origins`) and,
+replaced wholesale from the roster, which origins are agents (`agents`); a view
+joins them. So an admission that arrives after the notes it explains still
+applies, without re-folding them. `agents` is rewritten on every gate, every
+rebuild, and every local commit of a membership event. Schema 18.
 
-Agent-originated notes are excluded from the timeline, review, settle and
-"recent" surfaces, and are included in search, pages, links, entity pages and
+Agent-originated notes are excluded from the timeline, review and the reading
+queue (so the sweep never reads an agent's text for a date or task, and nothing
+it writes rings), and are included in search, pages, links, entity pages and
 `show`, labelled "written by NAME". An agent's edit to the person's note is
 still shown on that note, attributed in its history; it does not move the note.
 
@@ -88,12 +113,13 @@ Printed, never written — the same reason `install` prints the shell snippet
 
 ## Risks / Trade-offs
 
-- [New roster role is a CBOR enum variant; an older build holds the roster
-  event as malformed] → For a roster event that is worse than for a promotion:
-  an older peer would not know the agent origin and would hold every agent
-  event. Both devices update together (as with `Promoted::Page`); the phone is
-  updated first, and `capture agent add` refuses until every roster device has
-  been seen on a build that knows the role (peer build version in sync state).
+- [An older build and the agent role] → Not a new variant: the role is a
+  trailing optional field on the claim body, the change a frozen body permits.
+  An older build decodes the admission (golden test), admits the key as a
+  device, verifies the agent's events and shows its notes as the person's
+  until updated. Nothing is held. So the planned peer-build gate (task 1.5) was
+  not needed and was not built. Update the phone before enrolling an agent if
+  the timeline there matters.
 - [An env var is easy to forget; the agent then writes as the person] → The
   printed allowlist only admits writes prefixed with `CAPTURE_AS=NAME`; bare
   write commands need approval.

@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 
 use crate::{
     Dev, Incarnation,
-    body::{OriginClaimBody, ReadmitBody, RetireBody, RosterKeyBody, readmit_digest},
+    body::{OriginClaimBody, ROLE_AGENT, ReadmitBody, RetireBody, RosterKeyBody, readmit_digest},
     envelope::Envelope,
     event::Kind,
     id::EventId,
@@ -92,6 +92,13 @@ pub struct Roster {
     /// replica folds the same membership events, so every replica agrees on it
     /// without anything being written.
     pub admitted: BTreeMap<[u8; 32], crate::hlc::Hlc>,
+    /// Keys admitted as agents, and the name each was enrolled under.
+    ///
+    /// Still members — in [`Roster::keys`] — because their events have to
+    /// verify like anyone's. What the role changes is what they may do: an
+    /// agent writes notes and never changes who is a member, so a key left
+    /// on disk for a program cannot be used to admit, retire or re-key.
+    pub agents: BTreeMap<[u8; 32], alloc::string::String>,
 }
 
 /// Why an authentic membership event conferred nothing.
@@ -140,6 +147,13 @@ pub enum Refusal {
     /// still be in flight. Re-evaluated on every membership arrival, like the
     /// others.
     AdmitterIsNotAMember,
+    /// A membership change signed by an agent.
+    ///
+    /// An agent is a key on disk for a program to write with. Letting it admit
+    /// or retire would make that file as powerful as the device itself.
+    AgentCannotChangeMembership,
+    /// A root that names itself an agent. The first member is a device.
+    AgentCannotBeTheRoot,
 }
 
 impl Roster {
@@ -178,6 +192,27 @@ impl Roster {
     pub fn head_of(&self, dev: &Dev) -> Option<(u64, EventId)> {
         let key = self.origins.get(dev)?;
         self.retired.get(key)?.get(dev).copied()
+    }
+
+    /// The name of the agent an origin belongs to, if it is one.
+    pub fn agent(&self, dev: &Dev) -> Option<&str> {
+        self.agents.get(self.origins.get(dev)?).map(|s| s.as_str())
+    }
+
+    /// Member keys that are devices: everyone but the agents.
+    ///
+    /// What "the other devices" means wherever something is owed to them or
+    /// asked of them — a redaction to reach, a peer to dial, a notifier to
+    /// pick, the last member who must not be retired. An agent never syncs,
+    /// so counting it would leave a redaction owed for ever and a status line
+    /// waiting on a device that does not exist.
+    pub fn devices(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.keys.iter().filter(|k| !self.agents.contains_key(*k))
+    }
+
+    /// Whether an origin signs for an agent rather than a device.
+    fn signed_by_agent(&self, dev: &Dev) -> bool {
+        self.agent(dev).is_some()
     }
 
     /// Whether the roster has a root at all.
@@ -245,6 +280,10 @@ pub fn build(events: &[Envelope]) -> Roster {
                 r.refused.insert(id, Refusal::AdmitterIsNotAMember);
                 continue;
             }
+            if r.signed_by_agent(&e.header.dev) {
+                r.refused.insert(id, Refusal::AgentCannotChangeMembership);
+                continue;
+            }
             if superseded.contains(&id) {
                 // Replaced by a reissue naming a different head. Applying it
                 // would let the older, narrower claim win by arriving second.
@@ -256,7 +295,8 @@ pub fn build(events: &[Envelope]) -> Roster {
                 r.refused.insert(id, Refusal::NotAMember);
                 continue;
             }
-            if is_member && r.keys.len() == 1 {
+            let devices_left = r.devices().filter(|k| **k != body.pubkey).count();
+            if is_member && devices_left == 0 && !r.agents.contains_key(&body.pubkey) {
                 // The last member cannot retire itself into a roster nobody
                 // can ever join.
                 r.refused.insert(id, Refusal::WouldEmptyTheRoster);
@@ -303,6 +343,10 @@ pub fn build(events: &[Envelope]) -> Roster {
             let Ok(body) = minicbor::decode::<ReadmitBody>(body) else {
                 continue;
             };
+            if r.signed_by_agent(&e.header.dev) || r.agents.contains_key(&body.cosigner) {
+                r.refused.insert(id, Refusal::AgentCannotChangeMembership);
+                continue;
+            }
             if body.cosigner == body.pubkey {
                 // The subject vouching for itself is one device's say-so.
                 r.refused.insert(id, Refusal::NotTwoSigners);
@@ -346,6 +390,10 @@ pub fn build(events: &[Envelope]) -> Roster {
                 r.refused.insert(id, Refusal::KeyIsNotAMember);
                 continue;
             }
+            if r.signed_by_agent(&e.header.dev) {
+                r.refused.insert(id, Refusal::AgentCannotChangeMembership);
+                continue;
+            }
             if let Ok(rekey) = minicbor::decode::<RosterKeyBody>(body) {
                 r.secret = Some(rekey.secret);
             }
@@ -381,6 +429,10 @@ pub fn build(events: &[Envelope]) -> Roster {
                     r.refused.insert(id, Refusal::NotTheFirstRoot);
                     continue;
                 }
+                if claim.role == Some(ROLE_AGENT) {
+                    r.refused.insert(id, Refusal::AgentCannotBeTheRoot);
+                    continue;
+                }
                 root_seen = true;
                 r.keys.insert(claim.pubkey);
                 r.admitted.entry(claim.pubkey).or_insert(e.header.hlc);
@@ -397,6 +449,10 @@ pub fn build(events: &[Envelope]) -> Roster {
                     r.refused.insert(id, Refusal::AdmitterIsNotAMember);
                     continue;
                 }
+                if r.signed_by_agent(&e.header.dev) {
+                    r.refused.insert(id, Refusal::AgentCannotChangeMembership);
+                    continue;
+                }
                 if r.retired.contains_key(&claim.pubkey) {
                     // Retire wins, whatever the order. A retirement that could
                     // be undone by an ordinary admission would mean a stolen
@@ -408,6 +464,10 @@ pub fn build(events: &[Envelope]) -> Roster {
                 r.keys.insert(claim.pubkey);
                 r.admitted.entry(claim.pubkey).or_insert(e.header.hlc);
                 r.origins.insert(subject, claim.pubkey);
+                if claim.role == Some(ROLE_AGENT) {
+                    let name = claim.name.unwrap_or_else(|| "agent".into());
+                    r.agents.entry(claim.pubkey).or_insert(name);
+                }
             }
             Kind::ORIGIN_CLAIM => {
                 if !self_signed {
@@ -610,5 +670,109 @@ mod tests {
     fn ordinary_events_do_not_affect_membership() {
         let s = testing::mixed(3, 2, 3, 12);
         assert!(!build(&s.events).is_bootstrapped());
+    }
+
+    #[test]
+    fn an_agent_is_a_member_with_a_name() {
+        let mut desk = testing::Origin::new(0);
+        let bot = testing::Origin::new(1);
+        let root = desk.roster_root();
+        let admit = desk.admits_agent(&bot, "claude");
+        let r = build(&[root, admit]);
+        assert_eq!(
+            r.key_for(&bot.dev()),
+            Some(&bot.pubkey()),
+            "its events must verify"
+        );
+        assert_eq!(r.agent(&bot.dev()), Some("claude"));
+        assert_eq!(r.agent(&desk.dev()), None, "the device is not an agent");
+    }
+
+    #[test]
+    fn an_agent_cannot_change_who_is_a_member() {
+        // A key on disk for a program. Were it able to admit, it could let in a
+        // device of its choosing; to retire, lock the person out; to re-key,
+        // move the mesh off the secret every device advertises under.
+        let mut desk = testing::Origin::new(0);
+        let mut bot = testing::Origin::new(1);
+        let stranger = testing::Origin::new(2);
+        let root = desk.roster_root();
+        let admit = desk.admits_agent(&bot, "claude");
+        bot.observe(&admit, 2_000_000_000_000);
+        let lets_in = bot.admits(&stranger);
+        let retires = bot.retires(&desk, &[]);
+        let rekeys = bot.roster_key([9u8; 32]);
+        let ids = [lets_in.header.id(), retires.header.id(), rekeys.header.id()];
+
+        let r = build(&[root, admit, lets_in, retires, rekeys]);
+        for id in ids {
+            assert_eq!(
+                r.refused.get(&id),
+                Some(&Refusal::AgentCannotChangeMembership)
+            );
+        }
+        assert!(r.key_for(&stranger.dev()).is_none());
+        assert!(r.keys.contains(&desk.pubkey()));
+        assert!(r.retired.is_empty());
+        assert_eq!(r.secret, None);
+    }
+
+    #[test]
+    fn a_device_can_retire_an_agent() {
+        let mut desk = testing::Origin::new(0);
+        let bot = testing::Origin::new(1);
+        let root = desk.roster_root();
+        let admit = desk.admits_agent(&bot, "claude");
+        let retire = desk.retires(&bot, &[(bot.dev(), 0, EventId([0u8; 32]))]);
+        let r = build(&[root, admit, retire]);
+        assert!(r.retired.contains_key(&bot.pubkey()));
+        assert_eq!(
+            r.agent(&bot.dev()),
+            Some("claude"),
+            "its past notes still name it"
+        );
+    }
+
+    #[test]
+    fn the_root_is_never_an_agent() {
+        let mut d = testing::Origin::new(0);
+        let mut root = d.roster_root();
+        let mut claim: OriginClaimBody = minicbor::decode(root.body.as_deref().unwrap()).unwrap();
+        claim.role = Some(ROLE_AGENT);
+        let mut b = Vec::new();
+        minicbor::encode(&claim, &mut b).unwrap();
+        let mut d = testing::Origin::new(0);
+        root = d.author(Kind::DEVICE_ADD, None, None, b, 1_700_000_000_000);
+        let id = root.header.id();
+        let r = build(&[root]);
+        assert!(!r.is_bootstrapped());
+        assert_eq!(r.refused.get(&id), Some(&Refusal::AgentCannotBeTheRoot));
+    }
+
+    #[test]
+    fn which_keys_are_agents_does_not_depend_on_arrival_order() {
+        let mut desk = testing::Origin::new(0);
+        let mut bot = testing::Origin::new(1);
+        let phone = testing::Origin::new(2);
+        let root = desk.roster_root();
+        let admit = desk.admits_agent(&bot, "claude");
+        bot.observe(&admit, 2_000_000_000_000);
+        let lets_in = bot.admits(&phone);
+        let events = [root, admit, lets_in];
+        let want = build(&events);
+        for perm in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let shuffled: Vec<_> = perm.iter().map(|&i| events[i].clone()).collect();
+            let got = build(&shuffled);
+            assert_eq!(got.agents, want.agents);
+            assert_eq!(got.keys, want.keys);
+            assert_eq!(got.refused, want.refused);
+        }
     }
 }
