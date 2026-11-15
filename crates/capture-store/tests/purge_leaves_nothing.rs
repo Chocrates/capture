@@ -132,13 +132,13 @@ const NOT_KEYED_BY_A_NOTE: &[(&str, &str)] = &[
     ("device_caps", "what a device can do. Keyed by device."),
     ("settings", "settings. One row per key."),
     (
-        "note_fts",
+        "note_words",
         "the full-text index, keyed by rowid through fts_map, and cleared by the purge through it.",
     ),
-    ("note_fts_data", "fts5 internals."),
-    ("note_fts_idx", "fts5 internals."),
-    ("note_fts_docsize", "fts5 internals."),
-    ("note_fts_config", "fts5 internals."),
+    ("note_words_data", "fts5 internals."),
+    ("note_words_idx", "fts5 internals."),
+    ("note_words_docsize", "fts5 internals."),
+    ("note_words_config", "fts5 internals."),
     (
         "intents",
         "an intent, keyed by its own event id. Its cue and action name a place, \

@@ -879,6 +879,8 @@ pub struct PageMade {
     pub slug: String,
     /// The name its title gave it, where that was free.
     pub name: Option<String>,
+    /// Why the title gave no name, worded for the person; `None` when it did.
+    pub notice: Option<String>,
 }
 
 /// Start a page with a title, optionally under another page. A page is never
@@ -888,6 +890,7 @@ pub fn new_page(title: String, under: Option<String>) -> std::result::Result<Pag
     wire((|| {
         let made = capture_store::pages::create(&paths()?, &title, under.as_deref())?;
         Ok(PageMade {
+            notice: made.notice(),
             slug: made.slug,
             name: made.name,
         })
@@ -905,6 +908,7 @@ pub fn new_page_for(
         let kind = entity_kind(sigil.chars().next().unwrap_or(' '))?;
         let made = capture_store::pages::create_for(&paths()?, kind, &value, &title)?;
         Ok(PageMade {
+            notice: made.notice(),
             slug: made.slug,
             name: made.name,
         })

@@ -793,6 +793,11 @@ pub fn redact(paths: StorePaths, name: &str, force: bool, with_links: bool) -> R
     // note's name, not this one's, and following further lets one flag walk an
     // arbitrary distance through the archive.
     let mut targets = vec![tgt];
+    // Named whether or not they go: what stays behind is changed too. A note
+    // linking here keeps a link that now shows broken, and a page filed under
+    // this one is filed under nothing (pages-that-hold-up G10).
+    let linkers = s.state.links_to(&tgt)?;
+    let children = s.state.children_of(&tgt)?;
     let linking = if with_links {
         let back = s.state.links_to(&tgt)?;
         for b in &back {
@@ -843,6 +848,25 @@ pub fn redact(paths: StorePaths, name: &str, force: bool, with_links: bool) -> R
             );
             for b in &linking {
                 say!("  {}", b.slug);
+            }
+        } else if !linkers.is_empty() {
+            say!();
+            say!(
+                "{} note(s) link to it. They stay, and their links will show broken:",
+                linkers.len()
+            );
+            for b in &linkers {
+                say!("  {}", b.slug);
+            }
+        }
+        if !children.is_empty() {
+            say!();
+            say!(
+                "{} page(s) are filed under it. They stay, filed under nothing:",
+                children.len()
+            );
+            for c in &children {
+                say!("  {c}");
             }
         }
 
@@ -1035,14 +1059,7 @@ pub fn day(paths: StorePaths, name: &str, which: usize) -> Result<()> {
 /// Start a page.
 pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<()> {
     let made = capture_store::pages::create(&paths, title, under)?;
-    match &made.name {
-        Some(name) => say!("Page [[{name}]] started. Write it with: capture edit {name}"),
-        None => say!(
-            "Page {} started; its title's name was already in use. Write it with: capture edit {}",
-            made.slug,
-            made.slug
-        ),
-    }
+    started(&made, None);
     Ok(())
 }
 
@@ -1050,9 +1067,19 @@ pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<(
 pub fn new_page_for(paths: StorePaths, title: &str, of: &str) -> Result<()> {
     let (kind, value) = crate::read::split_mention(of)?;
     let made = capture_store::pages::create_for(&paths, kind, &value, title)?;
-    let name = made.name.unwrap_or(made.slug);
-    say!("Page [[{name}]] started as {of}'s page. Write it with: capture edit {name}");
+    started(&made, Some(of));
     Ok(())
+}
+
+/// What starting a page says: its name, whose it is, and — where the title
+/// gave no name — why, in the store's one wording.
+fn started(made: &capture_store::pages::Created, of: Option<&str>) {
+    let name = made.name.as_deref().unwrap_or(&made.slug);
+    let whose = of.map(|o| format!(" as {o}'s page")).unwrap_or_default();
+    say!("Page [[{name}]] started{whose}. Write it with: capture edit {name}");
+    if let Some(notice) = made.notice() {
+        say!("{notice}");
+    }
 }
 
 /// Make a capture a page: never read for dates or types again.

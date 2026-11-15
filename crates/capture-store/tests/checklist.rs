@@ -619,3 +619,42 @@ fn declining_leaves_the_capture_exactly_as_written() {
     assert!(capture_store::review::suggestion_for(text, None, NOW as i64).is_some());
     assert!(items(&paths, &slug).is_empty());
 }
+
+#[test]
+fn removing_the_ticked_item_and_adding_another_moves_its_tick_nowhere() {
+    // Found 2026-11-13 (pages-that-hold-up G3): the count is unchanged, so the
+    // position rule fired on the row that slid into the ticked one's place.
+    // Across two devices this is one person ticking "eggs" while the other
+    // swaps it for "butter" — and "milk" came back bought.
+    let scratch = Scratch::new("swap");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "#shop: eggs, milk, bread");
+    promote::tick_at(&paths, &slug, 0, true).unwrap();
+    mutate::edit(&paths, &slug, "#shop: milk, bread, butter").unwrap();
+    assert!(
+        items(&paths, &slug).iter().all(|(_, done)| !done),
+        "a tick nobody gave: {:?}",
+        items(&paths, &slug)
+    );
+}
+
+#[test]
+fn a_reworded_item_keeps_its_tick() {
+    // What the position rule is for, and still does.
+    let scratch = Scratch::new("reword-kept");
+    let paths = scratch.paths();
+    let slug = capture(&paths, "#shop: egs, milk, bread");
+    promote::tick_at(&paths, &slug, 0, true).unwrap();
+    mutate::edit(&paths, &slug, "#shop: eggs, milk, bread").unwrap();
+    assert_eq!(
+        items(&paths, &slug)[0],
+        ("eggs".into(), true),
+        "a typo fixed"
+    );
+    mutate::edit(&paths, &slug, "#shop: free-range eggs, milk, bread").unwrap();
+    assert_eq!(
+        items(&paths, &slug)[0],
+        ("free-range eggs".into(), true),
+        "a word added"
+    );
+}

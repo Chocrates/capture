@@ -21,8 +21,36 @@ pub struct Created {
     /// Its permanent name.
     pub slug: String,
     /// The name taken from its title, where that was free. `None` when another
-    /// note already had it: the page keeps its slug, and a surface says so.
+    /// note already had it, or the title looked like a credential: the page
+    /// keeps its slug, and a surface says why ([`Created::notice`]).
     pub name: Option<String>,
+    /// Why the title gave no name, when it did not.
+    pub unnamed: Option<Unnamed>,
+}
+
+/// Why a new page was not named by its title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unnamed {
+    /// Another note already answers to that name.
+    Taken,
+    /// The title looked like it holds a credential. Its slug is a date for the
+    /// same reason (§4.3), and an alias made from the title would carry the
+    /// words into every `[[link]]` that names the page.
+    Credential,
+}
+
+impl Created {
+    /// What a surface says when the page did not get its title's name — one
+    /// wording for every surface. Never repeats the title.
+    pub fn notice(&self) -> Option<String> {
+        self.unnamed.map(|why| match why {
+            Unnamed::Taken => format!("That name was taken, so this page is called {}.", self.slug),
+            Unnamed::Credential => format!(
+                "The title looks like it holds a credential, so this page is called {} rather than by its title.",
+                self.slug
+            ),
+        })
+    }
 }
 
 /// Start a page with a title, optionally under another page.
@@ -48,18 +76,28 @@ pub fn create(paths: &StorePaths, title: &str, under: Option<&str>) -> Result<Cr
     };
     make(paths, &slug)?;
 
-    let wanted = name_for(title);
-    let name = match wanted {
-        Some(n) if crate::projection::current(paths)?.resolve(&n)?.is_none() => {
-            crate::mutate::set_alias(paths, &slug, Some(&n))?;
-            Some(n)
+    let (name, unnamed) = if capture_core::slug::looks_like_credential(title) {
+        (None, Some(Unnamed::Credential))
+    } else {
+        match name_for(title) {
+            Some(n) if crate::projection::current(paths)?.resolve(&n)?.is_none() => {
+                crate::mutate::set_alias(paths, &slug, Some(&n))?;
+                (Some(n), None)
+            }
+            Some(_) => (None, Some(Unnamed::Taken)),
+            // Nothing nameable in the title (emoji only): the slug is its
+            // name, which is no loss worth announcing.
+            None => (None, None),
         }
-        _ => None,
     };
     if let Some(parent) = under {
         crate::mutate::set_parent(paths, &slug, Some(parent))?;
     }
-    Ok(Created { slug, name })
+    Ok(Created {
+        slug,
+        name,
+        unnamed,
+    })
 }
 
 /// Start a page that *is* a person, project or tag: made as [`create`] makes
@@ -87,13 +125,34 @@ pub fn make(paths: &StorePaths, name: &str) -> Result<()> {
     crate::promote::correct(paths, name, Promoted::Page)
 }
 
-/// `car-maintenance` for "Car maintenance": lowercase letters and digits,
-/// everything else a single hyphen. `None` where nothing is left.
+/// `car-maintenance` for "Car maintenance": the title's words, lowercased,
+/// joined by single hyphens. `None` where the title has no words (emoji only).
+///
+/// Letters by grapheme, not by character. The first version split on any
+/// character `is_alphanumeric` refused, and a combining mark is not
+/// alphanumeric: "हिन्दी नोट्स" became `हिन-दी-नोट-स`, and "café" typed with a
+/// decomposed accent became `cafe` plus a stray hyphen — a different name from
+/// the same word typed precomposed (found 2026-11-13, pages-that-hold-up G9).
+/// So the title is NFC-normalised, and a grapheme cluster is part of a word
+/// when its base character is a letter or digit, marks and all. Unicode *word*
+/// boundaries were tried and are wrong here: they make every CJK ideograph its
+/// own word, so "東京" came out `東-京`. The script is kept rather than
+/// transliterated, because a name is read and typed by the person who wrote it.
+///
+/// One special case: lowercase "İ" is "i" plus a combining dot above, and
+/// "İstanbul" should be `istanbul`, which is what anyone would type.
 pub fn name_for(title: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_segmentation::UnicodeSegmentation;
+    let lowered = title
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .replace("i\u{307}", "i");
     let mut out = String::new();
-    for c in title.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            out.push(c);
+    for g in lowered.graphemes(true) {
+        if g.chars().next().is_some_and(char::is_alphanumeric) {
+            out.push_str(g);
         } else if !out.is_empty() && !out.ends_with('-') {
             out.push('-');
         }

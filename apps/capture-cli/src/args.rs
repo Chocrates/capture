@@ -811,6 +811,17 @@ where
         // dates or types; `capture unpage` hands it back to the recognizer.
         "page" => match &args[1..] {
             [new, rest @ ..] if new == "new" => {
+                // Refused rather than half-applied (pages-that-hold-up G15):
+                // the page of a person sits on their page, not in the tree, so
+                // "under" has nowhere to put it.
+                if rest.iter().any(|a| a == "--under") && rest.iter().any(|a| a == "--of") {
+                    return Err(Bad::Value {
+                        command: "page".into(),
+                        problem: "a page is either under another page (--under) or someone's own \
+                                  page (--of), not both"
+                            .into(),
+                    });
+                }
                 let flag = rest.iter().position(|a| a == "--under" || a == "--of");
                 let (title, flagged) = match flag {
                     Some(i) => match rest.get(i + 1) {
@@ -1813,6 +1824,30 @@ mod tests {
             Ok(Command::EntityBind { note: None, .. }) => {}
             other => panic!("expected an unbind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_page_is_not_started_both_under_a_page_and_as_someones() {
+        // G15. Either order, and the message says which choice to make.
+        for args in [
+            &["page", "new", "Trip", "--under", "travel", "--of", "@sarah"][..],
+            &["page", "new", "Trip", "--of", "@sarah", "--under", "travel"][..],
+        ] {
+            match p(args) {
+                Err(Bad::Value { problem, .. }) => {
+                    assert!(problem.contains("not both"), "{problem}")
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            p(&["page", "new", "Trip", "--under", "travel"]),
+            Ok(Command::NewPage { .. })
+        ));
+        assert!(matches!(
+            p(&["page", "new", "Trip", "--of", "@sarah"]),
+            Ok(Command::NewPageFor { .. })
+        ));
     }
 
     #[test]

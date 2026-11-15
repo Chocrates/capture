@@ -344,3 +344,26 @@ fn a_destroyed_note_comes_back_from_the_copy_taken_first() {
 fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
 }
+
+/// What stays behind is named too: the notes whose links will break, and the
+/// pages that will be filed under nothing (pages-that-hold-up G10).
+#[test]
+fn the_prompt_names_what_will_link_to_nothing_and_what_will_be_unfiled() {
+    let s = Store::new("page-kin");
+    s.ok(&["page", "new", "Trip"]);
+    s.ok(&["page", "new", "Trip packing", "--under", "trip"]);
+    let linking = s.capture_note("see the [[trip]] page");
+    s.ok(&["settle"]);
+
+    let out = s.answering(&["redact", "trip"], "no\n").1;
+    assert!(out.contains("will show broken"), "{out}");
+    assert!(
+        out.contains(&linking),
+        "the linking note was not named: {out}"
+    );
+    assert!(out.contains("filed under nothing"), "{out}");
+    assert!(
+        out.contains("trip-packing") || out.contains("packing"),
+        "the child was not named: {out}"
+    );
+}

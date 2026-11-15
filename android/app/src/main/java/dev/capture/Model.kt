@@ -471,22 +471,18 @@ class Model(private val archive: Archive) : ViewModel() {
 
     /**
      * Start a page and open it for writing. The page's name comes from its
-     * title where that is free; the toast says when it was not.
+     * title where that is free; the toast says why when it was not.
      */
     fun newPage(title: String, under: String?) = load {
         val made = archive.newPage(title, under)
-        if (made.name == null) {
-            trouble = "That name was taken, so this page is called ${made.slug}."
-        }
+        made.notice?.let { trouble = it }
         withContext(Dispatchers.Main) { go(Screen.Editor(made.name ?: made.slug)) }
     }
 
     /** Start the page that is a person or project, and open it for writing. */
     fun newPageFor(mention: String, title: String) = load {
         val made = archive.newPageFor(mention, title)
-        if (made.name == null) {
-            trouble = "That name was taken, so this page is called ${made.slug}."
-        }
+        made.notice?.let { trouble = it }
         withContext(Dispatchers.Main) { go(Screen.Editor(made.name ?: made.slug)) }
     }
 

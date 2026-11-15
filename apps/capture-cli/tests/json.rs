@@ -268,6 +268,54 @@ fn a_notes_page_in_json_says_what_it_was_recognised_as() {
     assert!(s.json(&["show", &plain])["promotion"].is_null());
 }
 
+/// A note's page names the version it shows, so a script can say which one
+/// an edit replaces (pages-that-hold-up D4).
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_notes_page_names_its_version_and_an_edit_moves_it() {
+    let s = Store::new("show-version");
+    let n = s.capture("an ordinary thought");
+    let before = s.json(&["show", &n])["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(before.len(), 64, "the whole id, not a prefix: {before}");
+    s.ok(&["edit", &n, "an ordinary thought, revised"]);
+    let after = s.json(&["show", &n])["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(before, after);
+}
+
+/// A page's history lists every version, and who wrote each
+/// (pages-that-hold-up G11).
+#[test]
+#[ignore = "spawns the binary repeatedly; run with --ignored"]
+fn a_pages_history_lists_every_version_and_its_origin() {
+    let s = Store::new("page-log");
+    s.ok(&["page", "new", "Trip"]);
+    s.ok(&["edit", "trip", "Trip\n- passport"]);
+    s.ok(&["edit", "trip", "Trip\n- passport\n- charger"]);
+    let log = s.json(&["log", "trip"]);
+    let events = log.as_array().expect("an array");
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds.first(), Some(&"capture"), "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "edit").count(),
+        2,
+        "{kinds:?}"
+    );
+    assert!(kinds.contains(&"promote"), "made a page: {kinds:?}");
+    assert!(kinds.contains(&"alias"), "named: {kinds:?}");
+    let origin = events[0]["origin"].as_str().unwrap();
+    assert!(!origin.is_empty());
+    assert!(
+        events.iter().all(|e| e["origin"] == origin),
+        "one device wrote all of it"
+    );
+}
+
 /// A mute that has ended is not reported as a mute.
 ///
 /// `"muted"` was `muted_until.is_some()`, so it stayed true for ever — the

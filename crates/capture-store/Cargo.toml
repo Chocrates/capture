@@ -31,6 +31,11 @@ getrandom = { workspace = true }
 jiff = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# A page's name from its title, by the same steps the slug takes (NFC, then
+# words), so a mark that belongs to a letter — a Devanagari virama, a
+# decomposed accent — stays in its word instead of splitting it.
+unicode-normalization = { workspace = true }
+unicode-segmentation = { workspace = true }
 # To answer "which network is this" and "where can a peer reach me" with
 # something true. A sync round advertises both.
 if-addrs = { workspace = true }

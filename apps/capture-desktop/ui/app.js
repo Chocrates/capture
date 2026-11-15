@@ -1797,7 +1797,7 @@ function entityActions(sigil, value, into) {
     const title = prompt(`Title of ${sigil}${value}'s page:`, value);
     if (!title || !title.trim()) return;
     const made = await call("new_page_for", { sigil, value, title: title.trim() });
-    if (!made.name) toast(`That name was taken, so this page is called ${made.slug}.`);
+    if (made.notice) toast(made.notice);
     await openPageForWriting(made.name || made.slug);
   });
 
@@ -2038,7 +2038,7 @@ async function showWiki(at) {
     const title = prompt("Title of the new page:");
     if (!title || !title.trim()) return;
     const made = await call("new_page", { title: title.trim(), under: null });
-    if (!made.name) toast(`That name was taken, so this page is called ${made.slug}.`);
+    if (made.notice) toast(made.notice);
     await openPageForWriting(made.name || made.slug);
   });
   side.append(start);

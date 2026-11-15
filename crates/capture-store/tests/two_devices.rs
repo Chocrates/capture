@@ -1400,3 +1400,201 @@ fn round_from(d: &Device) -> capture_store::round::Reach {
     capture_store::round::tick(&d.paths, &d.identity(), &mut beacon, 1, 0, &now, &|| false)
         .expect("the round ran")
 }
+
+// ---------------------------------------------------------------- pages ----
+//
+// pages-that-hold-up §3: a page written on two devices. Generic notes were
+// covered; nothing had exercised a page — pinned, ticked, renamed — with a
+// second writer.
+
+fn page_items(d: &Device, name: &str) -> Vec<(String, bool)> {
+    let _ = d.session();
+    let store = d.read();
+    let tgt = store.resolve(name).unwrap().unwrap();
+    store
+        .items_of(&tgt)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.text, e.done))
+        .collect()
+}
+
+fn divergences(d: &Device, name: &str) -> u64 {
+    let store = d.read();
+    let tgt = store.resolve(name).unwrap().unwrap();
+    store.divergence_count(&tgt).unwrap()
+}
+
+fn edits_held(d: &Device) -> usize {
+    capture_store::log::Log::open_read(&d.paths.events)
+        .unwrap()
+        .all()
+        .unwrap()
+        .iter()
+        .filter(|e| e.header.kind == capture_core::Kind::EDIT)
+        .count()
+}
+
+fn kind_of(d: &Device, name: &str) -> Option<String> {
+    let _ = d.session();
+    let store = d.read();
+    let tgt = store.resolve(name).unwrap().unwrap();
+    store.promotion_of(&tgt).unwrap().map(|p| p.kind)
+}
+
+#[test]
+fn a_page_edited_on_both_keeps_both_and_shows_the_same_one() {
+    // G1 and G2.
+    let a = Device::new("a-page-edit");
+    let b = Device::new("b-page-edit");
+    pair(&a, &b);
+    let page = capture_store::pages::create(&a.paths, "Plan", None).unwrap();
+    let name = page.name.unwrap();
+    sync(&a, &b);
+
+    capture_store::mutate::edit(&a.paths, &name, "Plan\nplan A").unwrap();
+    capture_store::mutate::edit(&b.paths, &name, "Plan\nplan B").unwrap();
+    sync(&a, &b);
+
+    assert_eq!(a.text_of(&name), b.text_of(&name), "shown differently");
+    assert_eq!(divergences(&a, &name), 1);
+    assert_eq!(divergences(&b, &name), 1);
+    assert_eq!(edits_held(&a), 2, "both versions kept");
+    assert_eq!(edits_held(&b), 2);
+    assert_eq!(kind_of(&b, &name).as_deref(), Some("page"), "still a page");
+
+    capture_store::mutate::resolve(&a.paths, &name).unwrap();
+    sync(&a, &b);
+    assert_eq!(divergences(&b, &name), 0, "the resolve crossed");
+    assert_eq!(edits_held(&b), 2, "resolving kept both");
+}
+
+#[test]
+fn any_interleaving_of_page_edits_and_syncs_converges() {
+    use proptest::prelude::*;
+    // G1 as a property: whatever order the two devices edit and meet in, they
+    // end showing one text, report the same divergence, and hold every edit.
+    proptest!(ProptestConfig::with_cases(10), |(steps in prop::collection::vec(0u8..3, 1..8))| {
+        let a = Device::new("a-page-prop");
+        let b = Device::new("b-page-prop");
+        pair(&a, &b);
+        let name = capture_store::pages::create(&a.paths, "Notes", None).unwrap().name.unwrap();
+        sync(&a, &b);
+        let mut edits = 0;
+        for (i, step) in steps.iter().enumerate() {
+            match step {
+                0 => { capture_store::mutate::edit(&a.paths, &name, &format!("Notes\na{i}")).unwrap(); edits += 1; }
+                1 => { capture_store::mutate::edit(&b.paths, &name, &format!("Notes\nb{i}")).unwrap(); edits += 1; }
+                _ => sync(&a, &b),
+            }
+        }
+        sync(&a, &b);
+        prop_assert_eq!(a.text_of(&name), b.text_of(&name));
+        prop_assert_eq!(divergences(&a, &name), divergences(&b, &name));
+        prop_assert_eq!(edits_held(&a), edits);
+        prop_assert_eq!(edits_held(&b), edits);
+    });
+}
+
+#[test]
+fn a_tick_racing_an_edit_never_lands_on_another_line() {
+    // G3, every kind of edit, with the tick before and after it. The line
+    // that was "eggs" may be ticked under any of its later wordings, or not at
+    // all; no other line may be.
+    let edits: [(&str, &[&str]); 6] = [
+        (
+            "Shop\n- free-range eggs\n- milk\n- bread",
+            &["free-range eggs"],
+        ),
+        ("Shop\n- oatcakes\n- milk\n- bread", &["oatcakes"]),
+        ("Shop\n- butter\n- eggs\n- milk\n- bread", &["eggs"]),
+        ("Shop\n- milk\n- bread", &[]),
+        ("Shop\n- milk\n- bread\n- butter", &[]),
+        ("Shop\n- milk\n- eggs\n- bread", &["eggs"]),
+    ];
+    for (n, (after, may)) in edits.iter().enumerate() {
+        for tick_first in [true, false] {
+            let a = Device::new(&format!("a-tick-{n}-{tick_first}"));
+            let b = Device::new(&format!("b-tick-{n}-{tick_first}"));
+            pair(&a, &b);
+            let name = capture_store::pages::create(&a.paths, "Shop", None)
+                .unwrap()
+                .name
+                .unwrap();
+            capture_store::mutate::edit(&a.paths, &name, "Shop\n- eggs\n- milk\n- bread").unwrap();
+            sync(&a, &b);
+            let tick = || capture_store::promote::tick_at(&a.paths, &name, 0, true).unwrap();
+            if tick_first {
+                tick();
+                capture_store::mutate::edit(&b.paths, &name, after).unwrap();
+            } else {
+                capture_store::mutate::edit(&b.paths, &name, after).unwrap();
+                tick();
+            }
+            sync(&a, &b);
+            for d in [&a, &b] {
+                for (text, done) in page_items(d, &name) {
+                    assert!(
+                        !done || may.contains(&text.as_str()),
+                        "edit {n} (tick first: {tick_first}): {text:?} came back ticked; \
+                         only the eggs line may be. {:?}",
+                        page_items(d, &name)
+                    );
+                }
+            }
+            assert_eq!(
+                page_items(&a, &name),
+                page_items(&b, &name),
+                "the two disagree"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_page_crosses_and_the_other_devices_sweep_leaves_it_a_page() {
+    // G4: the text names a weekly time, which a sweep would read as a series.
+    let a = Device::new("a-page-cross");
+    let b = Device::new("b-page-cross");
+    pair(&a, &b);
+    let name = capture_store::pages::create(&a.paths, "Gym routine", None)
+        .unwrap()
+        .name
+        .unwrap();
+    capture_store::mutate::edit(&a.paths, &name, "Gym routine\nevery monday at 2pm").unwrap();
+    sync(&a, &b);
+    let mut s = b.session();
+    capture_store::promote::sweep(&mut s).unwrap();
+    drop(s);
+    assert_eq!(kind_of(&b, &name).as_deref(), Some("page"));
+    assert!(b.read().occurrences_of(&b.id_of(&name)).unwrap().is_empty());
+}
+
+#[test]
+fn making_a_page_while_the_other_edits_it_keeps_both() {
+    // G5: the phone makes a capture a page while the desktop rewords it.
+    let a = Device::new("a-page-race");
+    let b = Device::new("b-page-race");
+    pair(&a, &b);
+    let slug = a.capture("dentist thursday 2pm");
+    sync(&a, &b);
+    capture_store::pages::make(&a.paths, &slug).unwrap();
+    capture_store::mutate::edit(&b.paths, &slug, "dentist friday 2pm, bring the form").unwrap();
+    sync(&a, &b);
+    for d in [&a, &b] {
+        let mut s = d.session();
+        capture_store::promote::sweep(&mut s).unwrap();
+        drop(s);
+        assert_eq!(
+            kind_of(d, &slug).as_deref(),
+            Some("page"),
+            "the page did not hold"
+        );
+        assert_eq!(
+            d.text_of(&slug).as_deref(),
+            Some("dentist friday 2pm, bring the form"),
+            "the edit was lost"
+        );
+        assert!(d.read().occurrences_of(&d.id_of(&slug)).unwrap().is_empty());
+    }
+}

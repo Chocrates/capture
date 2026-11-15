@@ -142,9 +142,12 @@ pub struct Note {
     /// A chosen name, sharing one namespace with slugs.
     #[n(14)]
     pub alias: Option<String>,
-    /// Whether the capture looked like it contained a credential.
+    /// Whether any version of the text looked like it contained a credential.
     ///
-    /// Decided once, from the capture text, by a predicate tuned to over-flag:
+    /// Decided from the capture and from every edit after the last `unflag`
+    /// (pages-that-hold-up D3: a page is written almost entirely by edits, and
+    /// a secret pasted in and taken out again is still in the history every
+    /// export carries). The predicate is tuned to over-flag:
     /// a false positive costs a less readable name and a note left out of
     /// backups until someone says otherwise, while a false negative writes
     /// credential-shaped words into every note that links here, with no cleanup
@@ -1055,6 +1058,9 @@ fn apply_edit(
         kind: Kind::EDIT,
         excluded: false,
     });
+    if crate::slug::looks_like_credential(&text) {
+        note.credential = true;
+    }
     version_links.insert(e.header.id(), resolve_links(&text, names, e.header.hlc));
     texts.insert(e.header.id(), text);
 }
@@ -1221,9 +1227,11 @@ fn apply_setting(proj: &mut Projection, e: &Envelope) {
 
 /// Clear a note's credential flag.
 ///
-/// One direction only. Setting the flag is the predicate's job at capture and
-/// nothing can turn it back on, because a note somebody has already declared
-/// safe should not become unbackupable again on the next rebuild.
+/// Declares the text written so far safe. Events are applied in timestamp
+/// order, so this clears what any earlier version set, and a version written
+/// after it is checked afresh: the declaration was about that text, not about
+/// whatever is pasted in next. A rebuild cannot turn the flag back on for
+/// text already declared safe, because the order is the same every time.
 fn apply_unflag(proj: &mut Projection, e: &Envelope) {
     let Some(tgt) = e.header.tgt else {
         proj.held.insert(e.header.id(), Held::NoTarget);

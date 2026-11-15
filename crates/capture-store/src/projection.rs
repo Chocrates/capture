@@ -115,7 +115,11 @@ use crate::{Result, db};
 /// Version 16 adds `unclear_days`, derived from text on apply like mentions,
 /// and grammar 9 decides it — so a store built by an older grammar is rebuilt
 /// rather than asked the wrong questions.
-pub const PROJECTION_SCHEMA: u32 = 16;
+///
+/// Version 17 indexes a note's first line apart from the rest (`note_words`),
+/// so a page titled with the words outranks one that mentions them. The old
+/// index had one column and cannot be weighted, so it is rebuilt.
+pub const PROJECTION_SCHEMA: u32 = 17;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
@@ -351,8 +355,12 @@ CREATE TABLE IF NOT EXISTS fts_map (
   tgt   BLOB NOT NULL UNIQUE
 ) STRICT;
 
-CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(
-  text, content='', contentless_delete=1
+-- The first line apart from the rest, so the first can be weighted: a page's
+-- title is its first line, and a search for its words should find it before
+-- the notes that merely mention them. A new table, not a column on the old
+-- one: the schema may add tables, never columns (see `parents`).
+CREATE VIRTUAL TABLE IF NOT EXISTS note_words USING fts5(
+  title, body, content='', contentless_delete=1
 );
 
 -- Membership. Derived like everything else here, but read during ingest rather
@@ -699,7 +707,8 @@ const NOTE_COLUMNS: &str = "n.tgt, n.slug, n.alias,
      n.updated_wall, n.updated_counter, n.tz, n.pinned, n.muted_until,
      n.redacted_at, n.credential,
      EXISTS (SELECT 1 FROM redact_queue q WHERE q.tgt = n.tgt AND q.cancelled = 0),
-     (SELECT p.parent FROM parents p WHERE p.tgt = n.tgt)";
+     (SELECT p.parent FROM parents p JOIN notes up ON up.tgt = p.parent
+       WHERE p.tgt = n.tgt AND up.redacted_at IS NULL)";
 
 /// What may never produce an alert.
 ///
@@ -1166,7 +1175,7 @@ impl Store {
             "DELETE FROM settings;
              DELETE FROM notes; DELETE FROM note_versions; DELETE FROM divergences;
              DELETE FROM ambient; DELETE FROM tags; DELETE FROM tag_adds; DELETE FROM links; DELETE FROM mentions; DELETE FROM parents; DELETE FROM promotion_at; DELETE FROM held;
-             DELETE FROM note_fts; DELETE FROM fts_map; DELETE FROM promotions;
+             DELETE FROM note_words; DELETE FROM fts_map; DELETE FROM promotions;
              DELETE FROM occurrences; DELETE FROM review; DELETE FROM intents;
              DELETE FROM entities; DELETE FROM entity_names;",
         )?;
@@ -1200,7 +1209,7 @@ impl Store {
             tx.execute("DELETE FROM occurrences WHERE tgt = ?1", params![t])?;
             tx.execute("DELETE FROM review WHERE tgt = ?1", params![t])?;
             if let Some(row) = fts_row(&tx, tgt)? {
-                tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
+                tx.execute("DELETE FROM note_words WHERE rowid = ?1", params![row])?;
             }
         }
         write_into(&tx, p, now)?;
@@ -1966,14 +1975,24 @@ impl Store {
     ///
     /// A lapsed mute suppresses nothing, so the expiry is compared here rather
     /// than baked into the row.
+    ///
+    /// `query` is words to find, never FTS5 syntax: each word is quoted, so a
+    /// quote, a leading `-` or a `:` is something to look for rather than an
+    /// operator — typed by a person, or passed through by a script, it would
+    /// otherwise surface as a raw SQLite error (pages-that-hold-up D2). All the
+    /// words must match; the last also matches as a prefix, so a search typed
+    /// as you go finds "maintenance" from "mainten".
     pub fn search(&self, query: &str, now: u64) -> Result<Vec<EventId>> {
+        let Some(query) = fts_words(query) else {
+            return Ok(Vec::new());
+        };
         let mut st = self.conn.prepare(
-            "SELECT m.tgt FROM note_fts f
+            "SELECT m.tgt FROM note_words f
              JOIN fts_map m ON m.rowid = f.rowid
              JOIN notes n ON n.tgt = m.tgt
-             WHERE note_fts MATCH ?1
+             WHERE note_words MATCH ?1
                AND NOT muted(n.muted_until, ?2)
-             ORDER BY rank",
+             ORDER BY bm25(note_words, 10.0, 1.0)",
         )?;
         let rows = st.query_map(params![query, now as i64], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = Vec::new();
@@ -2810,7 +2829,9 @@ impl Store {
         let mut st = self.conn.prepare(
             "SELECT n.alias, n.slug, up.slug FROM notes n
              LEFT JOIN parents pa ON pa.tgt = n.tgt
-             LEFT JOIN notes up ON up.tgt = pa.parent
+             -- A destroyed parent is no parent: filing a page under a
+             -- tombstone draws a branch named by an id (G10).
+             LEFT JOIN notes up ON up.tgt = pa.parent AND up.redacted_at IS NULL
              WHERE n.alias IS NOT NULL AND n.redacted_at IS NULL
              ORDER BY n.alias",
         )?;
@@ -3003,7 +3024,7 @@ impl Store {
         // content, so leaving it for last would keep the text findable through
         // every other step.
         if let Some(row) = fts_row(&tx, tgt)? {
-            tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![row])?;
+            tx.execute("DELETE FROM note_words WHERE rowid = ?1", params![row])?;
             tx.execute("DELETE FROM fts_map WHERE tgt = ?1", params![t])?;
         }
 
@@ -3012,8 +3033,19 @@ impl Store {
         // whose content has not arrived yet — and a reader shown "no readable
         // text" where "content destroyed" was true has been told the wrong
         // story about their own archive.
+        //
+        // The alias goes too. A page's alias is made from its title's words
+        // (`pages::name_for`), so a destroyed page went on answering to them:
+        // every `[[trip]]` still resolved to the tombstone, and nothing else
+        // could take the name. A rebuild already dropped it — the alias event's
+        // body is destroyed below like every other body of the note's, and the
+        // fold skips an alias with no body — so the purge and a rebuild
+        // disagreed, the failure this function's comments keep recording.
+        // Found 2026-11-13 (pages-that-hold-up G10).
         tx.execute(
-            "UPDATE notes SET text = NULL, slug = ?2, redacted_at = ?3 WHERE tgt = ?1",
+            "UPDATE notes SET text = NULL, slug = ?2, redacted_at = ?3,
+                    alias = NULL, alias_wall = NULL, alias_counter = NULL
+             WHERE tgt = ?1",
             params![t, capture_core::slug::derive_redacted(tgt).text, at as i64],
         )?;
         tx.execute("DELETE FROM links WHERE src = ?1", params![t])?;
@@ -3290,6 +3322,23 @@ impl Store {
              WHERE l.src = ?1 ORDER BY l.ord",
         )?;
         let rows = st.query_map(params![tgt.0.to_vec()], link_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The notes filed directly under this one, by slug, that still have
+    /// content. What a redaction's confirmation names as about to lose its
+    /// parent (pages-that-hold-up G10).
+    pub fn children_of(&self, tgt: &EventId) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT n.slug FROM parents p JOIN notes n ON n.tgt = p.tgt
+             WHERE p.parent = ?1 AND n.redacted_at IS NULL
+             ORDER BY n.slug",
+        )?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -3915,8 +3964,9 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
 /// 1. **Exact** — same position and same words. Nothing was touched.
 /// 2. **The words, somewhere else** — they appear exactly once. Something was
 ///    inserted or removed above this item.
-/// 3. **The position** — the words are gone but the slot is there. The item was
-///    reworded.
+/// 3. **The position** — the words are gone but the slot is there, and what is
+///    in it now still reads like the item: a word in common, or a typo apart
+///    (`similar`). The item was reworded.
 /// 4. Otherwise the tick applies to nothing, and is left for a later fold where
 ///    the item may be back. An edit does not destroy a record of something that
 ///    happened.
@@ -3924,14 +3974,20 @@ fn muted_for(p: &Projection, n: &capture_core::fold::Note) -> Option<u64> {
 /// Ticks are applied in event order, so a later one beats an earlier one on the
 /// same item.
 ///
-/// # What this gets wrong
+/// # What this gets wrong, and which way
 ///
-/// Rewording an item *and* inserting another above it in one edit. Rule 1
-/// misses, rule 2 misses because the words changed, and rule 3 fires on a
-/// position now holding a different item — so the tick lands on the wrong row.
-/// Rarer than either edit alone, and the alternative is to refuse every
-/// ambiguous case, which would discard ticks for the common edits in order to
-/// avoid being wrong in an uncommon one.
+/// Rule 3 used to need only the slot and the count, and that put ticks on rows
+/// nobody ticked: remove "eggs" and add "butter" in one edit and the count is
+/// unchanged, so "milk", which slid into the first slot, came back bought. On
+/// two devices that is one person ticking while the other edits — ordinary.
+/// Found 2026-11-13 (pages-that-hold-up G3), after this comment had recorded
+/// the reword-and-insert case as an accepted cost.
+///
+/// So rule 3 now asks that the row still read like the item. What that loses
+/// is a reword to wholly different words ("milk" to "oat drink"): the tick
+/// then matches nothing and stays in the log, and ticking again is one tap. A
+/// tick on the wrong row is the worse failure, because nothing says it is
+/// wrong.
 fn reconcile_ticks(
     written: Vec<bool>,
     items: &[String],
@@ -3968,7 +4024,13 @@ fn reconcile_ticks(
         // matches nothing and applies to nothing — the event stays in the log,
         // and restoring the item restores it.
         let at = at.or_else(|| match (tick.ord.map(|o| o as usize), tick.of) {
-            (Some(o), Some(of)) if of as usize == items.len() && o < items.len() => Some(o),
+            (Some(o), Some(of))
+                if of as usize == items.len()
+                    && o < items.len()
+                    && similar(&items[o], &tick.text) =>
+            {
+                Some(o)
+            }
             _ => None,
         });
 
@@ -3978,6 +4040,40 @@ fn reconcile_ticks(
     }
 
     done
+}
+
+/// Whether a row still reads like the item a tick was written against: a word
+/// in common, or a typo apart (one letter in a short word, two in a longer).
+/// Lowercased, split on anything not a letter or digit. A pure function of
+/// the two strings, so every replica decides alike.
+fn similar(now: &str, then: &str) -> bool {
+    fn words(s: &str) -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    }
+    fn close(a: &str, b: &str) -> bool {
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let allowed = if a.len().min(b.len()) <= 4 { 1 } else { 2 };
+        if a.len().abs_diff(b.len()) > allowed {
+            return false;
+        }
+        // Levenshtein, one row at a time.
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.iter().enumerate() {
+            let mut row = vec![i + 1];
+            for (j, cb) in b.iter().enumerate() {
+                let sub = prev[j] + usize::from(ca != cb);
+                row.push(sub.min(prev[j + 1] + 1).min(row[j] + 1));
+            }
+            prev = row;
+        }
+        prev[b.len()] <= allowed
+    }
+    let (n, t) = (words(now), words(then));
+    n.iter().any(|a| t.iter().any(|b| a == b || close(a, b)))
 }
 
 /// Which kind of entity a sigil names.
@@ -4366,9 +4462,10 @@ fn write_into(tx: &rusqlite::Transaction<'_>, p: &Projection, now: i64) -> Resul
                 params![t],
                 |r| r.get(0),
             )?;
+            let (title, body) = text.split_once('\n').unwrap_or((text, ""));
             tx.execute(
-                "INSERT INTO note_fts (rowid, text) VALUES (?1, ?2)",
-                params![row, text],
+                "INSERT INTO note_words (rowid, title, body) VALUES (?1, ?2, ?3)",
+                params![row, title, body],
             )?;
         }
     }
@@ -4638,6 +4735,22 @@ pub fn dev_hex(d: &Dev) -> String {
     d.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Typed words as an FTS5 query that cannot be a syntax error: each word a
+/// quoted string (an inner `"` doubled), joined by FTS5's implicit AND, the last
+/// one a prefix. A word with no letter or digit in it is dropped — the
+/// tokenizer would make it an empty phrase. `None` when nothing is left.
+pub(crate) fn fts_words(query: &str) -> Option<String> {
+    let words: Vec<&str> = query
+        .split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .collect();
+    let (last, rest) = words.split_last()?;
+    let quote = |w: &str| format!("\"{}\"", w.replace('"', "\"\""));
+    let mut out: Vec<String> = rest.iter().map(|w| quote(w)).collect();
+    out.push(format!("{}*", quote(last)));
+    Some(out.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4718,6 +4831,109 @@ mod tests {
             store.is_stale().unwrap(),
             "an old shape must be rebuilt, never transformed in place"
         );
+        clean(&b);
+    }
+
+    #[test]
+    fn search_reads_punctuation_as_words_not_syntax() {
+        // Each of these was an FTS5 syntax error passed straight to the person
+        // (pages-that-hold-up G13).
+        let b = base("search-punct");
+        let mut d = testing::Origin::new(0);
+        let a = d.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "the half-open connection drops"),
+            1_700_000_000_000,
+        );
+        let c = d.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "re: deploy failing on staging"),
+            1_700_000_000_001,
+        );
+        let g = rebuild(&b, &[a.clone(), c.clone()], &[], 0, 1_800_000_000_000).unwrap();
+        let store = Store::open_read(&generation_path(&b, g)).unwrap();
+        let now = 1_800_000_000_000;
+        assert_eq!(
+            store.search("\"half-open", now).unwrap(),
+            alloc_vec(&[a.header.id()])
+        );
+        assert_eq!(
+            store.search("re: deploy", now).unwrap(),
+            alloc_vec(&[c.header.id()])
+        );
+        assert_eq!(
+            store.search("stag", now).unwrap(),
+            alloc_vec(&[c.header.id()]),
+            "last word is a prefix"
+        );
+        for q in [
+            "-", "\"", "NEAR(", "a OR", "(", "*", ":", "  ", "", "col:x", "^x",
+        ] {
+            store
+                .search(q, now)
+                .unwrap_or_else(|e| panic!("{q:?}: {e}"));
+        }
+        clean(&b);
+    }
+
+    #[test]
+    fn a_title_outranks_a_mention() {
+        let b = base("search-rank");
+        let mut d = testing::Origin::new(0);
+        let mention = d.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(
+                1,
+                "Saturday errands\nbook the car in for maintenance, then car maintenance log",
+            ),
+            1_700_000_000_000,
+        );
+        let titled = d.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(2, "Car maintenance\noil every 8000 km"),
+            1_700_000_000_001,
+        );
+        let g = rebuild(
+            &b,
+            &[mention.clone(), titled.clone()],
+            &[],
+            0,
+            1_800_000_000_000,
+        )
+        .unwrap();
+        let store = Store::open_read(&generation_path(&b, g)).unwrap();
+        assert_eq!(
+            store.search("car maintenance", 1_800_000_000_000).unwrap(),
+            alloc_vec(&[titled.header.id(), mention.header.id()])
+        );
+        clean(&b);
+    }
+
+    #[test]
+    fn no_search_text_is_an_error() {
+        use proptest::prelude::*;
+        let b = base("search-any");
+        let mut d = testing::Origin::new(0);
+        let e = d.author(
+            capture_core::Kind::CAPTURE,
+            None,
+            None,
+            testing::capture_body(1, "anything \"quoted\" (with) -dashes: and* NEAR stars"),
+            1_700_000_000_000,
+        );
+        let g = rebuild(&b, std::slice::from_ref(&e), &[], 0, 1_800_000_000_000).unwrap();
+        let store = Store::open_read(&generation_path(&b, g)).unwrap();
+        proptest!(ProptestConfig::with_cases(512), |(q in "\\PC{0,24}|[\"*():^+\\-a-zA-Z ]{0,16}")| {
+            prop_assert!(store.search(&q, 1_800_000_000_000).is_ok(), "{:?}", q);
+        });
         clean(&b);
     }
 

@@ -1498,8 +1498,10 @@ pub fn show(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
         Some(p) if p.kind == "page" => store.items_of(&n.tgt)?,
         _ => Vec::new(),
     };
+    let version = store.head_of(&n.tgt)?.unwrap_or(n.tgt);
     answer(
         &Page {
+            version,
             items,
             note: n,
             promotion,
@@ -1533,6 +1535,9 @@ struct Page {
     items: Vec<projection::ListEntry>,
     links: Vec<LinkRow>,
     backlinks: Vec<Backlink>,
+    /// The version shown: what `edit --expect` names to refuse an edit if the
+    /// note has moved on since this was read.
+    version: capture_core::EventId,
     now: u64,
 }
 
@@ -1546,6 +1551,7 @@ impl View for Page {
             items,
             links,
             backlinks,
+            version,
             now,
         } = self;
         // What it was recognised as was printed and never carried here, so a
@@ -1588,6 +1594,7 @@ impl View for Page {
             ),
             ("links", arr(links.iter().map(link_json))),
             ("backlinks", arr(backlinks.iter().map(backlink_json))),
+            ("version", capture_core::id::hexed(&version.0).into()),
         ])
     }
 

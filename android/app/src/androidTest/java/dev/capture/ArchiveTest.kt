@@ -116,4 +116,40 @@ class ArchiveTest {
         val second = Archive.open(root).use { it.deviceKey() }
         assertEquals(first, second)
     }
+
+    @Test
+    fun aPageIsWrittenTickedLinkedAndHandedBackThroughTheBinding() {
+        // pages-that-hold-up G16: the phone had no page test at all, and the
+        // phone is where pages are written. Every call below is one the
+        // editor and the page screen make.
+        val archive = Archive.open(scratch("page"))
+        val made = archive.newPage("Packing", null)
+        assertEquals("packing", made.name)
+        assertNull("a free name needs no notice", made.notice)
+
+        archive.edit("packing", "Packing\n- passport\n- charger\nevery monday at 2pm")
+        val page = archive.note("packing")
+        assertEquals("page", page.kind)
+        assertEquals(listOf("passport", "charger"), page.items.map { it.text })
+
+        archive.tickAt("packing", 1u, true)
+        val ticked = archive.note("packing")
+        assertTrue("charger ticked", ticked.items[1].done)
+        assertEquals("a tick is not an edit", page.text, ticked.text)
+
+        archive.capture("bring the [[packing]] list")
+        val back = archive.backlinks("packing")
+        assertEquals(1, back.size)
+        assertEquals("packing", back[0].name)
+
+        // Taken: the second page says so, in the store's own words.
+        val again = archive.newPage("Packing", null)
+        assertNull(again.name)
+        assertNotNull("the surface is told why", again.notice)
+
+        // Handed back, it is read as a capture and becomes the weekly series
+        // its text describes.
+        archive.reread("packing")
+        assertEquals("series", archive.note("packing").kind)
+    }
 }

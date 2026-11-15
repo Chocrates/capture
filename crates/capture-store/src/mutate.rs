@@ -41,6 +41,27 @@ pub(crate) fn find(s: &Session, name: &str) -> Result<EventId> {
 
 /// Replace a note's text with a new version.
 pub fn edit(paths: &StorePaths, name: &str, text: &str) -> Result<()> {
+    edit_expecting(paths, name, text, None)
+}
+
+/// Replace a note's text, but only if it is still at `expect`.
+///
+/// `prev` is whatever head this process sees, so two writers on one device —
+/// the person in an editor and a script — would otherwise each follow the head
+/// they read and the later save would bury the earlier with nothing to show
+/// for it. Across devices the same race is a divergence and is kept; on one
+/// device it was simply lost (pages-that-hold-up D4).
+///
+/// With `Some(v)`, refused with [`Error::Conflict`] unless `v` is the version
+/// the note shows now. The check and the append are one session holding the
+/// writer lock, so nothing can land between them. `None` is the old behaviour,
+/// for a caller that is itself the only writer — an open editor.
+pub fn edit_expecting(
+    paths: &StorePaths,
+    name: &str,
+    text: &str,
+    expect: Option<EventId>,
+) -> Result<()> {
     if text.trim().is_empty() {
         return Err(Error::Usage(
             "an edit with no text would leave the note unreadable; redact it if that is what \
@@ -63,6 +84,16 @@ pub fn edit(paths: &StorePaths, name: &str, text: &str) -> Result<()> {
     // Falls back to the root where the projection has no head yet, which is
     // the pre-fold case and where the old behaviour was correct anyway.
     let prev = s.state.head_of(&tgt)?.unwrap_or(tgt);
+    if let Some(want) = expect
+        && want != prev
+    {
+        return Err(Error::Conflict(format!(
+            "{name} has changed since version {} was read (it is at {} now); nothing was \
+             written. Read it again and edit that.",
+            capture_core::id::hexed(&want.0[..8]),
+            capture_core::id::hexed(&prev.0[..8]),
+        )));
+    }
 
     s.append(Kind::EDIT, Some(tgt), Some(prev), |nonce| {
         encode(&EditBody {

@@ -23,6 +23,10 @@ pub enum ExitCode {
     /// Stored data failed verification. Distinct from every other failure
     /// because it means the archive is damaged rather than the request.
     Integrity = 3,
+    /// The note moved on since the caller read it. Nothing was written; read
+    /// it again and decide. Separate so a script can tell "retry with what is
+    /// there now" from "you asked wrongly".
+    Conflict = 4,
 }
 
 /// Anything that can go wrong below the interface layer.
@@ -64,6 +68,11 @@ pub enum Error {
     #[error("{0}")]
     Unreachable(String),
 
+    /// An edit named the version it was written against, and the note is at
+    /// another one now. Nothing was written (pages-that-hold-up D4).
+    #[error("{0}")]
+    Conflict(String),
+
     /// The projection was built by an older build and is the wrong shape to
     /// read. Not damage: it is derived, and anything that opens the archive
     /// for writing rebuilds it.
@@ -91,6 +100,7 @@ impl Error {
             Error::Unreachable(_) => ExitCode::Usage,
             // The environment again, and fixed by running something.
             Error::Stale { .. } => ExitCode::Usage,
+            Error::Conflict(_) => ExitCode::Conflict,
         }
     }
 }

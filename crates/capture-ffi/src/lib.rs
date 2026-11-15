@@ -327,6 +327,8 @@ pub struct PageMade {
     pub slug: String,
     /// The name its title gave it, where that was free.
     pub name: Option<String>,
+    /// Why the title gave no name, worded for the person; `None` when it did.
+    pub notice: Option<String>,
 }
 
 /// Whether a capture reached the log or the spool.
@@ -1858,6 +1860,7 @@ impl Archive {
         let _w = self.write_lock()?;
         let made = capture_store::pages::create(&self.paths, &title, under.as_deref())?;
         Ok(PageMade {
+            notice: made.notice(),
             slug: made.slug,
             name: made.name,
         })
@@ -1871,6 +1874,7 @@ impl Archive {
         let (kind, value) = split_mention(&mention)?;
         let made = capture_store::pages::create_for(&self.paths, kind, &value, &title)?;
         Ok(PageMade {
+            notice: made.notice(),
             slug: made.slug,
             name: made.name,
         })
