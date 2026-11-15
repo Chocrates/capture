@@ -1766,7 +1766,11 @@ impl View for Page {
 
         if !links.is_empty() || !backlinks.is_empty() {
             say!();
-            print_links(links, backlinks);
+            print_links(
+                links,
+                backlinks,
+                &[n.slug.as_str(), n.alias.as_deref().unwrap_or("")],
+            );
         }
     }
 }
@@ -1782,6 +1786,7 @@ pub fn links(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
             links: store.links_from(&n.tgt)?,
             backlinks: store.links_to(&n.tgt)?,
             slug: n.slug,
+            alias: n.alias,
         },
         json,
     );
@@ -1790,6 +1795,7 @@ pub fn links(paths: &StorePaths, name: &str, json: bool) -> Result<()> {
 
 struct Links {
     slug: String,
+    alias: Option<String>,
     links: Vec<LinkRow>,
     backlinks: Vec<Backlink>,
 }
@@ -1798,6 +1804,7 @@ impl View for Links {
     fn json(&self) -> Json {
         let Links {
             slug,
+            alias: _,
             links,
             backlinks,
         } = self;
@@ -1811,6 +1818,7 @@ impl View for Links {
     fn prose(&self) {
         let Links {
             slug,
+            alias,
             links,
             backlinks,
         } = self;
@@ -1818,11 +1826,17 @@ impl View for Links {
             say!("{slug} has no links in either direction.");
             return;
         }
-        print_links(links, backlinks);
+        print_links(
+            links,
+            backlinks,
+            &[slug.as_str(), alias.as_deref().unwrap_or("")],
+        );
     }
 }
 
-fn print_links(out: &[LinkRow], back: &[Backlink]) {
+/// `own` is the note's own names: a backlink that used one of them, or its
+/// title form, needs no "as".
+fn print_links(out: &[LinkRow], back: &[Backlink], own: &[&str]) {
     let width = out
         .iter()
         .map(|l| l.name.chars().count())
@@ -1856,7 +1870,12 @@ fn print_links(out: &[LinkRow], back: &[Backlink]) {
         say!("linked from");
         for b in back {
             // "as" only when the words written differ from the name shown.
-            if b.name == b.shown() {
+            let plain = own.iter().any(|o| {
+                !o.is_empty()
+                    && (b.name == *o
+                        || capture_store::pages::name_for(&b.name).as_deref() == Some(*o))
+            });
+            if plain {
                 say!("  {}", b.shown());
             } else {
                 say!("  {:<width$}  as {}", b.shown(), b.name);
