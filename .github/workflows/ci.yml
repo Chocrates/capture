@@ -27,7 +27,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -48,7 +48,7 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -59,7 +59,7 @@ jobs:
   macos-build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p capture-cli -p capture-overlay -p capture-syncd -p capture-desktop
@@ -73,8 +73,36 @@ jobs:
              dist/capture-macos-arm64/
           cp docs/macos-test.md docs/doctor-codes.md dist/capture-macos-arm64/
           tar -C dist -czf capture-macos-arm64.tar.gz capture-macos-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: capture-macos-arm64
           path: capture-macos-arm64.tar.gz
+          retention-days: 30
+
+  linux-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries the desktop app and overlay link against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev \
+            librsvg2-dev pkg-config mold
+      - run: cargo build --release -p capture-cli -p capture-overlay -p capture-syncd -p capture-desktop
+      - name: Package
+        # Built on Ubuntu 24.04, so it needs glibc 2.39 or newer and the
+        # webkit2gtk-4.1 runtime on the machine it runs on.
+        run: |
+          mkdir -p dist/capture-linux-x86_64
+          cp target/release/capture target/release/capture-overlay \
+             target/release/capture-syncd target/release/capture-desktop \
+             dist/capture-linux-x86_64/
+          tar -C dist -czf capture-linux-x86_64.tar.gz capture-linux-x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: capture-linux-x86_64
+          path: capture-linux-x86_64.tar.gz
           retention-days: 30
