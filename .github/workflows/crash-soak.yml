@@ -1,0 +1,58 @@
+name: crash-soak
+
+# Runs one crash-harness test many times on a chosen runner, to catch a failure
+# that shows up once in many runs. Started by hand:
+#   gh workflow run crash-soak.yml -f os=macos-latest -f runs=200   (once on main)
+#
+# Every run's failure output is kept, and the job fails if any run failed.
+
+on:
+  # Also on a push to `soak`, because a hand-started workflow has to be on the
+  # default branch first: `git push -f origin HEAD:soak` soaks this commit.
+  push:
+    branches: [soak]
+  workflow_dispatch:
+    inputs:
+      os:
+        description: runner
+        default: macos-latest
+      runs:
+        description: how many times
+        default: "200"
+      test:
+        description: test name filter
+        default: a_killed_drain_neither_loses_nor_duplicates_a_capture
+
+jobs:
+  soak:
+    runs-on: ${{ inputs.os || 'macos-latest' }}
+    timeout-minutes: 120
+    env:
+      CAPTURE_SILENT: "1"
+      TZ: America/Chicago
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p capture-store --test crash --no-run
+      - name: Soak
+        run: |
+          fails=0
+          for i in $(seq 1 "${{ inputs.runs || '200' }}"); do
+            if ! cargo test -q -p capture-store --test crash "${{ inputs.test || 'a_killed_drain_neither_loses_nor_duplicates_a_capture' }}" > out.txt 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::run $i failed"
+              grep -A12 "panicked at" out.txt || cat out.txt
+              echo "::endgroup::"
+              cp out.txt "fail-$i.txt"
+            fi
+          done
+          echo "$fails of ${{ inputs.runs || '200' }} runs failed"
+          echo "$fails of ${{ inputs.runs || '200' }} runs failed" >> "$GITHUB_STEP_SUMMARY"
+          [ "$fails" = 0 ]
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-soak-failures
+          path: fail-*.txt
+          if-no-files-found: ignore

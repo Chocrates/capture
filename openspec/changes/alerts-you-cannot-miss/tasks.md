@@ -26,4 +26,5 @@
 ## 4. Later (asked to wait, 2026-10-15)
 
 - [ ] 4.1 Ring through Do Not Disturb: ask once for notification-policy access, let the `alarms` channel bypass DND. Dev app first.
+  - 2026-11-15, the person: in most cases DND should *not* be rung through. If built, it is opt-in per alert (a setting on a specific alert), never the channel default.
 - [ ] 4.2 Full-screen alarm on the lock screen.

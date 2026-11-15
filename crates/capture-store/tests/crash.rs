@@ -346,15 +346,40 @@ fn a_killed_drain_neither_loses_nor_duplicates_a_capture() {
                     .unwrap()
                     .iter()
                     .any(|e| e.body.as_deref().and_then(index_of) == Some(want));
+                let in_log: Vec<u64> = events
+                    .iter()
+                    .filter_map(|e| e.body.as_deref().and_then(index_of))
+                    .collect();
+                let in_spool: Vec<u64> = spool::read_all(&scratch.path().join("spool"))
+                    .unwrap()
+                    .iter()
+                    .filter_map(|r| index_of(&r.payload))
+                    .collect();
+                // Its bytes past the spool's end marker mean it was spooled
+                // and then cleared without having been committed.
+                let raw = std::fs::read(scratch.path().join("spool")).unwrap_or_default();
+                let stale = raw.windows(8).any(|w| w == want.to_le_bytes());
+                let acked = acknowledged(scratch.path());
                 panic!(
                     "round {round}: capture {want} was acknowledged and is now in \
-                     neither the log nor the spool, as a reader sees them \
-                     (after a writable open it is {})",
+                     neither the log nor the spool, as a reader sees them.\n\
+                     after a writable open it is {}.\n\
+                     its bytes are {} the spool file.\n\
+                     log holds {} captures, highest {:?}, last five {:?}\n\
+                     spool holds {:?}\n\
+                     acknowledged: {} in all, last five {:?}",
                     if after_rw {
                         "in the log"
                     } else {
                         "still nowhere"
-                    }
+                    },
+                    if stale { "still in" } else { "not in" },
+                    in_log.len(),
+                    in_log.iter().max(),
+                    &in_log[in_log.len().saturating_sub(5)..],
+                    in_spool,
+                    acked.len(),
+                    &acked[acked.len().saturating_sub(5)..],
                 );
             }
             highest = highest.max(want);
