@@ -31,6 +31,8 @@ fn the_chord_is_still_control_super_space() {
         "Ctrl-Super-Space"
     };
     assert_eq!(capture_store::hotkey::DEFAULT_CHORD.human(), frozen);
+    // GNOME's rendering only matters where GNOME is.
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
         capture_store::hotkey::DEFAULT_CHORD.gnome(),
         "<Control><Super>space"

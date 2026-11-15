@@ -133,6 +133,37 @@ impl Pty {
         Ok(())
     }
 
+    /// Wait until the shell has drawn its prompt, then drain what it echoed.
+    ///
+    /// A fixed pause was here, and on a slow CI runner zsh was still starting
+    /// when the first key arrived: its line editor flushes typeahead as it
+    /// starts, so "fix auth" was captured as "ix auth". The prompt is drawn by
+    /// the line editor itself, so once it is on the screen keys reach it.
+    fn wait_for_prompt(&mut self) {
+        let mut f = std::fs::File::from(self.master.try_clone().unwrap());
+        let raw = rustix::fs::fcntl_getfl(f.as_fd()).unwrap();
+        rustix::fs::fcntl_setfl(f.as_fd(), raw | rustix::fs::OFlags::NONBLOCK).ok();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        // Up to ten seconds, in 20 ms steps.
+        for _ in 0..500 {
+            while let Ok(n) = f.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            if seen.windows(2).any(|w| w == b"$ ") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        rustix::fs::fcntl_setfl(f.as_fd(), raw).ok();
+        // A moment for the editor to finish drawing what follows the prompt.
+        std::thread::sleep(Duration::from_millis(100));
+        self.drain();
+    }
+
     /// Drain whatever the shell has echoed, so it does not confuse a later read.
     fn drain(&mut self) {
         let mut f = std::fs::File::from(self.master.try_clone().unwrap());
@@ -280,8 +311,7 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
     )
     .expect("a shell starts on the terminal");
 
-    std::thread::sleep(Duration::from_millis(400));
-    pty.drain();
+    pty.wait_for_prompt();
 
     pty.type_bytes(line.as_bytes()).expect("the line is typed");
     std::thread::sleep(Duration::from_millis(150));
