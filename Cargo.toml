@@ -54,7 +54,7 @@ unicode-segmentation = { version = "=1.13.3", default-features = false }
 any_ascii = { version = "=0.3.3", default-features = false }
 
 # --- storage (group 5) ---
-rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions"] }
 # Advisory locking (task 5.14). The kernel releases a flock when the holding
 # process dies, which a pid file cannot do — a crashed writer would otherwise
 # leave the store locked with nothing able to tell a stale lock from a live one.

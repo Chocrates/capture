@@ -190,7 +190,7 @@ fn note_column(db: &rusqlite::Connection, table: &str) -> Option<&'static str> {
     let mut st = db
         .prepare(&format!("SELECT * FROM \"{table}\" LIMIT 0"))
         .ok()?;
-    let names = st.column_names();
+    let names: Vec<&str> = st.column_names().collect();
     let found = ["tgt", "src"].into_iter().find(|c| names.contains(c));
     let _ = st.query([]);
     found

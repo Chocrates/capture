@@ -88,6 +88,10 @@ ignore = [
     "RUSTSEC-2025-0081", # via tauri
     "RUSTSEC-2025-0098", # rust-unic, via urlpattern via tauri-utils
     "RUSTSEC-2025-0100", # via tauri
+    # basic-toml, unmaintained, via askama via uniffi_bindgen: build time only,
+    # reading the template config shipped with askama. No safe upgrade (uniffi
+    # 0.32.2 and askama 0.16.1 are the latest); drop this when askama moves off it.
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]
