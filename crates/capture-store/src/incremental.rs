@@ -113,6 +113,18 @@ fn bound_notes(rules: &[Envelope]) -> BTreeSet<EventId> {
         .collect()
 }
 
+/// The names a text's links could resolve to: each as written, and the name a
+/// page with that title would have, which the fold also tries.
+fn link_names(text: &str) -> Vec<String> {
+    capture_core::link::extract(text)
+        .into_iter()
+        .flat_map(|n| {
+            let derived = capture_core::link::name_for(&n);
+            core::iter::once(n).chain(derived)
+        })
+        .collect()
+}
+
 /// Every name these events could ask the projection about.
 ///
 /// The links their texts mention, and the aliases they assign. Those are the
@@ -126,12 +138,12 @@ fn referenced(events: &[Envelope]) -> BTreeSet<String> {
         match e.header.kind {
             Kind::CAPTURE => {
                 if let Ok(b) = minicbor::decode::<capture_core::body::CaptureBody>(body) {
-                    out.extend(capture_core::link::extract(&b.text));
+                    out.extend(link_names(&b.text));
                 }
             }
             Kind::EDIT => {
                 if let Ok(b) = minicbor::decode::<capture_core::body::EditBody>(body) {
-                    out.extend(capture_core::link::extract(&b.text));
+                    out.extend(link_names(&b.text));
                 }
             }
             // Both the name being taken and, so the fold can see it is this
@@ -464,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_written_before_its_target_stays_unresolved_incrementally() {
+    fn a_link_written_before_its_target_reaches_it_incrementally_as_rebuilt() {
         // The other direction, and the one a naive seed gets wrong: seeding an
         // incremental fold with *every* name the projection knows lets a link
         // resolve to a note created after it was written. The name has to be
@@ -520,10 +532,11 @@ mod tests {
 
         let links = store.links_from(&early_id).unwrap();
         assert_eq!(links.len(), 1, "the link is recorded either way");
-        assert_eq!(
-            links[0].resolved, None,
-            "a link must never acquire a target its author could not have seen"
-        );
+        // G8, changed 2026-11-15: the fold still records that nothing held
+        // the name when the link was written, and a link with nothing recorded
+        // reaches whatever holds the name now — here the later note.
+        assert_eq!(links[0].resolved, Some(later_id));
+        assert!(!links[0].is_broken());
 
         // And a full rebuild says the same thing.
         let full_path = generation_path(&b, 2);

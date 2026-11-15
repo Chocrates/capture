@@ -164,6 +164,50 @@ fn a_harness_writes_reads_and_is_refused_a_stale_edit() {
 }
 
 #[test]
+fn an_agent_builds_linked_pages_in_any_order_by_title() {
+    // The way a model writes a wiki: the page that links first, its targets
+    // after, links written as the titles it sees. One command a page.
+    let s = Store::new("wiki");
+    s.person(&["agent", "add", "claude"]);
+    let hub = s.agent(
+        &["page", "new", "Local models", "--stdin", "--json"],
+        Some("Start with [[KV cache maths]] and [[Qwen3.8-27B]].\n"),
+    );
+    assert_eq!(hub["name"], "local-models", "{hub}");
+    s.agent(
+        &[
+            "page",
+            "new",
+            "KV cache maths",
+            "--under",
+            "local-models",
+            "--stdin",
+            "--json",
+        ],
+        Some("Back to [[Local models]].\n"),
+    );
+    s.agent(
+        &["page", "new", "Qwen3.8-27B", "--stdin", "--json"],
+        Some("A model.\n"),
+    );
+
+    let shown: Value =
+        serde_json::from_str(&s.person(&["show", "local-models", "--json"])).unwrap();
+    assert_eq!(
+        shown["text"],
+        "Local models\n\nStart with [[KV cache maths]] and [[Qwen3.8-27B]]."
+    );
+    let links: Value =
+        serde_json::from_str(&s.person(&["links", "local-models", "--json"])).unwrap();
+    for l in links["links"].as_array().unwrap() {
+        assert!(l["resolved"].is_string(), "every link resolves: {links}");
+    }
+    let back = links["backlinks"].as_array().unwrap();
+    assert_eq!(back.len(), 1, "{links}");
+    assert_eq!(back[0]["name"], "kv-cache-maths");
+}
+
+#[test]
 fn an_agent_is_refused_a_credential_and_the_persons_acts() {
     let s = Store::new("refused");
     s.person(&["agent", "add", "claude"]);

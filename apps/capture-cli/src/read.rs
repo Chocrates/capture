@@ -1826,7 +1826,7 @@ fn print_links(out: &[LinkRow], back: &[Backlink]) {
     let width = out
         .iter()
         .map(|l| l.name.chars().count())
-        .chain(back.iter().map(|b| b.slug.chars().count()))
+        .chain(back.iter().map(|b| b.shown().chars().count()))
         .max()
         .unwrap_or(20)
         .min(44);
@@ -1855,7 +1855,12 @@ fn print_links(out: &[LinkRow], back: &[Backlink]) {
         }
         say!("linked from");
         for b in back {
-            say!("  {:<width$}  as {}", b.slug, b.name);
+            // "as" only when the words written differ from the name shown.
+            if b.name == b.shown() {
+                say!("  {}", b.shown());
+            } else {
+                say!("  {:<width$}  as {}", b.shown(), b.name);
+            }
         }
     }
 }
@@ -2029,8 +2034,11 @@ fn link_json(l: &LinkRow) -> Json {
 }
 
 fn backlink_json(b: &Backlink) -> Json {
-    let Backlink { tgt: _, slug, name } = b;
-    obj([("slug", slug.into()), ("as", name.into())])
+    obj([
+        ("slug", b.slug.as_str().into()),
+        ("name", b.shown().into()),
+        ("as", b.name.as_str().into()),
+    ])
 }
 
 /// What has come due, and what it will do about it.

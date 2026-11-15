@@ -1061,9 +1061,14 @@ pub fn day(paths: StorePaths, name: &str, which: usize) -> Result<()> {
 }
 
 /// Start a page.
-pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<()> {
-    let made = capture_store::pages::create(&paths, title, under)?;
-    started(&made, None);
+pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>, stdin: bool) -> Result<()> {
+    let body = if stdin {
+        crate::input::read(&crate::args::Source::Stdin)?
+    } else {
+        String::new()
+    };
+    let made = capture_store::pages::create_with(&paths, title, &body, under)?;
+    started(&made, None, stdin);
     Ok(())
 }
 
@@ -1071,17 +1076,21 @@ pub fn new_page(paths: StorePaths, title: &str, under: Option<&str>) -> Result<(
 pub fn new_page_for(paths: StorePaths, title: &str, of: &str) -> Result<()> {
     let (kind, value) = crate::read::split_mention(of)?;
     let made = capture_store::pages::create_for(&paths, kind, &value, title)?;
-    started(&made, Some(of));
+    started(&made, Some(of), false);
     Ok(())
 }
 
 /// What starting a page says: its name, whose it is, and — where the title
 /// gave no name — why, in the store's one wording.
-fn started(made: &capture_store::pages::Created, of: Option<&str>) {
+fn started(made: &capture_store::pages::Created, of: Option<&str>, written: bool) {
     let name = made.name.as_deref().unwrap_or(&made.slug);
     crate::out::wrote(name);
     let whose = of.map(|o| format!(" as {o}'s page")).unwrap_or_default();
-    say!("Page [[{name}]] started{whose}. Write it with: capture edit {name}");
+    if written {
+        say!("Page [[{name}]] written{whose}.");
+    } else {
+        say!("Page [[{name}]] started{whose}. Write it with: capture edit {name}");
+    }
     if let Some(notice) = made.notice() {
         crate::out::notice(&notice);
         say!("{notice}");

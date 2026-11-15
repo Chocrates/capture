@@ -155,11 +155,23 @@ review; they are found by search and by name.
 
 ## Write — always as {name}
 
-    CAPTURE_AS={name} capture page new "<title>" --json      a page; "name" is what to call it
+    CAPTURE_AS={name} capture page new "<title>" [--under <name>] --stdin --json
+                                                             a page with its body; "name" is what to call it
     CAPTURE_AS={name} capture append <name> --stdin --json   add lines at the end; loses nothing
     CAPTURE_AS={name} capture edit <name> --expect <version> --stdin --json
                                                              replace the whole text
     CAPTURE_AS={name} capture tag <name> <tag> --json
+
+## Pages and links
+
+A page's first line is its title; give the body on stdin. Link with
+`[[Title as written]]` or `[[its-name]]`, either works. A link to a page that
+does not exist yet is fine: it starts working when that page is made, so
+write pages in any order. Put a page under another with `--under <name>`.
+Plain text only: no markdown headings, bold or tables, and a line starting
+`- ` becomes a checklist item, so use `•` for an ordinary bullet.
+
+## Changing what is there
 
 Prefer `append`. To rewrite, read with `show --json`, then `edit --expect` with
 the `version` you read. Exit code 4 means the person changed it since: read it

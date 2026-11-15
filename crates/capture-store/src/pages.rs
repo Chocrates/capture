@@ -59,6 +59,18 @@ impl Created {
 /// the frozen slug algorithm requires (from the root capture), and the page is
 /// named by the title's slug form when nothing else holds that name.
 pub fn create(paths: &StorePaths, title: &str, under: Option<&str>) -> Result<Created> {
+    create_with(paths, title, "", under)
+}
+
+/// Start a page with its body already written: one capture holding the title
+/// line and the body under it, rather than an empty page and an edit. The
+/// edit route also lost the title, because an edit replaces the whole text.
+pub fn create_with(
+    paths: &StorePaths,
+    title: &str,
+    body: &str,
+    under: Option<&str>,
+) -> Result<Created> {
     let title = title.trim();
     if title.is_empty() {
         return Err(Error::Usage(String::from("a page needs a title")));
@@ -71,7 +83,13 @@ pub fn create(paths: &StorePaths, title: &str, under: Option<&str>) -> Result<Cr
 
     let slug = {
         let mut s = Session::open_for_capture(paths.clone())?;
-        let body = crate::session::capture_body(title)?;
+        let body = body.trim_matches('\n');
+        let text = if body.trim().is_empty() {
+            title.to_string()
+        } else {
+            format!("{title}\n\n{body}")
+        };
+        let body = crate::session::capture_body(&text)?;
         s.capture(&body)?.slug
     };
     make(paths, &slug)?;
@@ -125,41 +143,9 @@ pub fn make(paths: &StorePaths, name: &str) -> Result<()> {
     crate::promote::correct(paths, name, Promoted::Page)
 }
 
-/// `car-maintenance` for "Car maintenance": the title's words, lowercased,
-/// joined by single hyphens. `None` where the title has no words (emoji only).
-///
-/// Letters by grapheme, not by character. The first version split on any
-/// character `is_alphanumeric` refused, and a combining mark is not
-/// alphanumeric: "हिन्दी नोट्स" became `हिन-दी-नोट-स`, and "café" typed with a
-/// decomposed accent became `cafe` plus a stray hyphen — a different name from
-/// the same word typed precomposed (found 2026-11-13, pages-that-hold-up G9).
-/// So the title is NFC-normalised, and a grapheme cluster is part of a word
-/// when its base character is a letter or digit, marks and all. Unicode *word*
-/// boundaries were tried and are wrong here: they make every CJK ideograph its
-/// own word, so "東京" came out `東-京`. The script is kept rather than
-/// transliterated, because a name is read and typed by the person who wrote it.
-///
-/// One special case: lowercase "İ" is "i" plus a combining dot above, and
-/// "İstanbul" should be `istanbul`, which is what anyone would type.
-pub fn name_for(title: &str) -> Option<String> {
-    use unicode_normalization::UnicodeNormalization;
-    use unicode_segmentation::UnicodeSegmentation;
-    let lowered = title
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
-        .replace("i\u{307}", "i");
-    let mut out = String::new();
-    for g in lowered.graphemes(true) {
-        if g.chars().next().is_some_and(char::is_alphanumeric) {
-            out.push_str(g);
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let out = out.trim_end_matches('-').to_string();
-    (!out.is_empty()).then_some(out)
-}
+/// The name a title gives a page. Lives in `capture_core::link`, because the
+/// fold applies the same rule to the words inside a `[[link]]`.
+pub use capture_core::link::name_for;
 
 /// One thing an editor can offer after a sigil.
 #[derive(Clone, Debug, PartialEq, Eq)]

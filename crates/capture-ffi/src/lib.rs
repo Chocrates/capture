@@ -1298,10 +1298,14 @@ impl Archive {
     }
 
     /// One note by slug or alias.
+    ///
+    /// Or by the words of a `[[link]]`: a tapped link hands over its text as
+    /// written, and `[[KV cache maths]]` names the page `kv-cache-maths` by
+    /// the same rule the fold uses.
     pub fn note(&self, name: String) -> Result<NoteSummary> {
         let store = self.read()?;
         let tgt = store
-            .resolve(&name)?
+            .resolve_written(&name)?
             .ok_or_else(|| CaptureError::NotFound { name: name.clone() })?;
         let row = store.note(&tgt)?.ok_or(CaptureError::NotFound { name })?;
         read_as(&store, row, self.now_ms())
@@ -1316,7 +1320,7 @@ impl Archive {
             .ok_or(CaptureError::NotFound { name })?;
         let mut out = Vec::new();
         for b in store.links_to(&tgt)? {
-            let alias = store.note(&b.tgt)?.and_then(|n| n.alias);
+            let alias = b.alias;
             out.push(Backlink {
                 slug: b.slug,
                 alias,

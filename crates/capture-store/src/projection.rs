@@ -1120,8 +1120,18 @@ impl LinkRow {
 pub struct Backlink {
     pub tgt: EventId,
     pub slug: String,
+    /// The linking note's own chosen name, if it has one — a page's is its
+    /// title's name. What a person reads; the slug is what navigation uses.
+    pub alias: Option<String>,
     /// The name that note used to refer here.
     pub name: String,
+}
+
+impl Backlink {
+    /// The linking note as a person would name it.
+    pub fn shown(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.slug)
+    }
 }
 
 /// A handle to the projection.
@@ -3484,21 +3494,64 @@ impl Store {
     }
 
     /// Links written in a note, in the order they appear in its text.
+    ///
+    /// A link that resolved when it was written keeps that target: a name
+    /// that later moves shows the link as broken (pages-that-hold-up G6, G7).
+    ///
+    /// A link that found nothing when it was written has no target to keep,
+    /// so it reaches whatever holds its name now — the page made after it,
+    /// which is how a wiki gets written, a link first and its page later. It
+    /// used to stay dead until the linking page was edited again (G8, changed
+    /// 2026-11-15). Either way the name is tried as written and then as the
+    /// name its title would give a page ([`Store::resolve_written`]).
     pub fn links_from(&self, tgt: &EventId) -> Result<Vec<LinkRow>> {
         let mut st = self.conn.prepare(
-            "SELECT l.name,
-                    l.resolved,
-                    (SELECT tgt FROM notes WHERE slug = l.name OR alias = l.name),
-                    (SELECT slug FROM notes WHERE tgt = l.resolved)
+            "SELECT l.name, l.resolved, (SELECT slug FROM notes WHERE tgt = l.resolved)
              FROM links l
              WHERE l.src = ?1 ORDER BY l.ord",
         )?;
-        let rows = st.query_map(params![tgt.0.to_vec()], link_row)?;
+        let rows = st.query_map(params![tgt.0.to_vec()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<Vec<u8>>>(1)?.and_then(id_from),
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let (name, resolved, target_slug) = r?;
+            let now = self.resolve_written(&name)?;
+            out.push(match resolved {
+                Some(_) => LinkRow {
+                    name,
+                    resolved,
+                    now,
+                    target_slug,
+                },
+                None => LinkRow {
+                    target_slug: match now {
+                        Some(t) => self.slug_of(&t)?,
+                        None => None,
+                    },
+                    name,
+                    resolved: now,
+                    now,
+                },
+            });
         }
         Ok(out)
+    }
+
+    /// What the words inside a `[[link]]` reach now: the name as written, or
+    /// failing that the name a page titled with those words would have.
+    pub fn resolve_written(&self, written: &str) -> Result<Option<EventId>> {
+        if let Some(t) = self.resolve(written)? {
+            return Ok(Some(t));
+        }
+        match capture_core::link::name_for(written) {
+            Some(n) if n != written => self.resolve(&n),
+            _ => Ok(None),
+        }
     }
 
     /// The notes filed directly under this one, by slug, that still have
@@ -3518,23 +3571,39 @@ impl Store {
         Ok(out)
     }
 
-    /// Notes linking to this one.
+    /// Notes linking to this one, each once however many times it links.
+    ///
+    /// The links that resolved here when written, and the ones that found
+    /// nothing then and reach here now — the same rule as [`Store::links_from`],
+    /// so a link and its backlink never disagree.
     pub fn links_to(&self, tgt: &EventId) -> Result<Vec<Backlink>> {
         let mut st = self.conn.prepare(
-            "SELECT n.tgt, n.slug, l.name
+            "SELECT n.tgt, n.slug, l.name, l.resolved IS NULL, n.alias
              FROM links l JOIN notes n ON n.tgt = l.src
-             WHERE l.resolved = ?1 ORDER BY n.created_wall DESC",
+             WHERE l.resolved = ?1 OR l.resolved IS NULL
+             ORDER BY n.created_wall DESC, l.ord",
         )?;
         let rows = st.query_map(params![tgt.0.to_vec()], |r| {
-            Ok(Backlink {
-                tgt: id_from(r.get::<_, Vec<u8>>(0)?).unwrap_or(EventId([0; 32])),
-                slug: r.get(1)?,
-                name: r.get(2)?,
-            })
+            Ok((
+                Backlink {
+                    tgt: id_from(r.get::<_, Vec<u8>>(0)?).unwrap_or(EventId([0; 32])),
+                    slug: r.get(1)?,
+                    name: r.get(2)?,
+                    alias: r.get(4)?,
+                },
+                r.get::<_, bool>(3)?,
+            ))
         })?;
-        let mut out = Vec::new();
+        let mut out: Vec<Backlink> = Vec::new();
         for r in rows {
-            out.push(r?);
+            let (b, unpinned) = r?;
+            if unpinned && self.resolve_written(&b.name)? != Some(*tgt) {
+                continue;
+            }
+            if out.iter().any(|o| o.tgt == b.tgt) {
+                continue;
+            }
+            out.push(b);
         }
         Ok(out)
     }
@@ -5004,15 +5073,6 @@ fn note_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteRow> {
         by: r.get(15)?,
         tags: Vec::new(),
         divergences: 0,
-    })
-}
-
-fn link_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRow> {
-    Ok(LinkRow {
-        name: r.get(0)?,
-        resolved: r.get::<_, Option<Vec<u8>>>(1)?.and_then(id_from),
-        now: r.get::<_, Option<Vec<u8>>>(2)?.and_then(id_from),
-        target_slug: r.get(3)?,
     })
 }
 

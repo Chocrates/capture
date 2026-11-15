@@ -490,7 +490,7 @@ pub fn note(name: String) -> std::result::Result<Page, String> {
 
         let mut backlinks = Vec::new();
         for b in s.links_to(&tgt)? {
-            let alias = s.note(&b.tgt)?.and_then(|n| n.alias);
+            let alias = b.alias;
             backlinks.push(Backlink {
                 slug: b.slug,
                 alias,

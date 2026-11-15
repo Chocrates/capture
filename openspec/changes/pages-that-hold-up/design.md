@@ -28,7 +28,7 @@ the proposal are fixed; the fixes are safe for every note, not only pages.
 | G5 | Make-page on A races an edit on B | two_devices | example |
 | G6 | Alias changed: old `[[old]]` links show broken, not silently retargeted | store | example |
 | G7 | Alias freed then taken by another page: earlier links keep their original target | store | example |
-| G8 | Forward link written before its page exists stays unresolved after the page is made (by design; pin it) | store | example |
+| G8 | Forward link written before its page exists reaches the page once it is made (changed 2026-11-15: it stayed unresolved until the linking note was edited, which made a wiki impossible to write in any order; a link that never resolved has no meaning to protect, and links that did resolve keep G6/G7). Link text is also tried as a title, so `[[KV cache maths]]` reaches `kv-cache-maths` | store | example |
 | G9 | Titles: accents, CJK, RTL, emoji-only (→ no alias), mixed scripts | store | property over `name_for` |
 | G10 | Redacting a page with backlinks and children: linkers show broken, children lose parent, confirmation names them | store + CLI | example |
 | G11 | Version history of a page via `capture log` lists every version with origin | CLI | example |

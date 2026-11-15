@@ -1008,14 +1008,21 @@ fn apply_capture(
 ///
 /// `at` is the moment the text was written. A name whose note is younger than
 /// that is not a candidate: the author could not have meant it.
+///
+/// The words as written first, then the name a page with that title would
+/// have: `[[KV cache maths]]` reaches `kv-cache-maths`. People and models
+/// write the title they see, and the name is derived from it by one rule.
 fn resolve_links(text: &str, names: &Names, at: Hlc) -> Vec<Link> {
     link::extract(text)
         .into_iter()
         .map(|name| {
-            let resolved = names
-                .get(&name)
-                .filter(|(_, born)| *born <= at)
-                .map(|(id, _)| *id);
+            let held = |n: &str| {
+                names
+                    .get(n)
+                    .filter(|(_, born)| *born <= at)
+                    .map(|(id, _)| *id)
+            };
+            let resolved = held(&name).or_else(|| link::name_for(&name).and_then(|n| held(&n)));
             Link { name, resolved }
         })
         .collect()

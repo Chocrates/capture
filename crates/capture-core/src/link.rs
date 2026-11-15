@@ -37,6 +37,55 @@ use minicbor::{Decode, Encode};
 
 use crate::id::EventId;
 
+/// `car-maintenance` for "Car maintenance": the title's words, lowercased,
+/// joined by single hyphens. `None` where the title has no words (emoji only).
+///
+/// Letters by grapheme, not by character. The first version split on any
+/// character `is_alphanumeric` refused, and a combining mark is not
+/// alphanumeric: "हिन्दी नोट्स" became `हिन-दी-नोट-स`, and "café" typed with a
+/// decomposed accent became `cafe` plus a stray hyphen — a different name from
+/// the same word typed precomposed (found 2026-11-13, pages-that-hold-up G9).
+/// So the title is NFC-normalised, and a grapheme cluster is part of a word
+/// when its base character is a letter or digit, marks and all. Unicode *word*
+/// boundaries were tried and are wrong here: they make every CJK ideograph its
+/// own word, so "東京" came out `東-京`. The script is kept rather than
+/// transliterated, because a name is read and typed by the person who wrote it.
+///
+/// One special case: lowercase "İ" is "i" plus a combining dot above, and
+/// "İstanbul" should be `istanbul`, which is what anyone would type.
+pub fn name_for(title: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_segmentation::UnicodeSegmentation;
+    let lowered = title
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .replace("i\u{307}", "i");
+    let mut out = String::new();
+    for g in lowered.graphemes(true) {
+        if g.chars().next().is_some_and(char::is_alphanumeric) {
+            // A prepended mark (Malayalam's dot reph, U+0D4E) joins the space
+            // after it into one cluster, which put a space inside a name
+            // (found by the property test, 2026-11-15). The cluster's letters
+            // are kept and whitespace in it breaks the word, as it would
+            // anywhere else.
+            for c in g.chars() {
+                if c.is_whitespace() || c.is_control() {
+                    if !out.is_empty() && !out.ends_with('-') {
+                        out.push('-');
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = String::from(out.trim_end_matches('-'));
+    (!out.is_empty()).then_some(out)
+}
+
 /// A link found in note text.
 #[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
 pub struct Link {

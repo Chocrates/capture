@@ -313,7 +313,11 @@ fn run(command: Command) -> Result<()> {
         Command::Hour { name, pm } => write::hour(paths()?, &name, pm),
         Command::Day { name, which } => write::day(paths()?, &name, which),
         Command::Reread { name } => write::reread(paths()?, &name),
-        Command::NewPage { title, under } => write::new_page(paths()?, &title, under.as_deref()),
+        Command::NewPage {
+            title,
+            under,
+            stdin,
+        } => write::new_page(paths()?, &title, under.as_deref(), stdin),
         Command::NewPageFor { title, of } => write::new_page_for(paths()?, &title, &of),
         Command::MakePage { name } => write::make_page(paths()?, &name),
         Command::Mentions { name, json } => read::mentions(&paths()?, &name, json),

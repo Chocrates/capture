@@ -476,18 +476,69 @@ fn renaming_a_page_breaks_its_links_and_never_retargets_them() {
 }
 
 #[test]
-fn a_link_written_before_its_page_stays_unresolved_and_is_not_broken() {
-    // G8: by design. A forward reference is not quietly bound to whatever
-    // later takes the name — that would be a link nobody wrote.
+fn a_link_written_before_its_page_reaches_it_once_it_exists() {
+    // G8, changed 2026-11-15. It stayed unresolved "by design" until the
+    // linking note was edited again, and building a wiki by hand ran straight
+    // into it: links are written first and their pages after. A link that
+    // found nothing when written has no meaning to protect, so it reaches
+    // whatever takes its name. Links that did resolve keep their target (G6,
+    // G7 above).
     let scratch = Scratch::new("forward");
     let paths = scratch.paths();
     let early = capture(&paths, "write up the [[future-plans]] soon");
     let l = &links(&paths, &early)[0];
     assert_eq!(l.resolved, None);
-    pages::create(&paths, "Future plans", None).unwrap();
-    let l = &links(&paths, &early)[0];
-    assert_eq!(l.resolved, None, "not bound after the fact");
     assert!(!l.is_broken(), "never fulfilled is not broken");
+
+    pages::create(&paths, "Future plans", None).unwrap();
+    let page = tgt(&paths, "future-plans");
+    let l = &links(&paths, &early)[0];
+    assert_eq!(l.resolved, Some(page), "reaches the page made after it");
+    assert!(!l.is_broken());
+    let store = capture_store::projection::current(&paths).unwrap();
+    assert_eq!(l.target_slug, store.slug_of(&page).unwrap());
+
+    let back = store.links_to(&page).unwrap();
+    assert_eq!(back.len(), 1, "and the page knows: {back:?}");
+    assert_eq!(back[0].tgt, tgt(&paths, &early));
+}
+
+#[test]
+fn a_link_can_name_a_page_by_its_title() {
+    // `[[KV cache maths]]` for the page named `kv-cache-maths`: what people and
+    // models write is the title they see.
+    let scratch = Scratch::new("bytitle");
+    let paths = scratch.paths();
+    pages::create(&paths, "KV cache maths", None).unwrap();
+    let page = tgt(&paths, "kv-cache-maths");
+
+    // Written after the page exists: bound when written.
+    let after = capture(&paths, "see [[KV cache maths]] and [[Qwen3.8-27B]]");
+    let l = links(&paths, &after);
+    assert_eq!(l[0].resolved, Some(page));
+    assert_eq!(l[1].resolved, None);
+
+    // Written before its page, by title: reaches it once it exists.
+    pages::create(&paths, "Qwen3.8-27B", None).unwrap();
+    let qwen = tgt(&paths, "qwen3-8-27b");
+    assert_eq!(links(&paths, &after)[1].resolved, Some(qwen));
+
+    let store = capture_store::projection::current(&paths).unwrap();
+    assert_eq!(store.links_to(&qwen).unwrap().len(), 1);
+    assert_eq!(store.links_to(&page).unwrap().len(), 1);
+}
+
+#[test]
+fn a_page_linking_three_times_is_one_backlink() {
+    let scratch = Scratch::new("dedupe");
+    let paths = scratch.paths();
+    pages::create(&paths, "Target", None).unwrap();
+    let page = tgt(&paths, "target");
+    let src = capture(&paths, "[[target]], again [[target]], and [[Target]]");
+    let store = capture_store::projection::current(&paths).unwrap();
+    let back = store.links_to(&page).unwrap();
+    assert_eq!(back.len(), 1, "{back:?}");
+    assert_eq!(back[0].tgt, tgt(&paths, &src));
 }
 
 #[test]

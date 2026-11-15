@@ -190,10 +190,12 @@ pub enum Command {
     Reread {
         name: String,
     },
-    /// Start a page with a title, optionally under another.
+    /// Start a page with a title, optionally under another, optionally with
+    /// its body read from stdin.
     NewPage {
         title: String,
         under: Option<String>,
+        stdin: bool,
     },
     /// Start the page that is a person, project or tag.
     NewPageFor {
@@ -845,6 +847,19 @@ where
         // dates or types; `capture unpage` hands it back to the recognizer.
         "page" => match &args[1..] {
             [new, rest @ ..] if new == "new" => {
+                // `--stdin` reads the body. A flag wherever it stands, since a
+                // title of exactly "--stdin" is not a page anybody means.
+                let stdin = rest.iter().any(|a| a == "--stdin");
+                let rest: Vec<String> = rest.iter().filter(|a| *a != "--stdin").cloned().collect();
+                let rest = rest.as_slice();
+                if stdin && rest.iter().any(|a| a == "--of") {
+                    return Err(Bad::Value {
+                        command: "page".into(),
+                        problem: "--stdin is for a new page's body; write someone's page with \
+                                  capture edit after --of"
+                            .into(),
+                    });
+                }
                 // Refused rather than half-applied (pages-that-hold-up G15):
                 // the page of a person sits on their page, not in the tree, so
                 // "under" has nowhere to put it.
@@ -885,6 +900,7 @@ where
                     under => Command::NewPage {
                         title,
                         under: under.map(|(_, u)| u),
+                        stdin,
                     },
                 })
             }
@@ -1796,8 +1812,10 @@ TIME AND TASKS
   capture hour <note> am|pm      say which half of the clock "at 2" meant
   capture day <note> 1|2         say which of two days "next thursday" meant
   capture reread <note>          take back a correction; the text decides again
-  capture page new <title> [--under <page> | --of @person]
-                                 start a page: never read for dates, named by its title
+  capture page new <title> [--under <page> | --of @person] [--stdin]
+                                 start a page: never read for dates, named by its title;
+                                 --stdin reads its body. [[Its title]] links to it, even
+                                 from pages written before it
   capture page <note>            make a capture a page
   capture unpage <note>          make a page a capture again
   capture tick-at <note> <n>     tick item n of one capture, counting from 1
@@ -2041,6 +2059,20 @@ mod tests {
         assert!(matches!(
             p(&["page", "new", "Trip", "--of", "@sarah"]),
             Ok(Command::NewPageFor { .. })
+        ));
+        assert_eq!(
+            p(&[
+                "page", "new", "Road", "trip", "--stdin", "--under", "travel"
+            ]),
+            Ok(Command::NewPage {
+                title: "Road trip".into(),
+                under: Some("travel".into()),
+                stdin: true,
+            })
+        );
+        assert!(matches!(
+            p(&["page", "new", "Trip", "--of", "@sarah", "--stdin"]),
+            Err(Bad::Value { .. })
         ));
     }
 
