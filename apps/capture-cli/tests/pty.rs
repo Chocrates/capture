@@ -313,7 +313,11 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
     //   zsh   $ZDOTDIR/.zshrc — and *not* `-f`, which would skip rc files
     //         entirely and leave the widget undefined. That mistake produces a
     //         shell where the chord does nothing, which looks exactly like the
-    //         binding being broken.
+    //         binding being broken. `-d` does skip the *global* rc files,
+    //         the zsh equivalent of bash's --noprofile: a CI runner's
+    //         /etc/zsh/zshrc ran compinit, which stopped to ask "[y] or [n]?"
+    //         about insecure directories and took the first typed key as the
+    //         answer.
     let rc = match shell {
         "bash" => store.path().join("bashrc"),
         "zsh" => store.path().join(".zshrc"),
@@ -328,7 +332,7 @@ fn capture_through(shell: &str, store: &Store, line: &str) -> Vec<String> {
     let rc_str = rc.to_str().unwrap().to_string();
     let args: Vec<&str> = match shell {
         "bash" => vec!["--noprofile", "--rcfile", &rc_str, "-i"],
-        "zsh" => vec!["-i"],
+        "zsh" => vec!["-d", "-i"],
         _ => unreachable!(),
     };
 
