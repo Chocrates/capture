@@ -154,7 +154,11 @@ fn acknowledge(root: &Path, n: u64) -> Result<()> {
         .create(true)
         .append(true)
         .open(root.join("acknowledged"))?;
-    writeln!(f, "{n}")?;
+    // One write, not `writeln!`: on an unbuffered file that is two, the digits
+    // and then the newline, and a kill between them left "371" unterminated
+    // for the next run's "372" to join. The supervisor then went looking for
+    // capture 371372, which never existed — 7 runs in 200 on macOS.
+    f.write_all(format!("{n}\n").as_bytes())?;
     f.sync_all()?;
     Ok(())
 }
