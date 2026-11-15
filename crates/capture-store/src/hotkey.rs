@@ -450,16 +450,29 @@ mod tests {
         // One definition, three renderings. They drift apart the moment the
         // chord is written down twice, after which the interface names one
         // chord and the desktop listens for another.
-        assert_eq!(DEFAULT_CHORD.gnome(), "<Control><Super>space");
-        assert_eq!(DEFAULT_CHORD.portal(), "CTRL+LOGO+space");
-        assert_eq!(DEFAULT_CHORD.human(), "Ctrl-Super-Space");
+        if cfg!(target_os = "macos") {
+            assert_eq!(DEFAULT_CHORD.gnome(), "<Alt>space");
+            assert_eq!(DEFAULT_CHORD.portal(), "ALT+space");
+            assert_eq!(DEFAULT_CHORD.human(), "Option-Space");
+        } else {
+            assert_eq!(DEFAULT_CHORD.gnome(), "<Control><Super>space");
+            assert_eq!(DEFAULT_CHORD.portal(), "CTRL+LOGO+space");
+            assert_eq!(DEFAULT_CHORD.human(), "Ctrl-Super-Space");
+        }
     }
 
     #[test]
     fn the_portal_calls_the_super_key_by_its_logo() {
         // "SUPER" is the obvious guess and binds nothing: the XDG shortcuts
         // syntax names this key after the logo printed on it.
-        assert_eq!(DEFAULT_CHORD.portal(), "CTRL+LOGO+space");
+        let ctrl_super = Chord {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            super_: true,
+            key: "space",
+        };
+        assert_eq!(ctrl_super.portal(), "CTRL+LOGO+space");
 
         let alt_shift = Chord {
             ctrl: false,

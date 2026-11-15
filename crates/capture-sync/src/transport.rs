@@ -173,15 +173,22 @@ impl Transport for End {
         Ok(())
     }
 
+    /// What was sent before the other end went away is still delivered, as
+    /// TCP delivers what is buffered before reporting the close. Checking
+    /// `closed` first lost the last frame of an exchange whenever the sender
+    /// finished, and dropped its end, before the receiver read — a race that
+    /// macOS's scheduler won often enough to fail pairing tests in CI.
     fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(TransportError::Closed);
-        }
-        Ok(self
+        let next = self
             .inbox
             .lock()
             .map_err(|_| TransportError::Closed)?
-            .pop_front())
+            .pop_front();
+        match next {
+            Some(frame) => Ok(Some(frame)),
+            None if self.closed.load(Ordering::SeqCst) => Err(TransportError::Closed),
+            None => Ok(None),
+        }
     }
 }
 
@@ -221,6 +228,18 @@ mod tests {
                 "nothing was sent, so nothing waits"
             );
         }
+    }
+
+    #[test]
+    fn what_was_sent_before_the_close_still_arrives() {
+        let pair = Pair::new();
+        let (mut a, b) = pair.ends();
+        {
+            let mut b = b;
+            b.send(b"last words").unwrap();
+        } // b is dropped: the channel is closed.
+        assert_eq!(a.recv().unwrap().as_deref(), Some(&b"last words"[..]));
+        assert!(a.recv().is_err(), "and then the close is reported");
     }
 
     #[test]

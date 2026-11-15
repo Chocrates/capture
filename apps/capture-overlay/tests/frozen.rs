@@ -24,10 +24,13 @@ fn source(file: &str) -> String {
 fn the_chord_is_still_control_super_space() {
     // Named in exactly one place so the interface and the desktop cannot drift
     // apart. If this changes, somebody's muscle memory changes with it.
-    assert_eq!(
-        capture_store::hotkey::DEFAULT_CHORD.human(),
+    // A Mac's is its own and frozen the same way (it-runs-on-a-mac D1).
+    let frozen = if cfg!(target_os = "macos") {
+        "Option-Space"
+    } else {
         "Ctrl-Super-Space"
-    );
+    };
+    assert_eq!(capture_store::hotkey::DEFAULT_CHORD.human(), frozen);
     assert_eq!(
         capture_store::hotkey::DEFAULT_CHORD.gnome(),
         "<Control><Super>space"
