@@ -529,6 +529,23 @@ fn a_link_can_name_a_page_by_its_title() {
 }
 
 #[test]
+fn a_body_that_repeats_the_title_does_not_show_it_twice() {
+    let scratch = Scratch::new("twice");
+    let paths = scratch.paths();
+    let made = pages::create_with(&paths, "Grind size", "Grind size\nFine.\n", None).unwrap();
+    let store = capture_store::projection::current(&paths).unwrap();
+    let t = store.resolve(&made.slug).unwrap().unwrap();
+    assert_eq!(store.text_of(&t).unwrap().unwrap(), "Grind size\n\nFine.");
+    let other = pages::create_with(&paths, "Milk", "Milk is steamed.\n", None).unwrap();
+    let t = store.resolve(&other.slug).unwrap().unwrap();
+    assert_eq!(
+        store.text_of(&t).unwrap().unwrap(),
+        "Milk\n\nMilk is steamed.",
+        "a first line that only starts with the title is the body"
+    );
+}
+
+#[test]
 fn a_page_linking_three_times_is_one_backlink() {
     let scratch = Scratch::new("dedupe");
     let paths = scratch.paths();

@@ -291,8 +291,13 @@ fn instructions_are_printed_and_nothing_else_is_written() {
     let before: Vec<_> = walk(&s.0);
     let out = s.person(&["agent", "instructions", "--name", "claude"]);
     assert!(out.contains("CAPTURE_AS=claude capture append"));
-    let json = out.split("----\n").last().unwrap();
+    // The settings block is the one line after its marker; a note follows it.
+    let json = out.split("----\n").last().unwrap().lines().next().unwrap();
     let v: Value = serde_json::from_str(json.trim()).unwrap();
+    assert!(
+        out.contains("trusted"),
+        "says the allowlist needs a trusted folder"
+    );
     let allow: Vec<&str> = v["permissions"]["allow"]
         .as_array()
         .unwrap()

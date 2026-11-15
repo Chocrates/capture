@@ -84,6 +84,14 @@ pub fn create_with(
     let slug = {
         let mut s = Session::open_for_capture(paths.clone())?;
         let body = body.trim_matches('\n');
+        // A body that starts by repeating the title would show it twice: every
+        // page a model wrote did this, reading "the first line is the title"
+        // as an instruction to write it (2026-11-15).
+        let body = match body.split_once('\n') {
+            Some((first, rest)) if first.trim() == title => rest.trim_start_matches('\n'),
+            None if body.trim() == title => "",
+            _ => body,
+        };
         let text = if body.trim().is_empty() {
             title.to_string()
         } else {

@@ -82,6 +82,12 @@ pub fn instructions(name: &str) -> Result<()> {
     say!();
     say!("---- .claude/settings.json (merge into \"permissions\") ----");
     say!("{}", allowlist(name).render());
+    say!();
+    // Found running the skill headless (2026-11-15): every command was
+    // refused, read-only ones too, and the only sign was in stderr.
+    say!("Claude Code ignores a project's allow rules until that folder is trusted:");
+    say!("open it once with `claude` and accept the trust prompt, or pass the file");
+    say!("with `claude --settings .claude/settings.json`.");
     Ok(())
 }
 
@@ -161,13 +167,16 @@ review; they are found by search and by name.
     CAPTURE_AS={name} capture edit <name> --expect <version> --stdin --json
                                                              replace the whole text
     CAPTURE_AS={name} capture tag <name> <tag> --json
+    CAPTURE_AS={name} capture parent <name> <under> --json   file a page under another
 
 ## Pages and links
 
-A page's first line is its title; give the body on stdin. Link with
+The title is the argument; stdin is the body only, without the title. Link with
 `[[Title as written]]` or `[[its-name]]`, either works. A link to a page that
 does not exist yet is fine: it starts working when that page is made, so
-write pages in any order. Put a page under another with `--under <name>`.
+write pages in any order. `--under <name>` files a page under one that
+exists; to file it under one made later, use `capture parent` afterwards.
+An edit replaces the whole text, so keep the title as its first line.
 Plain text only: no markdown headings, bold or tables, and a line starting
 `- ` becomes a checklist item, so use `•` for an ordinary bullet.
 
