@@ -28,3 +28,10 @@ winit = { workspace = true }
 x11rb = { workspace = true }
 zbus = { workspace = true }
 futures-lite = { workspace = true }
+
+# The chord on a Mac: Carbon's RegisterEventHotKey, the one global-hotkey API
+# there that needs no privacy grant, so it survives unsigned rebuilds
+# (it-runs-on-a-mac D1). macOS only; Linux builds are unchanged. 0.9 rather
+# than 0.10, which was days old when this was written.
+[target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "0.9"

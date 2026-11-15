@@ -29,6 +29,7 @@ mod agent;
 
 mod args;
 mod backup;
+mod doctor;
 mod input;
 mod json;
 mod read;
@@ -284,6 +285,7 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Init => init(),
         Command::Status => ops::status(&paths()?),
+        Command::Doctor { ask } => doctor::run(&paths()?, ask),
         Command::Capture(source) => capture(&source),
         Command::Timeline { limit, json } => read::timeline(&paths()?, limit, json),
         Command::Show { name, json } => read::show(&paths()?, &name, json),
@@ -363,6 +365,7 @@ fn run(command: Command) -> Result<()> {
         Command::ExportsPruned => ops::exports_pruned(paths()?),
         Command::AdmissionSeen { key } => ops::admission_seen(paths()?, &key),
         Command::Peers { json } => ops::peers(&paths()?, json),
+        Command::PeersAdd { addr } => ops::peers_add(&paths()?, &addr),
         Command::Split { name, from, rule } => write::split_series(paths()?, &name, &from, &rule),
         Command::Retire { key, force } => pair::retire(paths()?, &key, force),
         Command::Cosign { blob } => pair::cosign(paths()?, &blob),

@@ -117,6 +117,48 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Where the overlay listens for a given store.
+///
+/// In the session's runtime directory, named from the store it belongs to, so
+/// that two stores get two overlays and neither depends on how deeply the store
+/// itself happens to be nested. Here rather than in the overlay so that
+/// `capture doctor` asks the same address the overlay binds.
+pub fn overlay_socket(root: &Path) -> PathBuf {
+    let name = format!("capture-{}.sock", socket_tag(root));
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
+        // No runtime directory. Falling back to the store keeps the overlay
+        // working where one is not set, and `bind` reports the length problem
+        // in words if the path turns out to be too long.
+        _ => root.join("capture.sock"),
+    }
+}
+
+/// A short, stable name for a store path.
+fn socket_tag(root: &Path) -> String {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let h = capture_core::id::BodyHash::of(canonical.as_os_str().as_encoded_bytes());
+    h.0[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The file that makes the overlay start at login, whether or not it exists.
+///
+/// An XDG autostart entry on Linux, a LaunchAgent on a Mac. Shared with
+/// `capture doctor`, which asks whether it is there.
+pub fn overlay_login_entry() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join("Library/LaunchAgents")
+                .join(format!("{}.plist", crate::launchd::OVERLAY)),
+        );
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("autostart").join("capture-overlay.desktop"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

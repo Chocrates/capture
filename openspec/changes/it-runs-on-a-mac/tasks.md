@@ -1,28 +1,39 @@
 ## 0. Before writing Mac code
 
-- [ ] 0.1 Ask the person design open questions 1–3 (toolchain allowed, chip, LaunchAgents). If the toolchain is not allowed, stop here and wait for CI-built binaries.
-- [ ] 0.2 Spike D7: `rustup target add aarch64-apple-darwin`; try `cargo check`, then `cargo zigbuild`; record how far each gets; land `make check-macos` with what works.
-- [ ] 0.3 `cargo deny` check on `global-hotkey` and its tree (macOS target).
+- [x] 0.1 Ask the person design open questions 1–3 (toolchain allowed, chip, LaunchAgents). If the toolchain is not allowed, stop here and wait for CI-built binaries.
+  - Answered 2026-11-14: rustup and Xcode CLT may be installed; Apple silicon (`aarch64-apple-darwin`); LaunchAgents unknown, so O3 is what reports it.
+- [x] 0.2 Spike D7: `rustup target add aarch64-apple-darwin`; try `cargo check`, then `cargo zigbuild`; record how far each gets; land `make check-macos` with what works.
+  - Plain `cargo check --target aarch64-apple-darwin` stops at the first C build script (`objc2-exception-helper`: the system `cc` takes no `-arch`); clang gets further and stops at blake3 without macOS headers. With `zig cc` as the C compiler (`tools/zigcc-macos`, no `cargo-zigbuild` needed) the whole workspace checks, `--all-targets`, Tauri included. Nothing links, so link and framework errors are still found only on the Mac.
+- [x] 0.3 `cargo deny` check on `global-hotkey` and its tree (macOS target).
+  - `global-hotkey` 0.9.0 (0.10.0 was five days old), macOS-only; it adds `keyboard-types`. `cargo deny check`: advisories, bans, licences, sources all ok.
 
 ## 1. Doctor first (useful on Linux today, and the Mac's only feedback channel)
 
-- [ ] 1.1 Sentinel test first: doctor output never contains seeded note text, paths, user, host, addresses, keys.
-- [ ] 1.2 `capture doctor [--ask]` with codes B, H, O, N, D, S; `docs/doctor-codes.md`; Linux implementations of every check.
-- [ ] 1.3 `make smoke` runs doctor against the scratch store.
+- [x] 1.1 Sentinel test first: doctor output never contains seeded note text, paths, user, host, addresses, keys.
+- [x] 1.2 `capture doctor [--ask]` with codes B, H, O, N, D, S; `docs/doctor-codes.md`; Linux implementations of every check.
+- [x] 1.3 `make smoke` runs doctor against the scratch store.
+  - Reasons are `&'static str` by type, so free text cannot reach a line. H2 reads `chord.registration` in `ops.db`, now written by every registration path. O1 sees an overlay for any store; O2 is this one's socket. Five sabotages, each caught (one only after adding a damaged-log test).
 
 ## 2. macOS backends
 
-- [ ] 2.1 `Mechanism::MacCarbon` in `hotkey.rs`; selection order on macOS; unit test for selection.
-- [ ] 2.2 Overlay: `global-hotkey` registration, `--register` confirmation, activation policy Accessory, raise/focus/hide.
-- [ ] 2.3 Notifier: `osascript` path, delivered-or-not contract; test with a stub `osascript` on `PATH`.
-- [ ] 2.4 Autostart: LaunchAgent plist write/remove, `launchctl bootstrap|bootout`, `--status` reports it.
-- [ ] 2.5 `capture peers add HOST:PORT` if absent (all platforms).
-- [ ] 2.6 Doctor's macOS checks (H via MacCarbon, N via osascript, O3 via LaunchAgent).
+- [x] 2.1 `Mechanism::MacCarbon` in `hotkey.rs`; selection order on macOS; unit test for selection.
+  - `Session::is_macos` (defaults to `cfg!`), checked first. Default chord on a Mac is Option-Space (Cmd-Space is Spotlight's).
+- [x] 2.2 Overlay: `global-hotkey` registration, `--register` confirmation, activation policy Accessory, raise/focus/hide.
+  - `carbon.rs` via `global-hotkey` 0.9, manager made on the main thread before the window and kept for the process. Accessory policy set through winit's builder. Raise/focus/hide reuse the existing viewport commands; not seen working, only compiled (`make check-macos`).
+- [x] 2.3 Notifier: `osascript` path, delivered-or-not contract; test with a stub `osascript` on `PATH`.
+  - Text goes to `osascript` as argv, never into the script, so a note cannot run AppleScript. Tested with a stub that records argv and with a refused and a missing program.
+- [x] 2.4 Autostart: LaunchAgent plist write/remove, `launchctl bootstrap|bootout`, `--status` reports it.
+  - `capture_store::launchd` writes the plist (checked with Python's `plistlib`), `bootout` then `bootstrap gui/<uid>`. `--status` and doctor O3 both require launchd to hold it, so a refused agent is not reported as starting at login.
+- [x] 2.5 `capture peers add HOST:PORT` if absent (all platforms).
+  - Keyless `given_addresses` in `ops.db`. Each round tries a given address as each member nothing else found; the handshake that succeeds says whose, and `peer_reached` remembers it. A refused connection is not retried under another key. Two tests in `two_devices.rs`.
+- [x] 2.6 Doctor's macOS checks (H via MacCarbon, N via osascript, O3 via LaunchAgent).
+  - H1 `carbon hotkey`, N via `NOTIFIER`=`osascript`, O3 `login item written, launchd refused it`. All cfg-selected; no separate Mac-only checks needed.
 
 ## 3. Install
 
-- [ ] 3.1 `install.sh` Darwin branch (D5); `--with-chord` and `--with-sync` write LaunchAgents; plain install writes none (test: run under a fake `uname` and a scratch `HOME`).
-- [ ] 3.2 `docs/macos-test.md`: build steps, the doctor round-trip script, firewall prompt, what each failure means.
+- [x] 3.1 `install.sh` Darwin branch (D5); `--with-chord` and `--with-sync` write LaunchAgents; plain install writes none (test: run under a fake `uname` and a scratch `HOME`).
+  - Also `--with-export` as a daily LaunchAgent. `tests/install_sh.rs` runs the script under stub `uname`/`cargo`/`launchctl` and a scratch `HOME`: plain install writes no agent and calls no `launchctl`. Script honours `CARGO_TARGET_DIR` for that.
+- [x] 3.2 `docs/macos-test.md`: build steps, the doctor round-trip script, firewall prompt, what each failure means.
 
 ## 4. Round trips on the work Mac
 
@@ -32,4 +43,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 `make ci` green on Linux (Mac code is cfg-gated; Linux behaviour unchanged); `make check-macos` green as far as it reaches; sabotage each new test once.
+- [x] 5.1 `make ci` green on Linux (Mac code is cfg-gated; Linux behaviour unchanged); `make check-macos` green as far as it reaches; sabotage each new test once.
+  - `make ci` green, `make check-macos` green. Eleven sabotages of the section 2 and 3 code, each caught; the given-address test was hanging under one of them and now has a deadline. CI on GitHub runs macOS for real (`.github/workflows/ci.yml`).

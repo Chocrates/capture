@@ -34,15 +34,8 @@ use std::path::PathBuf;
 use capture_store::{Error, Result};
 
 /// Where desktops look for things to start at login.
-fn autostart_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("autostart"))
-}
-
 fn entry_path() -> Option<PathBuf> {
-    Some(autostart_dir()?.join("capture-overlay.desktop"))
+    capture_store::paths::overlay_login_entry()
 }
 
 /// The entry's contents.
@@ -77,7 +70,23 @@ pub fn install() -> Result<PathBuf> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, entry(&exe.to_string_lossy()))?;
+    let exe = exe.to_string_lossy();
+    if cfg!(target_os = "macos") {
+        use capture_store::launchd;
+        std::fs::write(&path, launchd::plist(launchd::OVERLAY, &exe, &["--run"]))?;
+        // Loaded now, so a refusal is said here rather than found at the next
+        // login. The file stays either way: launchd reads it at login too.
+        if !launchd::load(&path) {
+            return Err(Error::Usage(
+                "the LaunchAgent is written but launchctl refused it — this Mac's \
+                 management may block login items. Start the overlay by hand:  \
+                 capture-overlay --run &"
+                    .into(),
+            ));
+        }
+    } else {
+        std::fs::write(&path, entry(&exe))?;
+    }
     Ok(path)
 }
 
@@ -87,13 +96,21 @@ pub fn remove() -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
+    if cfg!(target_os = "macos") {
+        capture_store::launchd::unload(&path);
+    }
     std::fs::remove_file(&path)?;
     Ok(true)
 }
 
 /// Whether it is arranged to start at login.
+///
+/// On a Mac, also that launchd holds it: a written agent a managed Mac refused
+/// is not arranged.
 pub fn installed() -> bool {
     entry_path().is_some_and(|p| p.exists())
+        && (!cfg!(target_os = "macos")
+            || capture_store::launchd::loaded(capture_store::launchd::OVERLAY))
 }
 
 #[cfg(test)]

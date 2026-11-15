@@ -182,6 +182,13 @@ CREATE TABLE IF NOT EXISTS admissions_seen (
   peer_key BLOB PRIMARY KEY,
   seen_at  INTEGER NOT NULL
 ) STRICT;
+
+-- Addresses given by hand (`capture peers add`), for networks where discovery
+-- is blocked. Keyless: whose they are is learned by the handshake that
+-- succeeds, and then remembered in peer_state like any other.
+CREATE TABLE IF NOT EXISTS given_addresses (
+  addr TEXT PRIMARY KEY
+) STRICT;
 ";
 
 /// What is known about a peer: where it lives, and when it was last heard.
@@ -1030,6 +1037,25 @@ impl Ops {
             |r| r.get(0),
         )?;
         Ok(n as u32)
+    }
+
+    /// Remember an address to try without discovery. Device-local, like every
+    /// other address: where a peer lives is a fact about this network.
+    pub fn give_address(&self, addr: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO given_addresses (addr) VALUES (?1)",
+            rusqlite::params![addr],
+        )?;
+        Ok(())
+    }
+
+    /// Addresses given by hand, in the order they sort.
+    pub fn given_addresses(&self) -> Result<Vec<String>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT addr FROM given_addresses ORDER BY addr")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Everything known about every peer.

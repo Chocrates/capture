@@ -1,0 +1,19 @@
+#!/bin/sh
+# A C compiler for `make check-macos`: zig cc aimed at Apple silicon.
+#
+# cc-rs passes Apple's flags (-arch arm64, --target=arm64-apple-macosx,
+# -mmacosx-version-min), which zig spells differently; they are dropped and
+# zig's own target given instead. zig ships the macOS libc headers, which is
+# what lets the C in blake3, ring, SQLite and objc2's helper compile here at
+# all. Good for `cargo check`, which links nothing; not for a build.
+args=""
+skip=0
+for a in "$@"; do
+  if [ $skip = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    -arch|-target) skip=1 ;;
+    --target=*|-mmacosx-version-min=*) ;;
+    *) args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'" ;;
+  esac
+done
+eval exec zig cc -target aarch64-macos $args

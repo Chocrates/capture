@@ -178,6 +178,43 @@ fn tick_once(
         reachable.push((p.key, addr, None));
     }
 
+    // Addresses given by hand, for a network where nothing advertises. They
+    // carry no key, and the handshake will not go ahead without one, so each
+    // is tried as each member nothing else found — the handshake that succeeds
+    // says whose it is, and from then on `peer_reached` remembers it under
+    // that key and the loop above dials it like any other.
+    //
+    // A connection that cannot be opened at all is not tried again under the
+    // next key: that is the network's answer, and it is the same for all.
+    for addr in ops.given_addresses()? {
+        if reachable.iter().any(|(_, a, _)| *a == addr) {
+            continue;
+        }
+        for peer in members.clone() {
+            if spent() {
+                break;
+            }
+            if reachable.iter().any(|(k, _, _)| *k == peer) {
+                continue;
+            }
+            match dial(paths, identity, &peer, &addr, now(), spent) {
+                Ok(_) => {
+                    reach.reached += 1;
+                    ops.peer_reached(&peer, &addr, now())?;
+                    // Not tried again under another given address. It was
+                    // never in `reachable`, so it is not dialled twice.
+                    members.retain(|k| *k != peer);
+                    break;
+                }
+                Err(Error::Io(e)) => {
+                    tracing::debug!(%e, "a given address did not answer");
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
     for (peer, addr, digest) in capture_sync::anti_entropy::select(
         &reachable.iter().map(|(k, _, _)| *k).collect::<Vec<_>>(),
         round,

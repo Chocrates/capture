@@ -79,6 +79,10 @@ pub enum Command {
     Init,
     /// Report on the store.
     Status,
+    /// Every check, as codes that can be read aloud.
+    Doctor {
+        ask: bool,
+    },
     /// Print the shell snippet that installs the capture chord.
     ShellInit(String),
     /// Notes, newest first, grouped by capture day.
@@ -408,6 +412,10 @@ pub enum Command {
     Peers {
         json: bool,
     },
+    /// Remember an address to sync with, for a network without discovery.
+    PeersAdd {
+        addr: String,
+    },
     /// Admit another device, or join the roster of one.
     Pair {
         code: Option<String>,
@@ -574,6 +582,11 @@ where
         "+" => Ok(Command::Capture(source(&args[1..]))),
         "init" => flagless("init", &args[1..], Command::Init),
         "status" => flagless("status", &args[1..], Command::Status),
+        "doctor" => match &args[1..] {
+            [] => Ok(Command::Doctor { ask: false }),
+            [a] if a == "--ask" => Ok(Command::Doctor { ask: true }),
+            rest => flagless("doctor", rest, Command::Doctor { ask: false }),
+        },
         "timeline" => {
             let rest = &args[1..];
             let json = has_json(rest);
@@ -1475,6 +1488,13 @@ where
                 by: after("--by"),
             })
         }
+        "peers" if args.get(1).is_some_and(|a| a == "add") => match &args[2..] {
+            [addr] if is_host_port(addr) => Ok(Command::PeersAdd { addr: addr.clone() }),
+            _ => Err(Bad::Value {
+                command: "peers add".into(),
+                problem: "give an address as HOST:PORT, e.g. 192.168.1.20:7878".into(),
+            }),
+        },
         "peers" => Ok(Command::Peers {
             json: has_json(&args[1..]),
         }),
@@ -1580,6 +1600,16 @@ fn looks_like_a_day(v: &str) -> bool {
         && v.as_bytes()[4] == b'-'
         && v.as_bytes()[7] == b'-'
         && v.chars().filter(char::is_ascii_digit).count() == 8
+}
+
+/// `HOST:PORT` with a port that is a port. The host is not looked up here:
+/// a name that does not resolve today may on the network it is meant for.
+fn is_host_port(s: &str) -> bool {
+    s.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty()
+            && !host.contains(char::is_whitespace)
+            && port.parse::<u16>().is_ok_and(|p| p > 0)
+    })
 }
 
 fn has_json(rest: &[String]) -> bool {
@@ -1835,6 +1865,8 @@ OPERATING
   capture rejected          events that failed authentication
   capture rebuild           recompute the projection from the log
   capture verify            check every id, signature, body hash and chain
+  capture doctor [--ask]    every check as a code to read aloud; --ask asks
+                            whether the test notification appeared
   capture export            write everything appended since the last export
   capture restore <dir>     rebuild from exported events
 
@@ -1854,6 +1886,9 @@ OPERATING
                           leaving what it was before it alone
   capture peers             every device in the roster, and when it was
                           last reached
+  capture peers add HOST:PORT
+                          try that address each sync round, for a network
+                          where devices cannot find each other
   capture retire KEY        stop accepting what a device writes from now on
                           — for one that was lost or stolen
   capture readmit           get back in after every device was retired;
@@ -1901,6 +1936,39 @@ mod tests {
             Ok(Command::Capture(Source::Words(w))) => w,
             other => panic!("expected captured words, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peers_add_takes_one_host_and_port() {
+        assert!(matches!(
+            p(&["peers", "add", "192.168.1.20:7878"]),
+            Ok(Command::PeersAdd { addr }) if addr == "192.168.1.20:7878"
+        ));
+        assert!(matches!(
+            p(&["peers", "add", "desk.local:7878"]),
+            Ok(Command::PeersAdd { .. })
+        ));
+        for bad in [
+            &["peers", "add"][..],
+            &["peers", "add", "192.168.1.20"],
+            &["peers", "add", "h:0"],
+            &["peers", "add", "h:99999"],
+            &["peers", "add", ":7878"],
+            &["peers", "add", "a:1", "b:2"],
+        ] {
+            assert!(matches!(p(bad), Err(Bad::Value { .. })), "{bad:?}");
+        }
+        assert!(matches!(p(&["peers"]), Ok(Command::Peers { json: false })));
+    }
+
+    #[test]
+    fn doctor_takes_only_ask() {
+        assert!(matches!(p(&["doctor"]), Ok(Command::Doctor { ask: false })));
+        assert!(matches!(
+            p(&["doctor", "--ask"]),
+            Ok(Command::Doctor { ask: true })
+        ));
+        assert!(p(&["doctor", "--frobnicate"]).is_err());
     }
 
     #[test]

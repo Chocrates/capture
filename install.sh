@@ -25,6 +25,10 @@
 # `--with-sync` installs a systemd user service that runs the sync daemon from
 # login. Opt-in because it opens a listening socket, and on one device it has
 # nothing to do.
+#
+# On a Mac (it-runs-on-a-mac D5) the same three options write LaunchAgents
+# instead of systemd units, and a plain install writes none: nothing starts,
+# nothing listens, nothing leaves the machine until asked.
 
 set -eu
 
@@ -40,12 +44,47 @@ for arg in "$@"; do
     esac
 done
 
+OS=$(uname -s)
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
 CAPTURE_HOME="${CAPTURE_HOME:-$HOME/capture}"
+# Where cargo puts what it builds; honoured so the two always agree.
+RELEASE="${CARGO_TARGET_DIR:-target}/release"
+AGENTS="$HOME/Library/LaunchAgents"
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# Write a LaunchAgent and load it into this person's session. Arguments: label,
+# then the plist's inner <dict> body. A managed Mac may refuse the load; the
+# file stays, and `capture doctor` says which.
+launch_agent() {
+    label=$1
+    body=$2
+    mkdir -p "$AGENTS"
+    cat > "$AGENTS/$label.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CAPTURE_HOME</key>
+    <string>$CAPTURE_HOME</string>
+  </dict>
+$body
+</dict>
+</plist>
+PLIST
+    domain="gui/$(id -u)"
+    launchctl bootout "$domain" "$AGENTS/$label.plist" 2>/dev/null || true
+    if ! launchctl bootstrap "$domain" "$AGENTS/$label.plist" 2>/dev/null; then
+        say "  launchctl refused $label; this Mac may not allow login items."
+        say "  Written to $AGENTS/$label.plist all the same."
+    fi
+}
 
 # ---------------------------------------------------------------- 1. build ---
 
@@ -57,8 +96,15 @@ fi
 
 # The desktop app needs a system webview, and the failure without it is a wall
 # of linker errors rather than a sentence. Checked here so it is a sentence.
+# A Mac always has one (WKWebView), and needs Apple's tools to link anything.
 WANT_DESKTOP=1
-if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+if [ "$OS" = Darwin ]; then
+    if ! xcode-select -p >/dev/null 2>&1; then
+        say "  Apple's command-line tools are not installed. Run:"
+        say "      xcode-select --install"
+        exit 1
+    fi
+elif ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
     WANT_DESKTOP=0
     say "  webkit2gtk-4.1 is missing, so the browse window will be skipped."
     say "  To include it:  sudo apt install libwebkit2gtk-4.1-dev libxdo-dev \\"
@@ -76,18 +122,22 @@ fi
 step "Installing to $BIN"
 mkdir -p "$BIN"
 for b in capture capture-overlay capture-syncd; do
-    install -m 755 "target/release/$b" "$BIN/$b"
+    install -m 755 "$RELEASE/$b" "$BIN/$b"
     say "  $b"
 done
 if [ "$WANT_DESKTOP" = 1 ]; then
-    install -m 755 target/release/capture-desktop "$BIN/capture-desktop"
+    install -m 755 "$RELEASE/capture-desktop" "$BIN/capture-desktop"
     say "  capture-desktop"
 fi
 
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *)  say ""
-        say "  $BIN is not on your PATH. Add this to your shell rc:"
+        if [ "$OS" = Darwin ]; then
+            say "  $BIN is not on your PATH. Add this to ~/.zshrc:"
+        else
+            say "  $BIN is not on your PATH. Add this to your shell rc:"
+        fi
         say "      export PATH=\"\$PATH:$BIN\""
         ;;
 esac
@@ -154,7 +204,22 @@ if [ "$WANT_DESKTOP" = 1 ]; then
 fi
 
 step "Syncing"
-if [ "$WITH_SYNC" = 1 ]; then
+if [ "$WITH_SYNC" = 1 ] && [ "$OS" = Darwin ]; then
+    # KeepAlive on failure only, as systemd's Restart=on-failure: a daemon
+    # that stopped is the thing the "sync has not run" condition catches.
+    launch_agent dev.capture.syncd "  <key>ProgramArguments</key>
+  <array><string>$BIN/capture-syncd</string></array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>"
+    say "  Running from login (LaunchAgent dev.capture.syncd)."
+    say "  macOS will ask whether capture-syncd may accept incoming connections."
+    say "      launchctl bootout gui/\$(id -u)/dev.capture.syncd   to stop"
+    say ""
+    say "  If devices cannot find each other here, give the address by hand:"
+    say "      capture peers add HOST:PORT"
+elif [ "$WITH_SYNC" = 1 ]; then
     UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     mkdir -p "$UNITS"
 
@@ -201,6 +266,10 @@ else
     say "  run an installer. To have it run from login:"
     say ""
     say "      ./install.sh --with-sync"
+    if [ "$OS" = Darwin ]; then
+        say ""
+        say "  On this Mac, nothing listens on the network until you do."
+    fi
 fi
 
 step "Keeping a copy"
@@ -216,7 +285,17 @@ say ""
 say "  Export is incremental and takes no lock, so it is safe on a timer and"
 say "  safe while you are capturing. It writes nothing when nothing is new."
 
-if [ "$WITH_EXPORT" = 1 ]; then
+if [ "$WITH_EXPORT" = 1 ] && [ "$OS" = Darwin ]; then
+    # launchd runs a calendar job missed while asleep on wake, as
+    # Persistent=true does on Linux.
+    launch_agent dev.capture.export "  <key>ProgramArguments</key>
+  <array><string>$BIN/capture</string><string>export</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>"
+    say ""
+    say "  Exports daily at noon (LaunchAgent dev.capture.export), into"
+    say "  $CAPTURE_HOME/export."
+elif [ "$WITH_EXPORT" = 1 ]; then
     UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     mkdir -p "$UNITS"
 

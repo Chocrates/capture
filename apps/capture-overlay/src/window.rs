@@ -289,7 +289,17 @@ fn force_x11(builder: &mut winit::event_loop::EventLoopBuilder<eframe::UserEvent
     builder.with_x11();
 }
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+/// On a Mac: an accessory app, with no Dock icon and no menu bar
+/// (it-runs-on-a-mac D2). It is something summoned by the chord, not an
+/// application to switch to. winit's focus request activates the app, so the
+/// window comes to the front over whatever was focused.
+#[cfg(target_os = "macos")]
+fn force_x11(builder: &mut winit::event_loop::EventLoopBuilder<eframe::UserEvent>) {
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS as _};
+    builder.with_activation_policy(ActivationPolicy::Accessory);
+}
+
+#[cfg(not(unix))]
 fn force_x11(_builder: &mut winit::event_loop::EventLoopBuilder<eframe::UserEvent>) {}
 
 struct App {

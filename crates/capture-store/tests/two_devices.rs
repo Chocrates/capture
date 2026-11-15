@@ -1598,3 +1598,88 @@ fn making_a_page_while_the_other_edits_it_keeps_both() {
         assert!(d.read().occurrences_of(&d.id_of(&slug)).unwrap().is_empty());
     }
 }
+
+/// An address given by hand reaches the peer with no discovery, and is
+/// remembered under the key whose handshake succeeded (it-runs-on-a-mac: a
+/// network where mDNS is blocked).
+#[cfg(feature = "mdns")]
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "a deadline for the test's own listener, not a time any event sees"
+)]
+fn a_given_address_reaches_the_peer_and_learns_whose_it_is() {
+    let a = Device::new("given-a");
+    let b = Device::new("given-b");
+    pair(&a, &b);
+    let b_key = b.identity().public().to_bytes();
+    assert!(
+        !a.ops()
+            .peer_addresses()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == b_key && p.addr.is_some()),
+        "the fixture already knows where b is"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    a.ops().give_address(&addr).unwrap();
+
+    let b_paths = b.paths.clone();
+    let b_id = b.identity();
+    // Gives up rather than waiting for ever, so a round that never dials
+    // fails the test instead of hanging it.
+    listener.set_nonblocking(true).unwrap();
+    let answering = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(_) => return,
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        capture_store::round::answer(&b_paths, &b_id, stream, AT, &|| false).expect("b answered");
+    });
+
+    let reach = round_from(&a);
+    assert_eq!(reach.reached, 1, "the given address was not tried");
+    answering.join().unwrap();
+    assert!(
+        a.ops()
+            .peer_addresses()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == b_key && p.addr.as_deref() == Some(addr.as_str())),
+        "the address was not remembered as b's"
+    );
+}
+
+/// A given address nobody answers at reaches nobody, and is not pinned on a
+/// member.
+#[cfg(feature = "mdns")]
+#[test]
+fn a_given_address_that_does_not_answer_is_not_anyones() {
+    let a = Device::new("given-gone-a");
+    let b = Device::new("given-gone-b");
+    pair(&a, &b);
+    let gone = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    a.ops().give_address(&gone).unwrap();
+    assert_eq!(round_from(&a).reached, 0);
+    assert!(
+        !a.ops()
+            .peer_addresses()
+            .unwrap()
+            .iter()
+            .any(|p| p.addr.as_deref() == Some(gone.as_str()))
+    );
+}

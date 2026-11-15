@@ -216,6 +216,56 @@ pub fn observable(cue_type: &str) -> bool {
 /// reason §2.4.1 routes a cue to a device rather than to "the notifier".
 const ANDROID: bool = cfg!(target_os = "android");
 
+/// The program that puts a notification on this desktop. `capture doctor`
+/// asks whether it is there.
+///
+/// On a Mac, `osascript` (it-runs-on-a-mac D3): the one route an unsigned
+/// program has. The notification is attributed to Script Editor, and
+/// management may switch it off; doctor's N3 is how that is found out.
+pub const NOTIFIER: &str = if cfg!(target_os = "macos") {
+    "osascript"
+} else {
+    "notify-send"
+};
+
+/// The arguments [`NOTIFIER`] takes for one notification.
+///
+/// On a Mac the text goes in as `argv`, never into the script. A note saying
+/// `" & do shell script "…` would otherwise be AppleScript, run as the person.
+fn notifier_args(mac: bool, summary: &str, body: &str) -> Vec<String> {
+    if mac {
+        [
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 2 of argv) with title \"capture\" subtitle (item 1 of argv)",
+            "-e",
+            "end run",
+            summary,
+            body,
+        ]
+        .map(String::from)
+        .to_vec()
+    } else {
+        ["--app-name=capture", summary, body]
+            .map(String::from)
+            .to_vec()
+    }
+}
+
+/// Run a notifier and say whether it worked: a missing program, a refusal
+/// or a non-zero exit is not delivered.
+fn run_notifier(program: &str, args: &[String]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Say something, by whatever means this desktop offers.
 ///
 /// Best-effort and deliberately not a dependency: a notification that fails is
@@ -258,11 +308,10 @@ pub fn notify(summary: &str, body: &str) -> bool {
         return false;
     }
 
-    let sent = std::process::Command::new("notify-send")
-        .args(["--app-name=capture", summary, body])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let sent = run_notifier(
+        NOTIFIER,
+        &notifier_args(cfg!(target_os = "macos"), summary, body),
+    );
 
     if !sent {
         // The fallback is not silence. An intent that fired and could not be
@@ -1086,6 +1135,81 @@ mod default_rule {
         assert_eq!(
             default_notifier(&[desk.clone(), phone.clone()], &desk.key, NOW),
             phone.key
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivery {
+    use super::*;
+
+    /// A stand-in `osascript` that records its argv and exits with `code`.
+    fn stub(name: &str, code: i32) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("capture-notifier-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("argv");
+        let prog = dir.join("osascript");
+        std::fs::write(
+            &prog,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nexit {code}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (prog, log)
+    }
+
+    #[test]
+    fn a_mac_notification_carries_the_text_as_data() {
+        let (prog, log) = stub("data", 0);
+        let hostile = r#"x" & (do shell script "touch /tmp/owned") & ""#;
+        let args = notifier_args(true, "dentist", hostile);
+        assert!(run_notifier(prog.to_str().unwrap(), &args));
+        let seen = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = seen.lines().collect();
+        // The script is fixed; the text arrives as the last two arguments.
+        assert_eq!(lines.last(), Some(&hostile));
+        assert_eq!(lines[lines.len() - 2], "dentist");
+        assert!(
+            lines
+                .iter()
+                .filter(|l| l.contains("do shell script"))
+                .count()
+                == 1
+        );
+        assert!(
+            args.iter()
+                .take(6)
+                .all(|a| !a.contains("dentist") && !a.contains("shell")),
+            "text reached the script"
+        );
+        let _ = std::fs::remove_dir_all(prog.parent().unwrap());
+    }
+
+    #[test]
+    fn a_refused_or_missing_notifier_is_not_delivered() {
+        let (prog, _) = stub("refused", 1);
+        assert!(!run_notifier(
+            prog.to_str().unwrap(),
+            &notifier_args(true, "a", "b")
+        ));
+        assert!(!run_notifier(
+            "/nonexistent/osascript",
+            &notifier_args(true, "a", "b")
+        ));
+        let _ = std::fs::remove_dir_all(prog.parent().unwrap());
+    }
+
+    #[test]
+    fn linux_keeps_its_arguments() {
+        assert_eq!(
+            notifier_args(false, "s", "b"),
+            vec!["--app-name=capture".to_string(), "s".into(), "b".into()]
         );
     }
 }

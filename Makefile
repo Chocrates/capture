@@ -43,7 +43,7 @@ export CAPTURE_SILENT := 1
 .DEFAULT_GOAL := help
 .PHONY: help setup ci check fmt fmt-check lint test test-fast crash pty tamper roundtrip spool redact scenarios json roster size accept purity duplicated deny \
         android android-build android-kotlin android-decides android-app android-instrumented android-test android-converge android-accept android-release unwired unreached aside \
-        build release install install-chord scratch demo smoke tasks clean distclean
+        build release install install-chord scratch demo smoke tasks clean distclean check-macos
 
 ## help: list these commands
 help:
@@ -400,6 +400,21 @@ deny:
 	  || { echo 'cargo-deny is not installed — run: make setup'; exit 1; }
 	$(CARGO) deny check
 
+## check-macos: type-check the whole workspace for an Apple-silicon Mac
+#
+# From Linux, so a Mac round trip is not spent on a compile error
+# (it-runs-on-a-mac D7). `cargo check` links nothing, so only the C in build
+# scripts needs a compiler, and zig provides one with the macOS headers. This
+# cannot find a link error, a missing framework, or anything at run time;
+# that is what `capture doctor` on the Mac is for.
+check-macos:
+	@command -v zig >/dev/null 2>&1 \
+	  || { echo 'zig is not installed — it is the C compiler this check uses'; exit 1; }
+	@rustup target list --installed | grep -qx aarch64-apple-darwin \
+	  || rustup target add aarch64-apple-darwin
+	CC_aarch64_apple_darwin=$(CURDIR)/tools/zigcc-macos AR_aarch64_apple_darwin="zig ar" \
+	  $(CARGO) check --workspace --all-targets --target aarch64-apple-darwin
+
 # ----------------------------------------------------------------- build ----
 
 ## build: debug binaries
@@ -531,6 +546,11 @@ smoke: build
 	 $$B edit smoke-notes 'the person edits first' >/dev/null || fail 'person edit'; \
 	 [ "$$(code env CAPTURE_AS=smoke-bot $$B edit smoke-notes --expect $$v -- stale)" = 4 ] || fail 'stale expect not refused'; \
 	 $$B show smoke-notes | grep -q 'the person edits first' || fail 'stale edit wrote'; \
+	 echo '--- doctor speaks in codes, and the store checks pass'; \
+	 doc=$$(CAPTURE_SILENT=1 $$B doctor) || fail 'doctor'; \
+	 for c in B1 B2 B3; do echo "$$doc" | grep -q "^$$c pass: " || fail "doctor: $$c did not pass"; done; \
+	 echo "$$doc" | grep -vqE '^[A-Z][0-9] (pass|fail|skip): [a-z0-9 ,()-]+$$' && fail "doctor printed a line that is not a code"; \
+	 echo "$$doc" | grep -q 'smoke-notes\|person edits' && fail 'doctor printed note text'; \
 	 echo; echo 'smoke: passed'
 	@rm -rf $(SCRATCH)
 

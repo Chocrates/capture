@@ -26,6 +26,7 @@ pub mod hotkey;
 pub mod identity;
 pub mod incremental;
 pub mod latency;
+pub mod launchd;
 pub mod lock;
 pub mod log;
 pub mod mutate;

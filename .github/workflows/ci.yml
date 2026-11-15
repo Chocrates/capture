@@ -2,8 +2,16 @@ name: ci
 
 # The cross-platform claims in this project are not verifiable from one machine.
 # "The same logical event encodes identically on two platforms" is a statement
-# about two platforms, and the golden vectors (task 2.10) are only enforcement if
-# something actually runs them somewhere else.
+# about two platforms, and the golden vectors are only enforcement if something
+# actually runs them somewhere else.
+#
+# Three jobs:
+#   linux         every gate `make ci` runs locally, on the platform it was written on
+#   macos         the workspace suite on Apple silicon
+#   macos-build   release binaries for a Mac that cannot build them itself
+#                 (it-runs-on-a-mac), as a downloadable artifact. Independent of
+#                 the tests, so a failing Mac test does not withhold the binaries
+#                 that would show what fails.
 
 on:
   push:
@@ -12,82 +20,61 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Nothing in CI should post a desktop notification.
+  CAPTURE_SILENT: "1"
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  linux:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features
+      - name: System libraries and the shells the terminal tests drive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev \
+            librsvg2-dev pkg-config zsh sqlite3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: make ci
+
+  macos:
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  terminal:
-    # The capture chord's claim — that the raw line is read before the shell
-    # parses it — is only checkable against a real interactive shell on a real
-    # terminal. Linux only: the assertion is about bash and zsh behaviour, and
-    # macOS ships bash 3.2, which would be testing a different program.
-    runs-on: ubuntu-latest
+  macos-build:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y zsh
-      - run: cargo test -p capture-cli --test pty -- --ignored --test-threads=1
-      - run: cargo test -p capture-cli --test tamper -- --ignored --test-threads=1
-      - run: cargo test -p capture-cli --test roundtrip -- --ignored --test-threads=1
-      - run: cargo test -p capture-cli --test spool -- --ignored --test-threads=1
-      - run: cargo test -p capture-cli --test scenarios -- --ignored --test-threads=1
-
-  purity:
-    # The three-layer boundary from DESIGN.md D12. no_std makes a clock
-    # unnameable; these check the layers the type system does not cover.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: capture-core builds without std
-        run: cargo build -p capture-core
-
-      - name: capture-core dependency tree is clean
+      - run: cargo build --release -p capture-cli -p capture-overlay -p capture-syncd -p capture-desktop
+      - name: Package
+        # A tarball, because an artifact is a zip and a zip drops the
+        # executable bit.
         run: |
-          tree=$(cargo tree -p capture-core -e normal)
-          fail=0
-          for crate in tokio rusqlite getrandom jiff serde_cbor; do
-            if grep -qE "[[:space:]]$crate v" <<<"$tree"; then
-              echo "::error::$crate must not be a dependency of capture-core"
-              fail=1
-            fi
-          done
-          exit $fail
-
-      - name: a clock cannot be reached from capture-core
-        # Guards the property directly rather than trusting that no_std stays on.
-        run: |
-          cp crates/capture-core/src/lib.rs /tmp/lib.rs.bak
-          echo 'pub fn _probe() -> std::time::SystemTime { std::time::SystemTime::now() }' \
-            >> crates/capture-core/src/lib.rs
-          if cargo build -p capture-core 2>/dev/null; then
-            echo "::error::capture-core compiled a std::time reference; the purity boundary is off"
-            cp /tmp/lib.rs.bak crates/capture-core/src/lib.rs
-            exit 1
-          fi
-          cp /tmp/lib.rs.bak crates/capture-core/src/lib.rs
-          echo "purity boundary holds"
-
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+          mkdir -p dist/capture-macos-arm64
+          cp target/release/capture target/release/capture-overlay \
+             target/release/capture-syncd target/release/capture-desktop \
+             dist/capture-macos-arm64/
+          cp docs/macos-test.md docs/doctor-codes.md dist/capture-macos-arm64/
+          tar -C dist -czf capture-macos-arm64.tar.gz capture-macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capture-macos-arm64
+          path: capture-macos-arm64.tar.gz
+          retention-days: 30

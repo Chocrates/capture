@@ -12,6 +12,7 @@
 //! launch is one that cannot be told to stop.
 
 mod autostart;
+mod carbon;
 mod due;
 mod gnome;
 mod intents;
@@ -102,11 +103,17 @@ fn run() -> Result<()> {
     match hotkey::select(&hotkey::Host) {
         Mechanism::X11 => {
             let held = fired.clone();
-            x11::hold(&DEFAULT_CHORD, move || held())?;
+            registered(&paths, x11::hold(&DEFAULT_CHORD, move || held()))?;
         }
         Mechanism::Portal => {
             let held = fired.clone();
-            portal::hold(&DEFAULT_CHORD, move || held())?;
+            registered(&paths, portal::hold(&DEFAULT_CHORD, move || held()))?;
+        }
+        // On the main thread, before the window: the manager has to be made
+        // here, and the window's event loop is what delivers its events.
+        Mechanism::MacCarbon => {
+            let held = fired.clone();
+            registered(&paths, carbon::hold(&DEFAULT_CHORD, move || held()))?;
         }
         // The chord arrives on the socket instead, from the client the desktop
         // spawns. Nothing to start here.
@@ -196,8 +203,13 @@ fn enable_autostart() -> Result<()> {
     println!("to reveal it. About 30 MB of memory, and no measurable processor");
     println!("time while it waits.");
     println!();
-    println!("Start it now without logging out:");
-    println!("  capture-overlay --run &");
+    if cfg!(target_os = "macos") {
+        // RunAtLoad: launchd started it when the agent was loaded.
+        println!("launchd has started it already.");
+    } else {
+        println!("Start it now without logging out:");
+        println!("  capture-overlay --run &");
+    }
     Ok(())
 }
 
@@ -240,7 +252,10 @@ fn register() -> Result<()> {
     match mechanism {
         Mechanism::Gnome => {
             let command = client_command();
-            let r = gnome::register(&gnome::Gsettings, &DEFAULT_CHORD, &command)?;
+            let r = registered(
+                &paths()?,
+                gnome::register(&gnome::Gsettings, &DEFAULT_CHORD, &command),
+            )?;
             println!("registered {} via {}", r.binding, mechanism.name());
             println!("  runs: {}", r.command);
             if let Some(conflict) = &r.conflict {
@@ -295,11 +310,39 @@ fn register() -> Result<()> {
             println!();
             confirm(&paths()?)
         }
+        // Like X11: held by the running overlay, nothing written anywhere.
+        // No permission dialog, by design — which is why it is this API.
+        Mechanism::MacCarbon => {
+            println!(
+                "registered {} via {}",
+                DEFAULT_CHORD.human(),
+                mechanism.name()
+            );
+            println!("  held by the overlay itself; no permission is asked for");
+            println!();
+            println!("It lasts as long as the overlay runs. Start it at login with:");
+            println!("  capture-overlay --autostart");
+            println!();
+            confirm(&paths()?)
+        }
         Mechanism::None => {
             no_mechanism();
             Ok(())
         }
     }
+}
+
+/// Record whether registering the chord worked, for `capture doctor` (H2),
+/// and pass the result on. Best-effort: a store that cannot record it must
+/// not stop the chord.
+fn registered<T>(paths: &StorePaths, r: Result<T>) -> Result<T> {
+    if let Ok(ops) = capture_store::ops::Ops::open(&paths.ops) {
+        let _ = ops.set(
+            hotkey::REGISTRATION,
+            if r.is_ok() { "ok" } else { "failed" },
+        );
+    }
+    r
 }
 
 fn unregister() -> Result<()> {

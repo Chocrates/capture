@@ -49,11 +49,23 @@ use std::process::Command;
 /// Every mechanism below has its own syntax for it, and each translation is a
 /// chance for them to drift apart — after which the interface reports one chord
 /// and the desktop listens for another.
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_CHORD: Chord = Chord {
     ctrl: true,
     alt: false,
     shift: false,
     super_: true,
+    key: "space",
+};
+
+/// On a Mac, ⌥Space (it-runs-on-a-mac D1). ⌘Space is Spotlight's, and macOS
+/// consumes it before any handler sees it.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_CHORD: Chord = Chord {
+    ctrl: false,
+    alt: true,
+    shift: false,
+    super_: false,
     key: "space",
 };
 
@@ -123,7 +135,12 @@ impl Chord {
             parts.push("Ctrl");
         }
         if self.alt {
-            parts.push("Alt");
+            // The key is labelled Option on a Mac.
+            parts.push(if cfg!(target_os = "macos") {
+                "Option"
+            } else {
+                "Alt"
+            });
         }
         if self.shift {
             parts.push("Shift");
@@ -139,6 +156,10 @@ impl Chord {
     }
 }
 
+/// The `ops.db` key the overlay records its last registration in: `ok` or
+/// `failed`. `capture doctor` reads it as H2.
+pub const REGISTRATION: &str = "chord.registration";
+
 /// How the chord gets registered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mechanism {
@@ -148,6 +169,9 @@ pub enum Mechanism {
     Gnome,
     /// An X11 grab, under a real X11 session.
     X11,
+    /// Carbon's `RegisterEventHotKey`, on a Mac: the one global-hotkey API
+    /// there that needs no privacy grant (it-runs-on-a-mac D1).
+    MacCarbon,
     /// Nothing on this desktop can register a global chord.
     None,
 }
@@ -159,6 +183,7 @@ impl Mechanism {
             Mechanism::Portal => "desktop portal",
             Mechanism::Gnome => "GNOME keybinding",
             Mechanism::X11 => "X11 grab",
+            Mechanism::MacCarbon => "Carbon hotkey",
             Mechanism::None => "none",
         }
     }
@@ -177,10 +202,18 @@ pub trait Session {
     fn has_global_shortcuts_portal(&self) -> bool;
     /// Whether `gsettings` can be run.
     fn has_gsettings(&self) -> bool;
+    /// Whether this is a Mac.
+    fn is_macos(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
 }
 
 /// Pick the best mechanism this session actually supports.
 pub fn select(s: &dyn Session) -> Mechanism {
+    // First on a Mac, and the only choice there: nothing below exists on one.
+    if s.is_macos() {
+        return Mechanism::MacCarbon;
+    }
     if s.has_global_shortcuts_portal() {
         return Mechanism::Portal;
     }
@@ -276,6 +309,53 @@ mod tests {
         }
         fn has_gsettings(&self) -> bool {
             self.gsettings
+        }
+        // A Linux desktop, whatever this test runs on.
+        fn is_macos(&self) -> bool {
+            false
+        }
+    }
+
+    /// A Mac, which also reports a portal and gsettings, to show neither is
+    /// asked once the platform is known.
+    struct Mac;
+
+    impl Session for Mac {
+        fn session_type(&self) -> Option<String> {
+            None
+        }
+        fn desktop(&self) -> Option<String> {
+            None
+        }
+        fn has_global_shortcuts_portal(&self) -> bool {
+            true
+        }
+        fn has_gsettings(&self) -> bool {
+            true
+        }
+        fn is_macos(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_mac_uses_carbon_and_nothing_else() {
+        assert_eq!(select(&Mac), Mechanism::MacCarbon);
+        // And a Linux desktop never does, portal or not.
+        assert_ne!(select(&target()), Mechanism::MacCarbon);
+    }
+
+    #[test]
+    fn the_default_chord_on_a_mac_is_option_space() {
+        // Spotlight owns Cmd-Space and macOS consumes it first.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                (DEFAULT_CHORD.alt, DEFAULT_CHORD.super_, DEFAULT_CHORD.ctrl),
+                (true, false, false)
+            );
+            assert_eq!(DEFAULT_CHORD.human(), "Option-Space");
+        } else {
+            assert_eq!(DEFAULT_CHORD.human(), "Ctrl-Super-Space");
         }
     }
 

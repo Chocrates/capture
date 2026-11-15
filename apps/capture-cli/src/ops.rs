@@ -392,13 +392,7 @@ pub fn status(paths: &StorePaths) -> Result<()> {
     // `ops`. A device paired and never yet dialled has a roster entry and no
     // `peer_state` row, and that is exactly the case worth reporting — asking
     // `ops` would answer it with silence.
-    let identity_now = capture_store::identity::Identity::load(paths)?;
-    let me_now = identity_now.public().to_bytes();
-    let others = roster_now(paths)?
-        .keys
-        .iter()
-        .filter(|k| **k != me_now)
-        .count();
+    let others = paired_others(paths)?;
 
     // Whether sync is running at all, before any peer is described.
     //
@@ -650,12 +644,29 @@ pub fn status(paths: &StorePaths) -> Result<()> {
 /// does. A surface reading it would have reported an empty roster on a device
 /// that had never ingested from a peer, which is every device until the first
 /// sync.
+/// How many other devices are paired, from the roster.
+pub fn paired_others(paths: &StorePaths) -> Result<usize> {
+    let me = capture_store::identity::Identity::load(paths)?
+        .public()
+        .to_bytes();
+    Ok(roster_now(paths)?.keys.iter().filter(|k| **k != me).count())
+}
+
 fn roster_now(paths: &StorePaths) -> Result<capture_core::roster::Roster> {
     let log = capture_store::log::Log::open_read(&paths.events)?;
     Ok(capture_core::roster::build(&log.all()?))
 }
 
 /// Every device in the roster, and when this one last reached it.
+/// Remember an address for sync to try. Device-local: it never enters the log,
+/// so it is not sent to any other device.
+pub fn peers_add(paths: &StorePaths, addr: &str) -> Result<()> {
+    Ops::open(&paths.ops)?.give_address(addr)?;
+    say!("Sync will try {addr} each round.");
+    say!("Whose it is is learned when it first answers.");
+    Ok(())
+}
+
 pub fn peers(paths: &StorePaths, json: bool) -> Result<()> {
     // Read-only. This command reads and the §8.8 rule is that reads go direct;
     // holding a writable handle to answer a question about peers is that rule

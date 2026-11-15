@@ -58,26 +58,8 @@ const SHOW: &[u8] = b"show\n";
 const MAX_SOCKET_PATH: usize = 100;
 
 /// Where the overlay listens for a given store.
-///
-/// In the session's runtime directory, named from the store it belongs to, so
-/// that two stores get two overlays and neither depends on how deeply the store
-/// itself happens to be nested.
 pub fn path(root: &Path) -> PathBuf {
-    let name = format!("capture-{}.sock", tag(root));
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
-        // No runtime directory. Falling back to the store keeps the overlay
-        // working where one is not set, and `bind` reports the length problem
-        // in words if the path turns out to be too long.
-        _ => root.join("capture.sock"),
-    }
-}
-
-/// A short, stable name for a store path.
-fn tag(root: &Path) -> String {
-    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let h = capture_core::id::BodyHash::of(canonical.as_os_str().as_encoded_bytes());
-    h.0[..4].iter().map(|b| format!("{b:02x}")).collect()
+    capture_store::paths::overlay_socket(root)
 }
 
 /// Ask a running overlay to show itself.

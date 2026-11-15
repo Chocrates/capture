@@ -53,6 +53,29 @@ struct Fault {
 
 /// Check every event in the log.
 pub fn run(paths: &StorePaths, json: bool) -> Result<()> {
+    let found = examine(paths)?;
+    let failed = found.faults.len();
+    answer(&found, json);
+
+    if failed == 0 {
+        Ok(())
+    } else {
+        // Its own exit code. A damaged archive is not a mistyped command, and a
+        // script that cannot tell them apart will treat both as retryable.
+        Err(Error::Integrity(format!(
+            "{failed} event(s) failed verification"
+        )))
+    }
+}
+
+/// How many events fail verification, for `capture doctor`, which says only
+/// whether any do.
+pub fn faults(paths: &StorePaths) -> Result<usize> {
+    Ok(examine(paths)?.faults.len())
+}
+
+/// The pass over the log, printing nothing.
+fn examine(paths: &StorePaths) -> Result<Verified> {
     if !store::exists(paths) {
         return Err(Error::StoreMissing(paths.root.clone()));
     }
@@ -158,27 +181,13 @@ pub fn run(paths: &StorePaths, json: bool) -> Result<()> {
 
     let refused = Ops::open_read(&paths.ops)?.rejected_total()?;
 
-    let failed = faults.len();
-    answer(
-        &Verified {
-            checked: rows.len(),
-            faults,
-            redacted,
-            unverifiable,
-            refused,
-        },
-        json,
-    );
-
-    if failed == 0 {
-        Ok(())
-    } else {
-        // Its own exit code. A damaged archive is not a mistyped command, and a
-        // script that cannot tell them apart will treat both as retryable.
-        Err(Error::Integrity(format!(
-            "{failed} event(s) failed verification"
-        )))
-    }
+    Ok(Verified {
+        checked: rows.len(),
+        faults,
+        redacted,
+        unverifiable,
+        refused,
+    })
 }
 
 /// What a pass over the log found.
