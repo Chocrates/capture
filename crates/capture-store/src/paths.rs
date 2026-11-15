@@ -125,6 +125,18 @@ fn home_dir() -> Option<PathBuf> {
 /// `capture doctor` asks the same address the overlay binds.
 pub fn overlay_socket(root: &Path) -> PathBuf {
     let name = format!("capture-{}.sock", socket_tag(root));
+    // A Mac has no runtime directory. Not `$TMPDIR`: a LaunchAgent need not
+    // have it, and the overlay launchd starts and the `capture` typed in a
+    // terminal must arrive at the same path. `HOME` both have, and
+    // `~/Library/Caches` is the person's own and short enough for the
+    // 104-byte limit macOS puts on a socket path.
+    if cfg!(target_os = "macos")
+        && let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty())
+    {
+        let dir = PathBuf::from(home).join("Library/Caches/capture");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join(name);
+    }
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
         // No runtime directory. Falling back to the store keeps the overlay

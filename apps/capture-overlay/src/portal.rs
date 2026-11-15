@@ -306,7 +306,9 @@ fn variant(e: impl std::fmt::Display) -> Error {
     ))
 }
 
-#[cfg(test)]
+// Linux mechanisms, never selected on a Mac, where the default chord is
+// a different one and these assertions are about this one.
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
     use capture_store::hotkey::DEFAULT_CHORD;
