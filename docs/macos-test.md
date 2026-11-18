@@ -142,7 +142,19 @@ them that is not fixed text is an Apple error number.
 | `A4 fail: error …` | the post was refused; read the number back |
 | `A5 pass: in Notification Center` | macOS took the alert |
 | `A6 info: now: …, style …` | its settings after; `style alerts` keeps them on screen until clicked |
-| `A7 pass: seen` / `A7 fail: not seen` | what you saw |
+| `A7 pass: seen` / `A7 fail: not seen` | whether a banner appeared on screen |
+
+If A5 passes and A7 fails, macOS took the alert and kept it off the screen.
+Check Focus (Control Centre) first: banners are held during a Focus and still
+filed in Notification Center. Then:
+
+```sh
+~/Applications/Capture\ Alerts.app/Contents/MacOS/capture-alerts --later
+```
+
+It posts the test alert for five seconds from now and exits at once, so the
+alert arrives while the app is not running. Read back the `A8` line and
+whether a banner appeared.
 
 If the `open` showed nothing at all, its own lines are in
 `~/Library/Logs/capture-alerts.txt` (`cat` it; same codes). For alerts that

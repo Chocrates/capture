@@ -45,6 +45,7 @@
 - [x] 4.4 `install.sh` in the CI download installs what is beside it and builds nothing (no cargo or Xcode tools needed); it clears quarantine and puts `Capture Alerts.app` in `~/Applications`. Test: `a_download_installs_what_it_holds_and_builds_nothing`; two sabotages caught.
 - [x] 4.5 `Capture Alerts.app` probe (D9): bundle, ad-hoc signature, `--probe`/`--settings`, codes A1–A7; CI builds and bundles it and runs `--settings` on the runner; `docs/macos-test.md` §3a. Type-checks for aarch64-apple-darwin; not yet run on a Mac.
 - [ ] 4.6 The person runs §3a on the work Mac and reads back the A lines.
+  - Round 1, 2026-11-18: `open` showed the permission prompt; no log file was left. `--probe`: A1 pass, A2 before allowed, A3 allowed, A4 posted, A5 in Notification Center, A6 allowed / banners / alerts on / sound on, A7 not seen. So a self-signed app may post, and macOS files the alert, but no banner. Suspects: Focus, or the app counting as frontmost when started from a terminal (no `willPresent` delegate). Added the delegate and `--later` (posted 5 s ahead, app gone when it arrives).
 - [ ] 4.7 If A7 passes: alerts go through the app, delivery confirmed by the delivered list, `osascript` dropped, doctor N checks moved to it. If not: the overlay draws the alert itself. Either way `osascript`'s exit 0 stops counting as delivered.
 
 ## 5. Verification

@@ -22,8 +22,9 @@ fn main() -> std::process::ExitCode {
         None => Mode::Opened,
         Some("--probe") => Mode::Probe,
         Some("--settings") => Mode::Settings,
+        Some("--later") => Mode::Later,
         Some(_) => {
-            eprintln!("usage: capture-alerts [--probe | --settings]");
+            eprintln!("usage: capture-alerts [--probe | --later | --settings]");
             return std::process::ExitCode::from(2);
         }
     };
@@ -41,6 +42,10 @@ enum Mode {
     Probe,
     /// Reads the settings and asks nothing. Safe anywhere, CI included.
     Settings,
+    /// Posts the test alert for five seconds from now and exits at once, so
+    /// it arrives while the app is not running and cannot count as the one
+    /// in front. How a real alert, scheduled ahead, would arrive.
+    Later,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -71,12 +76,16 @@ fn run(mode: Mode) -> std::process::ExitCode {
 mod mac {
     use super::Mode;
     use block2::RcBlock;
-    use objc2::runtime::Bool;
-    use objc2_foundation::{NSBundle, NSError, NSString};
+    use objc2::rc::Retained;
+    use objc2::runtime::{Bool, ProtocolObject};
+    use objc2::{AllocAnyThread, define_class, msg_send};
+    use objc2_foundation::{NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_user_notifications::{
         UNAlertStyle, UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
-        UNNotification, UNNotificationRequest, UNNotificationSetting, UNNotificationSettings,
-        UNNotificationSound, UNUserNotificationCenter,
+        UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
+        UNNotificationSetting, UNNotificationSettings, UNNotificationSound,
+        UNTimeIntervalNotificationTrigger, UNUserNotificationCenter,
+        UNUserNotificationCenterDelegate,
     };
     use std::ptr::NonNull;
     use std::sync::mpsc;
@@ -90,6 +99,41 @@ mod mac {
     /// permission prompt is a person reading a dialog, so it gets longer.
     const ANSWER: Duration = Duration::from_secs(10);
     const PROMPT: Duration = Duration::from_secs(120);
+
+    define_class!(
+        /// Asked by macOS what to do with an alert that arrives while this
+        /// app is the one in front, which is what a process started from a
+        /// terminal counts as. With no answer the banner is not shown: filed
+        /// in Notification Center and nothing on screen (first probe on the
+        /// work Mac: A5 pass, A7 fail).
+        #[unsafe(super(NSObject))]
+        #[name = "CaptureAlertsShowAnyway"]
+        struct ShowAnyway;
+
+        unsafe impl NSObjectProtocol for ShowAnyway {}
+
+        unsafe impl UNUserNotificationCenterDelegate for ShowAnyway {
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                handler.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,));
+            }
+        }
+    );
+
+    impl ShowAnyway {
+        fn new() -> Retained<Self> {
+            let this = Self::alloc().set_ivars(());
+            // SAFETY: NSObject's init, on an object just allocated.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
 
     pub fn probe(mode: Mode) -> Vec<String> {
         let mut out = Vec::new();
@@ -106,6 +150,9 @@ mod mac {
         out.push("A1 pass: inside the app".into());
 
         let center = UNUserNotificationCenter::currentNotificationCenter();
+        // The delegate is a weak property, so it is held here for the run.
+        let shows = ShowAnyway::new();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*shows)));
 
         let before = settings(&center);
         out.push(match before {
@@ -113,9 +160,17 @@ mod mac {
             None => "A2 fail: no answer about settings".into(),
         });
 
+        if mode == Mode::Later {
+            out.push(match post(&center, Some(5.0)) {
+                l if l.contains(" pass: ") => "A8 pass: posted for 5 seconds from now".into(),
+                l => l.replacen("A4", "A8", 1),
+            });
+            return out;
+        }
+
         if mode != Mode::Settings {
             out.push(ask(&center));
-            out.push(post(&center));
+            out.push(post(&center, None));
             // Delivered is the daemon's word that it took it. Not the same as
             // seen, which only the person can say.
             std::thread::sleep(Duration::from_secs(2));
@@ -184,17 +239,19 @@ mod mac {
         }
     }
 
-    fn post(center: &UNUserNotificationCenter) -> String {
+    fn post(center: &UNUserNotificationCenter, after: Option<f64>) -> String {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str("capture"));
         content.setBody(&NSString::from_str(
             "Test alert. If you can read this, it works.",
         ));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let trigger = after
+            .map(|s| UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(s, false));
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(PROBE_ID),
             &content,
-            None,
+            trigger.as_deref().map(|t| &**t),
         );
         let (tx, rx) = mpsc::channel();
         let block = RcBlock::new(move |err: *mut NSError| {
@@ -231,7 +288,10 @@ mod mac {
 
     fn seen() -> String {
         use std::io::{BufRead, Write};
-        print!("Did a notification saying \"capture — Test alert\" appear? [y/n] ");
+        print!(
+            "Did a banner saying \"capture — Test alert\" appear on screen? \
+             (Not just in Notification Center.) [y/n] "
+        );
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
