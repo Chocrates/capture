@@ -1,10 +1,11 @@
 //! `Capture Alerts.app`: capture's own name in Notification Center
 //! (it-runs-on-a-mac D9).
 //!
-//! For now only the probe, which answers one question on the person's Mac: does
-//! macOS, and whoever manages that Mac, let a self-signed app post alerts at
-//! all? Nothing else is worth building until that is known, and only that
-//! machine can say.
+//! `--say <title> <body>` posts one alert for the overlay, and says by its
+//! exit code whether Notification Center holds it.
+//!
+//! The probe answers what only the person's Mac can: does macOS, and whoever
+//! manages that Mac, let a self-signed app post alerts, and are they seen?
 //!
 //! ```text
 //! open ~/Applications/Capture\ Alerts.app          first launch: asks permission
@@ -23,8 +24,11 @@ fn main() -> std::process::ExitCode {
         Some("--probe") => Mode::Probe,
         Some("--settings") => Mode::Settings,
         Some("--later") => Mode::Later,
+        Some("--say") if args.len() == 3 => return say(&args[1], &args[2]),
         Some(_) => {
-            eprintln!("usage: capture-alerts [--probe | --later | --settings]");
+            eprintln!(
+                "usage: capture-alerts [--probe | --later | --settings | --say <title> <body>]"
+            );
             return std::process::ExitCode::from(2);
         }
     };
@@ -46,6 +50,16 @@ enum Mode {
     /// it arrives while the app is not running and cannot count as the one
     /// in front. How a real alert, scheduled ahead, would arrive.
     Later,
+}
+
+#[cfg(target_os = "macos")]
+fn say(title: &str, body: &str) -> std::process::ExitCode {
+    mac::say(title, body)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn say(_title: &str, _body: &str) -> std::process::ExitCode {
+    std::process::ExitCode::from(2)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -240,16 +254,44 @@ mod mac {
     }
 
     fn post(center: &UNUserNotificationCenter, after: Option<f64>) -> String {
-        let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str("capture"));
-        content.setBody(&NSString::from_str(
+        match add(
+            center,
+            PROBE_ID,
+            "capture",
             "Test alert. If you can read this, it works.",
-        ));
+            after,
+        ) {
+            Some(None) => "A4 pass: posted".into(),
+            Some(Some(c)) => format!("A4 fail: error {c}"),
+            None => "A4 fail: no answer".into(),
+        }
+    }
+
+    fn listed(center: &UNUserNotificationCenter) -> String {
+        match delivered(center, PROBE_ID) {
+            Some(true) => "A5 pass: in Notification Center".into(),
+            Some(false) => "A5 fail: not in Notification Center".into(),
+            None => "A5 fail: no answer".into(),
+        }
+    }
+
+    /// Post one alert. `None` if the daemon never answered, `Some(None)` if
+    /// it took it, `Some(Some(code))` if it refused.
+    fn add(
+        center: &UNUserNotificationCenter,
+        id: &str,
+        title: &str,
+        body: &str,
+        after: Option<f64>,
+    ) -> Option<Option<String>> {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
         let trigger = after
             .map(|s| UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(s, false));
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str(PROBE_ID),
+            &NSString::from_str(id),
             &content,
             trigger.as_deref().map(|t| &**t),
         );
@@ -259,14 +301,12 @@ mod mac {
             let _ = tx.send(unsafe { err.as_ref() }.map(error_code));
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&block));
-        match rx.recv_timeout(ANSWER) {
-            Ok(None) => "A4 pass: posted".into(),
-            Ok(Some(c)) => format!("A4 fail: error {c}"),
-            Err(_) => "A4 fail: no answer".into(),
-        }
+        rx.recv_timeout(ANSWER).ok()
     }
 
-    fn listed(center: &UNUserNotificationCenter) -> String {
+    /// Whether Notification Center holds the alert posted as `id`.
+    fn delivered(center: &UNUserNotificationCenter, id: &str) -> Option<bool> {
+        let id = id.to_string();
         let (tx, rx) = mpsc::channel();
         let block = RcBlock::new(
             move |all: NonNull<objc2_foundation::NSArray<UNNotification>>| {
@@ -274,16 +314,49 @@ mod mac {
                 let all = unsafe { all.as_ref() };
                 let ours = all
                     .iter()
-                    .any(|n| n.request().identifier().to_string() == PROBE_ID);
+                    .any(|n| n.request().identifier().to_string() == id);
                 let _ = tx.send(ours);
             },
         );
         center.getDeliveredNotificationsWithCompletionHandler(&block);
-        match rx.recv_timeout(ANSWER) {
-            Ok(true) => "A5 pass: in Notification Center".into(),
-            Ok(false) => "A5 fail: not in Notification Center".into(),
-            Err(_) => "A5 fail: no answer".into(),
+        rx.recv_timeout(ANSWER).ok()
+    }
+
+    /// One real alert, for `capture_store::notifier::notify`. Prints nothing:
+    /// the exit code is the answer. 0 when Notification Center holds it, 3
+    /// when this app is not allowed to post, 1 for anything else. Only 0
+    /// counts as said, so anything else is tried again later.
+    pub fn say(title: &str, body: &str) -> std::process::ExitCode {
+        use std::process::ExitCode;
+        let inside = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .is_some_and(|id| id.to_string() == "dev.capture.alerts");
+        if !inside {
+            return ExitCode::FAILURE;
         }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let shows = ShowAnyway::new();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*shows)));
+        match settings(&center) {
+            Some((UNAuthorizationStatus::Authorized | UNAuthorizationStatus::Provisional, ..)) => {}
+            Some(_) => return ExitCode::from(3),
+            None => return ExitCode::FAILURE,
+        }
+        // One process an alert, so the process id tells two alerts apart and
+        // one does not replace another.
+        let id = format!("dev.capture.alerts.{}", std::process::id());
+        if add(&center, &id, title, body, None) != Some(None) {
+            return ExitCode::FAILURE;
+        }
+        // Shown is not knowable; held is. Asked twice, since the daemon
+        // files it a moment after taking it.
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(500));
+            if delivered(&center, &id) == Some(true) {
+                return ExitCode::SUCCESS;
+            }
+        }
+        ExitCode::FAILURE
     }
 
     fn seen() -> String {

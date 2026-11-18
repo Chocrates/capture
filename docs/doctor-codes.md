@@ -55,14 +55,18 @@ behind is cleared by the next overlay to start. O3: `capture-overlay
 
 | Code | Checks | Reasons |
 |------|--------|---------|
-| N1 | the notifier program is installed (`notify-send`, `osascript` on a Mac) | `notifier present` · `notifier missing` |
+| N1 | the notifier is installed (`notify-send`; on a Mac, Capture Alerts.app) | `notifier present` · `notifier missing` · `alert app present` · `no alert app, osascript cannot confirm` |
 | N2 | a test notification was sent | `sent` · `refused` · `silenced` · `no notifier` |
 | N3 | the person saw it (`--ask` only) | `seen` · `not seen` · `not asked` · `nothing was sent` |
 
 **What a failure means.** N1: install the notifier, or nothing can be said.
-N2 `refused`: the program ran and failed; on a Mac, management may block
-`osascript`. N3 `not seen` with N2 `sent`: notifications are switched off for
-the sender (on a Mac, Script Editor in System Settings → Notifications).
+On a Mac, `no alert app` means `~/Applications/Capture Alerts.app` is missing
+and alerts fall back to `osascript`, which reports sent whether or not
+anything appeared; run `install.sh` again. N2 `sent` on a Mac with the app
+means Notification Center holds it; `refused` means it is not allowed to post
+or was not filed (System Settings → Notifications → Capture Alerts). N3 `not
+seen` with N2 `sent`: the alert was filed but not shown, most often a Focus
+or Do Not Disturb (allow Capture Alerts under Focus → Allowed Notifications).
 `silenced` means `CAPTURE_SILENT` is set.
 
 ## Desktop window

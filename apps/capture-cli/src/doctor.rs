@@ -192,8 +192,17 @@ fn overlay_checks(paths: &StorePaths, out: &mut Vec<Line>) {
 }
 
 fn notifier_checks(ask: bool, out: &mut Vec<Line>) {
-    let present = on_path(capture_store::notifier::NOTIFIER);
-    out.push(if present {
+    // On a Mac, alerts go through Capture Alerts.app when it is installed
+    // (it-runs-on-a-mac D9). Without it they fall back to osascript, which
+    // cannot say whether anything appeared, so that is a fail even though
+    // something may still be sent.
+    let app = capture_store::notifier::alert_app_here().is_some();
+    let present = app || on_path(capture_store::notifier::NOTIFIER);
+    out.push(if app {
+        line("N1", Pass, "alert app present")
+    } else if cfg!(target_os = "macos") && present {
+        line("N1", Fail, "no alert app, osascript cannot confirm")
+    } else if present {
         line("N1", Pass, "notifier present")
     } else {
         line("N1", Fail, "notifier missing")

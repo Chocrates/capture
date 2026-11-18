@@ -228,6 +228,49 @@ pub const NOTIFIER: &str = if cfg!(target_os = "macos") {
     "notify-send"
 };
 
+/// Capture Alerts.app's program, if it is installed (it-runs-on-a-mac D9):
+/// `~/Applications` first, where `install.sh` puts it, then `/Applications`.
+///
+/// On a Mac with it, alerts go through it rather than `osascript`. It posts
+/// under capture's own name and exits 0 only once Notification Center holds
+/// the alert, where `display notification` exits 0 whether anything appeared
+/// or not, which on the work Mac marked every alert said and showed none.
+pub fn alert_app(home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    const INNER: &str = "Capture Alerts.app/Contents/MacOS/capture-alerts";
+    home.map(|h| h.join("Applications").join(INNER))
+        .into_iter()
+        .chain([std::path::Path::new("/Applications").join(INNER)])
+        .find(|p| p.is_file())
+}
+
+/// [`alert_app`] for this person, from `HOME`. Always `None` off a Mac.
+pub fn alert_app_here() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    alert_app(
+        std::env::var_os("HOME")
+            .as_deref()
+            .map(std::path::Path::new),
+    )
+}
+
+/// What [`notify`] runs: the alert app when there is one, else [`NOTIFIER`].
+fn route(
+    mac: bool,
+    app: Option<std::path::PathBuf>,
+    summary: &str,
+    body: &str,
+) -> (String, Vec<String>) {
+    match app {
+        Some(app) if mac => (
+            app.to_string_lossy().into_owned(),
+            ["--say", summary, body].map(String::from).to_vec(),
+        ),
+        _ => (NOTIFIER.to_string(), notifier_args(mac, summary, body)),
+    }
+}
+
 /// The arguments [`NOTIFIER`] takes for one notification.
 ///
 /// On a Mac the text goes in as `argv`, never into the script. A note saying
@@ -308,10 +351,8 @@ pub fn notify(summary: &str, body: &str) -> bool {
         return false;
     }
 
-    let sent = run_notifier(
-        NOTIFIER,
-        &notifier_args(cfg!(target_os = "macos"), summary, body),
-    );
+    let (program, args) = route(cfg!(target_os = "macos"), alert_app_here(), summary, body);
+    let sent = run_notifier(&program, &args);
 
     if !sent {
         // The fallback is not silence. An intent that fired and could not be
@@ -1203,6 +1244,50 @@ mod delivery {
             &notifier_args(true, "a", "b")
         ));
         let _ = std::fs::remove_dir_all(prog.parent().unwrap());
+    }
+
+    #[test]
+    fn a_mac_with_the_alert_app_uses_it_and_believes_only_its_exit() {
+        let home = std::env::temp_dir().join(format!("capture-alert-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(alert_app(Some(&home)), None, "nothing installed");
+        let inner = home.join("Applications/Capture Alerts.app/Contents/MacOS");
+        std::fs::create_dir_all(&inner).unwrap();
+        // Records its argv and exits as told by the file beside it, so one
+        // install can be held and refused in turn.
+        use std::os::unix::fs::PermissionsExt;
+        let app = inner.join("capture-alerts");
+        let log = home.join("argv");
+        let code = home.join("code");
+        std::fs::write(
+            &app,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nexit $(cat '{}')\n",
+                log.display(),
+                code.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(alert_app(Some(&home)), Some(app.clone()));
+
+        let (prog, args) = route(true, alert_app(Some(&home)), "capture", "dentist at 2");
+        assert_eq!(prog, app.to_string_lossy());
+        std::fs::write(&code, "0").unwrap();
+        assert!(run_notifier(&prog, &args), "held: said");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "--say\ncapture\ndentist at 2\n"
+        );
+        // Not allowed (3) or not held (1): not said, so tried again.
+        for refused in ["3", "1"] {
+            std::fs::write(&code, refused).unwrap();
+            assert!(!run_notifier(&prog, &args), "exit {refused}");
+        }
+        // Without the app, a Mac falls back to osascript; Linux never looks.
+        assert_eq!(route(true, None, "a", "b").0, NOTIFIER);
+        assert_eq!(route(false, Some(app), "a", "b").0, NOTIFIER);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

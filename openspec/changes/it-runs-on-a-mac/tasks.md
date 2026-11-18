@@ -46,6 +46,8 @@
 - [x] 4.5 `Capture Alerts.app` probe (D9): bundle, ad-hoc signature, `--probe`/`--settings`, codes A1–A7; CI builds and bundles it and runs `--settings` on the runner; `docs/macos-test.md` §3a. Type-checks for aarch64-apple-darwin; not yet run on a Mac.
 - [ ] 4.6 The person runs §3a on the work Mac and reads back the A lines.
   - Round 1, 2026-11-18: `open` showed the permission prompt; no log file was left. `--probe`: A1 pass, A2 before allowed, A3 allowed, A4 posted, A5 in Notification Center, A6 allowed / banners / alerts on / sound on, A7 not seen. So a self-signed app may post, and macOS files the alert, but no banner. Suspects: Focus, or the app counting as frontmost when started from a terminal (no `willPresent` delegate). Added the delegate and `--later` (posted 5 s ahead, app gone when it arrives).
+  - 2026-11-18, later: Do Not Disturb is stuck on there and the person could not find how to turn it off, which explains A7. A real capture ("onboarding at 10am") showed in the agenda with no alert: alerts still went through `osascript`, and its exit 0 spent the alert.
+- [x] 4.8 Alerts on a Mac go through the app when it is installed: `capture-alerts --say <title> <body>` exits 0 only once Notification Center holds the alert, 3 when not allowed; `notifier::notify` routes to it, `osascript` only without it. Doctor N1 says which. Test `a_mac_with_the_alert_app_uses_it_and_believes_only_its_exit`; sabotage caught. Not yet run on the Mac.
 - [ ] 4.7 If A7 passes: alerts go through the app, delivery confirmed by the delivered list, `osascript` dropped, doctor N checks moved to it. If not: the overlay draws the alert itself. Either way `osascript`'s exit 0 stops counting as delivered.
 
 ## 5. Verification
