@@ -38,8 +38,14 @@
 ## 4. Round trips on the work Mac
 
 - [ ] 4.1 Round 1: build, `make install`, `capture doctor --ask`; the person reads back the codes; record them here (codes only).
+  - 2026-11-16, CI binaries copied by hand: "it mostly works". The test notification was not seen (N3), as `osascript` never worked on that laptop. Exact codes not read back yet. `make install` not tried: it needs cargo, so a download could not use it (fixed in 4.4).
 - [ ] 4.2 Fix and repeat until B, H, O, N, D pass. Record each round's codes here.
 - [ ] 4.3 Real use for a week of work-day captures; whether to turn sync on stays the person's call.
+
+- [x] 4.4 `install.sh` in the CI download installs what is beside it and builds nothing (no cargo or Xcode tools needed); it clears quarantine and puts `Capture Alerts.app` in `~/Applications`. Test: `a_download_installs_what_it_holds_and_builds_nothing`; two sabotages caught.
+- [x] 4.5 `Capture Alerts.app` probe (D9): bundle, ad-hoc signature, `--probe`/`--settings`, codes A1–A7; CI builds and bundles it and runs `--settings` on the runner; `docs/macos-test.md` §3a. Type-checks for aarch64-apple-darwin; not yet run on a Mac.
+- [ ] 4.6 The person runs §3a on the work Mac and reads back the A lines.
+- [ ] 4.7 If A7 passes: alerts go through the app, delivery confirmed by the delivered list, `osascript` dropped, doctor N checks moved to it. If not: the overlay draws the alert itself. Either way `osascript`'s exit 0 stops counting as delivered.
 
 ## 5. Verification
 

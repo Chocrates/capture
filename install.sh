@@ -88,6 +88,25 @@ PLIST
 
 # ---------------------------------------------------------------- 1. build ---
 
+# Next to binaries already built (the download CI makes), install those and
+# build nothing: that Mac may have no Rust and no Xcode tools at all. In the
+# repository, Cargo.toml is beside this script and it builds as before.
+HERE=$(cd "$(dirname "$0")" && pwd)
+PREBUILT=0
+if [ ! -f "$HERE/Cargo.toml" ] && [ -x "$HERE/capture" ]; then
+    PREBUILT=1
+    RELEASE=$HERE
+fi
+
+if [ "$PREBUILT" = 1 ]; then
+step "Using the binaries in $HERE"
+WANT_DESKTOP=0
+[ -x "$RELEASE/capture-desktop" ] && WANT_DESKTOP=1
+if [ "$OS" = Darwin ]; then
+    # Downloaded, so quarantined; Gatekeeper would refuse each on first run.
+    xattr -dr com.apple.quarantine "$HERE" 2>/dev/null || true
+fi
+else
 step "Building"
 if ! command -v cargo >/dev/null 2>&1; then
     say "  cargo is not installed. https://rustup.rs"
@@ -116,6 +135,11 @@ cargo build --release -p capture-cli -p capture-overlay -p capture-syncd
 if [ "$WANT_DESKTOP" = 1 ]; then
     cargo build --release -p capture-desktop
 fi
+if [ "$OS" = Darwin ]; then
+    cargo build --release -p capture-alerts
+    "$HERE/tools/mac-bundle" "$RELEASE/capture-alerts" "$RELEASE" >/dev/null
+fi
+fi
 
 # ------------------------------------------------------------- 2. binaries ---
 
@@ -128,6 +152,14 @@ done
 if [ "$WANT_DESKTOP" = 1 ]; then
     install -m 755 "$RELEASE/capture-desktop" "$BIN/capture-desktop"
     say "  capture-desktop"
+fi
+# The alert app is an app, so it goes where apps go: Notification Center lists
+# it by name, and that is where its permission is kept.
+if [ "$OS" = Darwin ] && [ -d "$RELEASE/Capture Alerts.app" ]; then
+    mkdir -p "$HOME/Applications"
+    rm -rf "$HOME/Applications/Capture Alerts.app"
+    cp -R "$RELEASE/Capture Alerts.app" "$HOME/Applications/"
+    say "  Capture Alerts.app  (in ~/Applications)"
 fi
 
 case ":$PATH:" in

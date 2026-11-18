@@ -61,6 +61,31 @@ unsigned caller no way to read its notification permission.
 
 Rejected for now: `UNUserNotificationCenter` — it needs a signed bundle.
 
+### D9. Capture's own alert app, tried before it is used (added 2026-11-17)
+
+First round on the work Mac: no `osascript` notification was seen, as on that
+machine before. Worse, `display notification` exits 0 whether or not anything
+appears, so D3's "non-zero means not delivered" never fires: every alert was
+marked said and never retried.
+
+Chosen: `Capture Alerts.app` (`apps/capture-alerts`, bundle id
+`dev.capture.alerts`), built by CI, signed ad hoc (`tools/mac-bundle`), posting
+through `UNUserNotificationCenter`. It is listed under its own name in System
+Settings → Notifications, can be set to the Alerts style (stays until
+clicked), honours Focus and Do Not Disturb, and keeps missed alerts in
+Notification Center. Delivery can be confirmed: the delivered list either
+holds the request or not.
+
+Unknown, and only the Mac can answer: whether an ad-hoc-signed app may post,
+and whether management allows an unknown bundle. So the app is a probe first
+(`--probe`, codes A1–A7, fixed reasons as D6). Only if it is seen do alerts
+move onto it; if not, the fallback is capture drawing the alert itself, which
+nothing can block but which ignores Focus and leaves nothing in Notification
+Center.
+
+Rejected: an alert window first (above); `terminal-notifier` (a third-party
+app the work Mac may not allow); critical alerts (an Apple entitlement).
+
 ### D4. LaunchAgents, printed by default
 
 `capture-overlay --autostart` on macOS writes

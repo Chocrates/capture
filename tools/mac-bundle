@@ -1,0 +1,23 @@
+#!/bin/sh
+# Wrap the capture-alerts binary in `Capture Alerts.app` and sign it ad hoc.
+#
+#   tools/mac-bundle <capture-alerts binary> <directory to put the app in>
+#
+# Notification Center only takes alerts from an app bundle, and keys
+# permission to the bundle identifier, so the same identifier every build
+# keeps the person's "Allow". The ad-hoc signature is not a developer ID; it
+# is what macOS needs to run arm64 code at all.
+set -eu
+bin=$1
+out=$2
+here=$(cd "$(dirname "$0")/.." && pwd)
+app="$out/Capture Alerts.app"
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS"
+cp "$here/apps/capture-alerts/Info.plist" "$app/Contents/Info.plist"
+cp "$bin" "$app/Contents/MacOS/capture-alerts"
+chmod 755 "$app/Contents/MacOS/capture-alerts"
+if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$app"
+fi
+echo "$app"

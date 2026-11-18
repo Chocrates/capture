@@ -15,15 +15,19 @@ open the latest `ci` run and download the `capture-macos-arm64` artifact. Then:
 ```sh
 cd ~/Downloads
 unzip capture-macos-arm64.zip && tar -xzf capture-macos-arm64.tar.gz
-# Unsigned, so Gatekeeper would refuse them on first run:
-xattr -dr com.apple.quarantine capture-macos-arm64
-mkdir -p ~/.local/bin
-cp capture-macos-arm64/capture* ~/.local/bin/
-~/.local/bin/capture init
+cd capture-macos-arm64
+sh install.sh --with-chord
 ```
 
-If `~/.local/bin` is not on `PATH`, add `export PATH="$PATH:$HOME/.local/bin"`
-to `~/.zshrc`. Then go on to section 2.
+Run from the download, `install.sh` builds nothing: it clears the download's
+quarantine (unsigned, so Gatekeeper would refuse each program on first run),
+copies the programs to `~/.local/bin`, puts `Capture Alerts.app` in
+`~/Applications`, creates the store, and with `--with-chord` sets the overlay
+to start at login and asks for Option-Space. Leave `--with-chord` off to do
+those by hand (section 2).
+
+If `~/.local/bin` is not on `PATH`, it prints the line to add to `~/.zshrc`.
+Then go on to section 2.
 
 If management refuses to run them even so, read back `B0 blocked` (not a
 doctor code — just that `capture init` would not start).
@@ -106,6 +110,45 @@ The overlay is an accessory app: no Dock icon, no menu bar. Option-Space
 should bring a small window to the front of whatever is focused; Escape hides
 it. If it appears behind other windows, say so — that is a bug, not a setting.
 
+## 3a. Alerts: does this Mac let capture post them?
+
+`osascript` notifications are Script Editor's, and on a managed Mac they may
+never appear. `Capture Alerts.app` is capture's own app for alerts. Before
+alerts are moved onto it, this finds out whether macOS lets a self-signed app
+post at all. It posts one test notification and nothing else.
+
+```sh
+open ~/Applications/Capture\ Alerts.app
+```
+
+macOS should ask whether Capture Alerts may send notifications: **Allow**. A
+test notification should follow. Then, in a terminal:
+
+```sh
+~/Applications/Capture\ Alerts.app/Contents/MacOS/capture-alerts --probe
+```
+
+Answer y or n when it asks whether the notification appeared, and read back
+every line. Each is `CODE pass|fail|info: reason`; the only thing in any of
+them that is not fixed text is an Apple error number.
+
+| Line | Means |
+|------|-------|
+| `A1 fail: not inside Capture Alerts.app` | run from the wrong place; use the path above |
+| `A2 info: before: …` | what macOS had on record before this run |
+| `A3 pass: allowed` | permission granted |
+| `A3 fail: refused` | Allow not pressed, or turned off in System Settings → Notifications → Capture Alerts |
+| `A3 fail: refused, error …` | macOS or management refused the app itself; read the number back |
+| `A4 fail: error …` | the post was refused; read the number back |
+| `A5 pass: in Notification Center` | macOS took the alert |
+| `A6 info: now: …, style …` | its settings after; `style alerts` keeps them on screen until clicked |
+| `A7 pass: seen` / `A7 fail: not seen` | what you saw |
+
+If the `open` showed nothing at all, its own lines are in
+`~/Library/Logs/capture-alerts.txt` (`cat` it; same codes). For alerts that
+stay until dismissed, set System Settings → Notifications → Capture Alerts →
+style **Alerts**, and run `--probe` once more.
+
 ## 4. Sync, only if you decide to
 
 Sync opens a listening socket (TCP port 41822) and sends the archive to paired
@@ -142,6 +185,7 @@ capture-overlay --no-autostart
 rm -f ~/Library/LaunchAgents/dev.capture.*.plist
 rm -f ~/.local/bin/capture ~/.local/bin/capture-overlay \
       ~/.local/bin/capture-syncd ~/.local/bin/capture-desktop
+rm -rf ~/Applications/Capture\ Alerts.app ~/Library/Logs/capture-alerts.txt
 ```
 
 The store at `~/capture` is left; delete it yourself if you mean to.

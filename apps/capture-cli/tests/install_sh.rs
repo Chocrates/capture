@@ -21,8 +21,21 @@ impl Run {
     fn home(&self) -> PathBuf {
         self.root.join("home")
     }
+    /// What was run, the build left out: `cargo build -p capture-overlay`
+    /// names the overlay without running it.
     fn calls(&self) -> String {
-        std::fs::read_to_string(self.root.join("calls")).unwrap_or_default()
+        std::fs::read_to_string(self.root.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.starts_with("cargo "))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    }
+    fn built(&self) -> bool {
+        std::fs::read_to_string(self.root.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l.starts_with("cargo "))
     }
     fn agents(&self) -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(self.home().join("Library/LaunchAgents"))
@@ -54,6 +67,18 @@ fn install(name: &str, os: &str, args: &[&str]) -> Run {
 }
 
 fn install_with(name: &str, os: &str, args: &[&str], xcode: &str) -> Run {
+    install_from(name, os, args, xcode, None)
+}
+
+/// `script` is where install.sh runs from: the repository's copy by default,
+/// or one beside a download's binaries.
+fn install_from(
+    name: &str,
+    os: &str,
+    args: &[&str],
+    xcode: &str,
+    script: Option<fn(&Path, &Path) -> PathBuf>,
+) -> Run {
     let root = std::env::temp_dir().join(format!("capture-install-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let stubs = root.join("stubs");
@@ -69,21 +94,27 @@ fn install_with(name: &str, os: &str, args: &[&str], xcode: &str) -> Run {
     stub(&stubs, "launchctl", &format!("{record}\nexit 0"));
     stub(&stubs, "systemctl", &format!("{record}\nexit 0"));
     stub(&stubs, "sleep", "exit 0");
+    stub(&stubs, "xattr", &format!("{record}\nexit 0"));
     // Each program it installs records how it was called and succeeds.
     stub(&stubs, "program", &format!("{record}\nexit 0"));
     stub(
         &stubs,
         "cargo",
         &format!(
-            "mkdir -p '{r}'\nfor b in capture capture-overlay capture-syncd capture-desktop; do\n  \
+            "{record}\nmkdir -p '{r}'\nfor b in capture capture-overlay capture-syncd capture-desktop capture-alerts; do\n  \
              cp '{p}' '{r}'/$b\ndone\nexit 0",
             r = target.join("release").display(),
             p = stubs.join("program").display(),
         ),
     );
 
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let path = match script {
+        Some(make) => make(&root, &stubs.join("program")),
+        None => repo,
+    };
     let out = Command::new("sh")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"))
+        .arg(path)
         .args(args)
         .current_dir(&root)
         .env_clear()
@@ -117,6 +148,12 @@ fn a_plain_mac_install_starts_nothing() {
     assert!(calls.contains("capture init"), "{calls}");
     // The desktop app is always built on a Mac: WKWebView is always there.
     assert!(r.home().join(".local/bin/capture-desktop").exists());
+    // Built and bundled from source too, and put where apps go.
+    assert!(
+        r.home()
+            .join("Applications/Capture Alerts.app/Contents/Info.plist")
+            .exists()
+    );
     assert!(r.out.contains("~/.zshrc"), "{}", r.out);
     assert!(
         r.out.contains("nothing listens on the network"),
@@ -196,4 +233,62 @@ fn linux_writes_no_launchagents() {
     assert!(r.agents().is_empty());
     assert!(r.calls().contains("systemctl"), "{}", r.calls());
     assert!(!r.calls().contains("launchctl"), "{}", r.calls());
+}
+
+/// The download CI makes: install.sh beside built binaries and the app, no
+/// Cargo.toml. Its Mac may have no Rust and no Xcode tools.
+fn download(root: &Path, program: &Path) -> PathBuf {
+    let d = root.join("capture-macos-arm64");
+    std::fs::create_dir_all(d.join("Capture Alerts.app/Contents/MacOS")).unwrap();
+    for b in [
+        "capture",
+        "capture-overlay",
+        "capture-syncd",
+        "capture-desktop",
+    ] {
+        std::fs::copy(program, d.join(b)).unwrap();
+    }
+    std::fs::copy(
+        program,
+        d.join("Capture Alerts.app/Contents/MacOS/capture-alerts"),
+    )
+    .unwrap();
+    let script = d.join("install.sh");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"),
+        &script,
+    )
+    .unwrap();
+    script
+}
+
+#[test]
+fn a_download_installs_what_it_holds_and_builds_nothing() {
+    // No Xcode tools: a build would stop at the first check.
+    let r = install_from(
+        "download",
+        "Darwin",
+        &["--with-chord"],
+        "exit 2",
+        Some(download),
+    );
+    assert!(r.ok, "{}", r.out);
+    let calls = r.calls();
+    assert!(!r.built(), "built anyway");
+    assert!(calls.contains("xattr -dr com.apple.quarantine"), "{calls}");
+    for b in [
+        "capture",
+        "capture-overlay",
+        "capture-syncd",
+        "capture-desktop",
+    ] {
+        assert!(r.home().join(".local/bin").join(b).exists(), "{b}");
+    }
+    assert!(
+        r.home()
+            .join("Applications/Capture Alerts.app/Contents/MacOS/capture-alerts")
+            .exists()
+    );
+    assert!(calls.contains("capture init"), "{calls}");
+    assert!(calls.contains("capture-overlay --autostart"), "{calls}");
 }

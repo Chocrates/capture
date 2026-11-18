@@ -11,6 +11,7 @@ members = [
     "apps/capture-overlay",
     "apps/capture-syncd",
     "apps/capture-desktop",
+    "apps/capture-alerts",
 ]
 
 

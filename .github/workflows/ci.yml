@@ -62,16 +62,26 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p capture-cli -p capture-overlay -p capture-syncd -p capture-desktop
+      - run: cargo build --release -p capture-cli -p capture-overlay -p capture-syncd -p capture-desktop -p capture-alerts
       - name: Package
         # A tarball, because an artifact is a zip and a zip drops the
-        # executable bit.
+        # executable bit. install.sh goes in too: next to built binaries it
+        # installs them instead of building.
         run: |
           mkdir -p dist/capture-macos-arm64
           cp target/release/capture target/release/capture-overlay \
              target/release/capture-syncd target/release/capture-desktop \
              dist/capture-macos-arm64/
-          cp docs/macos-test.md docs/doctor-codes.md dist/capture-macos-arm64/
+          tools/mac-bundle target/release/capture-alerts dist/capture-macos-arm64
+          cp install.sh docs/macos-test.md docs/doctor-codes.md dist/capture-macos-arm64/
+      - name: The alert app runs and reads its settings
+        # Nothing is asked or posted (--settings). A runner has nobody to
+        # allow it, so a fail line is expected; a crash is not.
+        run: |
+          set +e
+          "dist/capture-macos-arm64/Capture Alerts.app/Contents/MacOS/capture-alerts" --settings
+          code=$?
+          [ "$code" -le 1 ] || { echo "capture-alerts crashed ($code)"; exit 1; }
           tar -C dist -czf capture-macos-arm64.tar.gz capture-macos-arm64
       - uses: actions/upload-artifact@v7
         with:

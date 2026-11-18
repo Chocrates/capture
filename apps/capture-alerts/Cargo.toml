@@ -1,0 +1,20 @@
+[package]
+name = "capture-alerts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# A Mac app of its own, so alerts go through Notification Center under
+# capture's name instead of Script Editor's (it-runs-on-a-mac D9). Built for
+# every target so the workspace stays one build; off a Mac it only says so.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = "0.3"
+block2 = "0.6"
+
+[[bin]]
+name = "capture-alerts"
+path = "src/main.rs"
