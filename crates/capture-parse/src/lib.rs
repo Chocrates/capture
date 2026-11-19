@@ -151,7 +151,11 @@ pub use token::{Class, Token, tokenize};
 /// sunset", after a day word or a recurrence head (alarms-at-sunrise-and-sunset
 /// D8). A backlog note that said "at sunset" becomes a sun event on the sweep,
 /// which is the intended reading; the sweep reports how many.
-pub const GRAMMAR_VERSION: u32 = 10;
+///
+/// Version 11 adds two task verbs, `reconcile` and `research`. A verb only
+/// offers "task?" in review and promotes nothing; captures parsed under 10 are
+/// read again so a backlog line that starts with one gets the offer too.
+pub const GRAMMAR_VERSION: u32 = 11;
 
 /// The hour a capture gave without am or pm, if it gave one.
 ///
@@ -400,6 +404,10 @@ pub const TASK_VERBS: &[Word] = &[
     w("submit"),
     w("file"),
     w("print"),
+    // Added 2026-11-19, asked for from real use: "reconcile the invoices",
+    // "research standing desks".
+    w("reconcile"),
+    w("research"),
 ];
 
 /// Below this, nothing is promoted — §3.1.5.
@@ -1155,7 +1163,7 @@ mod tests {
         );
         assert_eq!(
             TASK_VERBS.len(),
-            19,
+            21,
             "the list form introduces no task verb"
         );
         assert_eq!(REC_HEADS.len(), 2, "the list form introduces no head word");
